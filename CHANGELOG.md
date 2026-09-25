@@ -5,6 +5,19 @@ single source of truth in `src/discordinator/__init__.py` (`__version__`);
 `discordinator version` prints it along with the git revision so you can tell
 exactly what a machine has and whether it needs updating.
 
+## [0.3.0] - 2026-09-25
+### Added
+- `purge` CLI command and `purge_messages` MCP tool: on-request cleanup of old
+  messages with safe defaults (dry-run, only the bot's own messages, age floor).
+  Deleting others' messages needs the Manage Messages permission.
+- Read acknowledgements: `--ack` on `read`/`relay` and `ack` on
+  `get_new_messages` react ✅ to the newest message read (needs Add Reactions).
+- Discord client gained `delete_message` and `add_reaction`.
+
+### Notes
+- These features need extra bot permissions. Re-invite with `permissions=76864`
+  (adds Add Reactions + Manage Messages) to enable reactions and full purge.
+
 ## [0.2.0] - 2026-09-25
 ### Added
 - `relay` CLI command and `get_new_messages` MCP tool: return only messages
