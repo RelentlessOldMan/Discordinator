@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "discordinator": {
+      "command": "C:\\Program Files\\Python312\\python.exe",
+      "args": ["-m", "discordinator.mcp_server"],
+      "env": {}
+    }
+  }
+}
