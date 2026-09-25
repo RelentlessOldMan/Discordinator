@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -146,6 +147,22 @@ class DiscordClient:
         return self._request(
             "GET", f"/channels/{channel_id}/messages", params=params
         ).json()
+
+    def delete_message(self, channel_id: str, message_id: str) -> None:
+        """Delete a single message. Deleting the bot's OWN messages needs no
+        special permission; deleting others' messages requires Manage Messages."""
+        self._request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
+
+    def add_reaction(
+        self, channel_id: str, message_id: str, emoji: str = "✅"
+    ) -> None:
+        """Add a reaction (default ✅) as the bot. Requires Add Reactions
+        permission. Used to acknowledge 'read up to here'."""
+        encoded = quote(emoji, safe="")
+        self._request(
+            "PUT",
+            f"/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me",
+        )
 
     def get_channel(self, channel_id: str) -> dict[str, Any]:
         return self._request("GET", f"/channels/{channel_id}").json()

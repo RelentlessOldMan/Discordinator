@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import __version__, config
@@ -22,6 +24,31 @@ def _read_stdin_if_needed(text: Optional[str]) -> str:
         return text
     data = sys.stdin.read()
     return data.rstrip("\n")
+
+
+def _parse_duration(text: str) -> int:
+    """Parse '7d' / '24h' / '30m' / '90s' (bare number = days) into seconds."""
+    m = re.fullmatch(r"\s*(\d+)\s*([dhms]?)\s*", text.lower())
+    if not m:
+        raise config.ConfigError(
+            f"Invalid duration '{text}'. Use e.g. 7d, 24h, 30m, 90s."
+        )
+    n = int(m.group(1))
+    mult = {"d": 86400, "h": 3600, "m": 60, "s": 1, "": 86400}[m.group(2)]
+    return n * mult
+
+
+def _ack_newest(
+    client: DiscordClient, channel_id: str, messages: list[dict[str, Any]]
+) -> None:
+    """React ✅ to the newest of the given messages ('read up to here')."""
+    if not messages:
+        return
+    newest = max(messages, key=lambda m: int(m["id"]))
+    try:
+        client.add_reaction(channel_id, newest["id"])
+    except DiscordError as exc:
+        print(f"warning: could not add ✅ reaction: {exc}", file=sys.stderr)
 
 
 def _print_messages(messages: list[dict[str, Any]]) -> None:
@@ -73,7 +100,9 @@ def cmd_read(args: argparse.Namespace) -> int:
         raw = client.read_messages(
             channel_id, limit=args.limit, after=args.after, before=args.before
         )
-    messages = [simplify_message(m) for m in raw]
+        messages = [simplify_message(m) for m in raw]
+        if getattr(args, "ack", False):
+            _ack_newest(client, channel_id, messages)
     if not args.newest_first:
         messages.reverse()  # default: oldest -> newest (chronological)
 
@@ -127,6 +156,8 @@ def cmd_relay(args: argparse.Namespace) -> int:
     with DiscordClient(token) as client:
         if not args.watch:
             messages = _relay_poll(client, channel_id, own_label, args.include_self, args.limit)
+            if args.ack:
+                _ack_newest(client, channel_id, messages)
             if args.json:
                 print(json.dumps(messages, indent=2))
             elif not messages:
@@ -145,6 +176,8 @@ def cmd_relay(args: argparse.Namespace) -> int:
             while True:
                 messages = _relay_poll(client, channel_id, own_label, args.include_self, args.limit)
                 if messages:
+                    if args.ack:
+                        _ack_newest(client, channel_id, messages)
                     if args.json:
                         print(json.dumps(messages, indent=2), flush=True)
                     else:
@@ -153,6 +186,76 @@ def cmd_relay(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             print("\nstopped.")
             return 0
+
+
+def cmd_purge(args: argparse.Namespace) -> int:
+    cfg = config.load()
+    token = config.require_token(cfg)
+    channel_id = config.resolve_channel(cfg, args.channel)
+
+    cutoff = None
+    if args.older_than:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=_parse_duration(args.older_than))
+
+    with DiscordClient(token) as client:
+        my_id = client.whoami().get("id")
+
+        # Page back through history up to --limit messages.
+        collected: list[dict[str, Any]] = []
+        before: Optional[str] = None
+        while len(collected) < args.limit:
+            batch = client.read_messages(
+                channel_id, limit=min(100, args.limit - len(collected)), before=before
+            )
+            if not batch:
+                break
+            collected.extend(batch)
+            before = batch[-1]["id"]
+            if len(batch) < 100:
+                break
+
+        candidates: list[dict[str, Any]] = []
+        for raw in collected:
+            m = simplify_message(raw)
+            if not args.all and m["author_id"] != my_id:
+                continue  # default: only the bot's own messages
+            if cutoff is not None:
+                ts = datetime.fromisoformat(m["timestamp"]) if m["timestamp"] else None
+                if ts is None or ts > cutoff:
+                    continue  # not old enough
+            candidates.append(m)
+
+        if not candidates:
+            print("nothing to delete.")
+            return 0
+
+        scope = "all users'" if args.all else "the bot's own"
+        window = f" older than {args.older_than}" if args.older_than else ""
+        if args.dry_run:
+            print(f"[dry-run] would delete {len(candidates)} of {scope} message(s){window}:")
+            _print_messages(candidates)
+            return 0
+
+        if not args.yes:
+            if not sys.stdin.isatty():
+                return _err(
+                    f"{len(candidates)} {scope} message(s){window} match. "
+                    "Re-run with --yes to delete, or --dry-run to preview."
+                )
+            confirm = input(f"Delete {len(candidates)} {scope} message(s){window}? [y/N] ").strip().lower()
+            if confirm not in ("y", "yes"):
+                print("aborted.")
+                return 0
+
+        deleted = 0
+        for m in candidates:
+            try:
+                client.delete_message(channel_id, m["id"])
+                deleted += 1
+            except DiscordError as exc:
+                print(f"warning: could not delete {m['id']}: {exc}", file=sys.stderr)
+        print(f"deleted {deleted} message(s).")
+    return 0
 
 
 def cmd_channels(args: argparse.Namespace) -> int:
@@ -289,6 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--after", help="only messages after this message id")
     rp.add_argument("--before", help="only messages before this message id")
     rp.add_argument("--newest-first", action="store_true", help="show newest first (default is chronological)")
+    rp.add_argument("--ack", action="store_true", help="react ✅ to the newest message read")
     rp.add_argument("--json", action="store_true", help="print messages as JSON")
     rp.set_defaults(func=cmd_read)
 
@@ -302,8 +406,18 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--include-self", action="store_true", help="also show your own messages")
     lp.add_argument("--reset", action="store_true", help="forget the saved position and re-show recent messages")
     lp.add_argument("-n", "--limit", type=int, default=20, help="how many recent messages to show on first run (default 20)")
+    lp.add_argument("--ack", action="store_true", help="react ✅ to the newest message from the other side")
     lp.add_argument("--json", action="store_true", help="print messages as JSON")
     lp.set_defaults(func=cmd_relay)
+
+    pp = sub.add_parser("purge", help="delete old messages (on request; safe defaults)")
+    pp.add_argument("-c", "--channel", help="channel name (from config) or raw id")
+    pp.add_argument("--older-than", help="only delete messages older than this (e.g. 7d, 24h, 30m)")
+    pp.add_argument("--all", action="store_true", help="delete everyone's messages, not just the bot's (needs Manage Messages)")
+    pp.add_argument("-n", "--limit", type=int, default=200, help="how many recent messages to scan (default 200)")
+    pp.add_argument("--dry-run", action="store_true", help="show what would be deleted without deleting")
+    pp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    pp.set_defaults(func=cmd_purge)
 
     cp = sub.add_parser("channels", help="list configured channels")
     cp.add_argument("--remote", action="store_true", help="list text channels from a guild via the API")

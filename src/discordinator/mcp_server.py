@@ -99,6 +99,7 @@ def get_new_messages(
     channel: Optional[str] = None,
     include_self: bool = False,
     limit: int = 50,
+    ack: bool = False,
 ) -> list[dict[str, Any]]:
     """Get only NEW messages since the last time this tool was called for the
     channel — the relay primitive for two-way session handoff.
@@ -114,6 +115,8 @@ def get_new_messages(
         include_self: If true, also include your own machine's messages.
         limit: How many recent messages to return on the FIRST call (before a
             cursor exists). Subsequent calls return everything new since.
+        ack: If true, react ✅ to the newest returned message so the other side
+            can see it was read (needs Add Reactions permission).
 
     Returns simplified message objects in chronological order.
     """
@@ -128,16 +131,89 @@ def get_new_messages(
             raw = client.read_messages(channel_id, limit=100, after=cursor)
         else:
             raw = client.read_messages(channel_id, limit=capped)
-    messages = [simplify_message(m) for m in raw]
-    messages.reverse()
+        messages = [simplify_message(m) for m in raw]
+        messages.reverse()
 
-    if messages:
-        config.set_cursor(channel_id, messages[-1]["id"])
+        if messages:
+            config.set_cursor(channel_id, messages[-1]["id"])
 
-    if not include_self and own_label:
-        prefix = f"[{own_label}]"
-        messages = [m for m in messages if not m["content"].startswith(prefix)]
+        if not include_self and own_label:
+            prefix = f"[{own_label}]"
+            messages = [m for m in messages if not m["content"].startswith(prefix)]
+
+        if ack and messages:
+            newest = max(messages, key=lambda m: int(m["id"]))
+            client.add_reaction(channel_id, newest["id"])
     return messages
+
+
+@mcp.tool()
+def purge_messages(
+    channel: Optional[str] = None,
+    older_than_days: float = 7.0,
+    only_mine: bool = True,
+    scan_limit: int = 200,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Delete old messages from a channel (housekeeping; destructive).
+
+    Defaults are safe: dry_run=True (nothing deleted, just reports what would be),
+    only_mine=True (only the bot's own messages), and a 7-day age floor. Set
+    dry_run=False to actually delete. Deleting other users' messages
+    (only_mine=False) requires the Manage Messages permission.
+
+    Args:
+        channel: Configured channel name or raw id. Defaults to the default channel.
+        older_than_days: Only affect messages older than this many days.
+        only_mine: If true (default), only delete the bot's own messages.
+        scan_limit: How many recent messages to scan.
+        dry_run: If true (default), report but do not delete.
+
+    Returns a summary dict with counts and (on dry-run) the matched message ids.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    cfg = config.load()
+    channel_id = config.resolve_channel(cfg, channel)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+
+    with _client() as client:
+        my_id = client.whoami().get("id")
+        collected: list[dict[str, Any]] = []
+        before: Optional[str] = None
+        while len(collected) < scan_limit:
+            batch = client.read_messages(
+                channel_id, limit=min(100, scan_limit - len(collected)), before=before
+            )
+            if not batch:
+                break
+            collected.extend(batch)
+            before = batch[-1]["id"]
+            if len(batch) < 100:
+                break
+
+        matched: list[dict[str, Any]] = []
+        for raw in collected:
+            m = simplify_message(raw)
+            if only_mine and m["author_id"] != my_id:
+                continue
+            ts = datetime.fromisoformat(m["timestamp"]) if m["timestamp"] else None
+            if ts is None or ts > cutoff:
+                continue
+            matched.append(m)
+
+        if dry_run:
+            return {
+                "dry_run": True,
+                "would_delete": len(matched),
+                "message_ids": [m["id"] for m in matched],
+            }
+
+        deleted = 0
+        for m in matched:
+            client.delete_message(channel_id, m["id"])
+            deleted += 1
+        return {"dry_run": False, "deleted": deleted}
 
 
 @mcp.tool()

@@ -31,10 +31,13 @@ different machines through a private Discord server.
 3. Invite the bot to your private server. Under **OAuth2 → URL Generator**:
    - Scopes: `bot`
    - Bot Permissions: **View Channels**, **Send Messages**, **Read Message History**
+     (`permissions=68608`). To also use ✅ read-acks add **Add Reactions**, and for
+     `purge --all` add **Manage Messages** → use `permissions=76864`.
    - Open the generated URL and add the bot to your server.
 
 That's it — no privileged intents are needed. Reading history over REST works
-with just the channel permissions above.
+with just the channel permissions above. Note: deleting the bot's *own* messages
+(`purge`, the default) needs no extra permission; only `--all` does.
 
 ### Getting channel ids
 
@@ -112,6 +115,16 @@ discordinator channels --remote --guild <GUILD_ID>
 
 # Version, file locations, and git revision (what you have / when to update)
 discordinator version
+
+# Read AND acknowledge (react ✅ to the newest message so the other side sees it)
+discordinator relay --ack
+discordinator read --ack
+
+# PURGE old messages (on request; safe by default). Preview first:
+discordinator purge --channel test --older-than 7d --dry-run
+discordinator purge --channel test --older-than 7d          # prompts, then deletes
+discordinator purge --channel test --older-than 7d --yes    # no prompt
+discordinator purge --channel test --older-than 7d --all    # everyone's (needs Manage Messages)
 ```
 
 ### Notes on messages
@@ -153,7 +166,8 @@ block — the server reads the same config file.
 |------|---------|
 | `send_message(text, channel?, label?)` | Send a message (long text auto-split). |
 | `read_messages(channel?, limit?, after?, before?, newest_first?)` | Read recent messages. |
-| `get_new_messages(channel?, include_self?, limit?)` | **Relay primitive** — only messages new since the last call (advances a per-channel cursor), with your own messages filtered out. Ideal for a Claude session to pull just what the other side said. |
+| `get_new_messages(channel?, include_self?, limit?, ack?)` | **Relay primitive** — only messages new since the last call (advances a per-channel cursor), with your own messages filtered out. `ack` reacts ✅ to the newest. |
+| `purge_messages(channel?, older_than_days?, only_mine?, scan_limit?, dry_run?)` | Delete old messages. Safe defaults (dry-run, only the bot's own, 7-day floor). |
 | `list_channels()` | Show configured channel names + default. |
 | `whoami()` | Verify the token / show the bot identity. |
 

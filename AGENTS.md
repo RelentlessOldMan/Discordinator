@@ -94,11 +94,19 @@ Confirm inside Claude Code with `/mcp`.
   every chunk).
 - `read_messages(channel?, limit?, after?, before?, newest_first?)` — read recent
   (includes plain, untagged messages a human typed directly in the channel).
-- `get_new_messages(channel?, include_self?, limit?)` — **relay primitive**: only
-  messages new since the last call (advances a per-channel cursor), your own
-  machine's messages filtered out. Use this to pull what the OTHER side said.
+- `get_new_messages(channel?, include_self?, limit?, ack?)` — **relay primitive**:
+  only messages new since the last call (advances a per-channel cursor), your own
+  machine's messages filtered out. `ack=true` reacts ✅ to the newest.
+- `purge_messages(channel?, older_than_days?, only_mine?, scan_limit?, dry_run?)` —
+  delete old messages. Safe defaults: dry_run=True, only_mine=True, 7-day floor.
 - `list_channels()` — configured channel names + default.
 - `whoami()` — verify token / bot identity.
+
+## Extra permissions (reactions / purge)
+Base invite is `permissions=68608` (View + Send + Read History). For ✅ read-acks
+add Add Reactions, and for `purge --all` (others' messages) add Manage Messages →
+re-invite with `permissions=76864`. Deleting the bot's OWN messages needs nothing
+extra.
 
 ## Reading human messages
 If a person just types a message directly in the channel (no `[label]` tag),
