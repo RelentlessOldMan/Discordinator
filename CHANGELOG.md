@@ -5,6 +5,11 @@ single source of truth in `src/discordinator/__init__.py` (`__version__`);
 `discordinator version` prints it along with the git revision so you can tell
 exactly what a machine has and whether it needs updating.
 
+## [0.4.0] - 2026-09-25
+### Added
+- `DISCORDINATOR_CHANNEL` env override for the default channel, so a per-project
+  `.mcp.json` can pin each project to its own channel without code changes.
+
 ## [0.3.0] - 2026-09-25
 ### Added
 - `purge` CLI command and `purge_messages` MCP tool: on-request cleanup of old

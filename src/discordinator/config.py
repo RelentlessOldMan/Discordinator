@@ -110,6 +110,9 @@ def load() -> dict[str, Any]:
     env_label = os.environ.get("DISCORDINATOR_LABEL")
     if env_label:
         data["machine_label"] = env_label
+    env_channel = os.environ.get("DISCORDINATOR_CHANNEL")
+    if env_channel:
+        data["default_channel"] = env_channel
 
     return data
 
