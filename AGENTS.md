@@ -81,6 +81,16 @@ It pins a fixed Python interpreter so it works regardless of the project's venv.
 Confirm the interpreter path in that file matches this machine
 (`python -c "import sys; print(sys.executable)"`).
 
+To make a project default to its own channel, set `DISCORDINATOR_CHANNEL` in that
+`.mcp.json`'s `env` block (no token needed there — it comes from the home config):
+```json
+{ "mcpServers": { "discordinator": {
+    "command": "C:\\Program Files\\Python312\\python.exe",
+    "args": ["-m", "discordinator.mcp_server"],
+    "env": { "DISCORDINATOR_CHANNEL": "code-compass" }
+}}}
+```
+
 **Or via CLI** (`-s user` = all projects; omit for current project only):
 ```powershell
 claude mcp add discordinator -- "<python.exe>" -m discordinator.mcp_server
