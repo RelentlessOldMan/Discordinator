@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import __version__, config
+from . import __version__, config, use_system_certs
 from .discord_client import DiscordClient, DiscordError, simplify_message
 
 
@@ -478,6 +478,7 @@ def _configure_stdio() -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    use_system_certs()
     _configure_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)

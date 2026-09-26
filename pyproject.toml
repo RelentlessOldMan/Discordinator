@@ -12,6 +12,7 @@ authors = [{ name = "Discordinator" }]
 dependencies = [
     "httpx>=0.27",
     "mcp>=2",
+    "truststore>=0.9",
 ]
 
 [project.scripts]

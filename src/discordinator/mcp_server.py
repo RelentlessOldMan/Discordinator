@@ -23,7 +23,7 @@ from typing import Any, Optional
 
 from mcp.server.mcpserver import MCPServer
 
-from . import config
+from . import config, use_system_certs
 from .discord_client import DiscordClient, DiscordError, simplify_message
 
 # Keep the HTTP client quiet: it logs an INFO line per request to stderr, which
@@ -261,6 +261,7 @@ def whoami() -> dict[str, Any]:
 
 
 def main() -> None:
+    use_system_certs()
     mcp.run()
 
 

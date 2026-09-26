@@ -5,6 +5,16 @@ single source of truth in `src/discordinator/__init__.py` (`__version__`);
 `discordinator version` prints it along with the git revision so you can tell
 exactly what a machine has and whether it needs updating.
 
+## [0.7.0] - 2026-09-26
+### Changed
+- TLS is now verified against the **OS trust store** (via `truststore`, injected
+  once at each entry point's `main()`). This lets corporate TLS-inspection CAs
+  (Netskope/Zscaler etc., already trusted by the OS/browser) validate without
+  setting `SSL_CERT_FILE`. Full verification is kept — this is NOT `verify=False`.
+  Falls back to Python's bundled CA list if `truststore` is unavailable, and
+  `SSL_CERT_FILE` still works as an override.
+- `truststore>=0.9` is now a direct dependency (was only transitive via `mcp`).
+
 ## [0.6.0] - 2026-09-26
 ### Changed
 - `ack_on_read` now defaults to **True** — a fresh install auto-posts ✅ read-acks
