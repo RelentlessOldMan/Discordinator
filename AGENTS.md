@@ -156,6 +156,12 @@ per-channel rate limit (~5 messages / 5s; the client auto-retries on 429).
   venvs.
 - **UTF-8** — the CLI forces UTF-8 output so Unicode doesn't crash the Windows
   console.
+- **Corporate TLS proxy** — TLS is verified against the OS trust store (via
+  `truststore`, injected at startup), so TLS-inspection CAs (Netskope/Zscaler)
+  that the OS/browser already trusts work with no CA-bundle path. No
+  `SSL_CERT_FILE` needed; it still overrides if set. Full verification is kept
+  (not `verify=False`). If you still see `CERTIFICATE_VERIFY_FAILED`, the
+  inspecting CA isn't in the OS store — have IT install it there.
 
 ## Source layout
 `src/discordinator/`: `config.py` (config + relay cursor state + atomic writes),
