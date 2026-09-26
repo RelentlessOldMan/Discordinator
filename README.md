@@ -30,14 +30,16 @@ different machines through a private Discord server.
 2. Open the app → **Bot** → **Reset Token** → copy the token. This is your `DISCORD_BOT_TOKEN`.
 3. Invite the bot to your private server. Under **OAuth2 → URL Generator**:
    - Scopes: `bot`
-   - Bot Permissions: **View Channels**, **Send Messages**, **Read Message History**
-     (`permissions=68608`). To also use ✅ read-acks add **Add Reactions**, and for
-     `purge --all` add **Manage Messages** → use `permissions=76864`.
+   - Bot Permissions: **View Channels**, **Send Messages**, **Read Message
+     History**, **Add Reactions** (`permissions=68672`). Add Reactions powers the
+     ✅ read-acks, which are **on by default**. For `purge --all` also add
+     **Manage Messages** → `permissions=76864`.
    - Open the generated URL and add the bot to your server.
 
 That's it — no privileged intents are needed. Reading history over REST works
-with just the channel permissions above. Note: deleting the bot's *own* messages
-(`purge`, the default) needs no extra permission; only `--all` does.
+with just the channel permissions above. Read-acks degrade gracefully: if the bot
+lacks Add Reactions, reads still work, they just skip the ✅. Deleting the bot's
+*own* messages (`purge`, the default) needs no extra permission; only `--all` does.
 
 ### Getting channel ids
 
