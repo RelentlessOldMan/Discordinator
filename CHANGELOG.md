@@ -8,6 +8,11 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.1] - 2026-09-26
+Add release helper and git version tags
+- release.py bumps version, updates CHANGELOG, commits, tags vX.Y.Z, pushes
+- v1.0.0 tagged retroactively
+
 ## [1.0.0] - 2026-09-26
 First stable release; adopts the `1.0.x` scheme. Same code as the final `0.x`.
 ### Changed
