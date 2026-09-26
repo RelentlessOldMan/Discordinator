@@ -38,6 +38,12 @@ def _parse_duration(text: str) -> int:
     return n * mult
 
 
+def _resolve_ack(args: argparse.Namespace, cfg: dict[str, Any]) -> bool:
+    """--ack / --no-ack win; otherwise fall back to the ack_on_read config."""
+    val = getattr(args, "ack", None)
+    return val if val is not None else bool(cfg.get("ack_on_read"))
+
+
 def _ack_newest(
     client: DiscordClient, channel_id: str, messages: list[dict[str, Any]]
 ) -> None:
@@ -101,7 +107,7 @@ def cmd_read(args: argparse.Namespace) -> int:
             channel_id, limit=args.limit, after=args.after, before=args.before
         )
         messages = [simplify_message(m) for m in raw]
-        if getattr(args, "ack", False):
+        if _resolve_ack(args, cfg):
             _ack_newest(client, channel_id, messages)
     if not args.newest_first:
         messages.reverse()  # default: oldest -> newest (chronological)
@@ -149,6 +155,7 @@ def cmd_relay(args: argparse.Namespace) -> int:
     channel_id = config.resolve_channel(cfg, args.channel)
     own_label = cfg.get("machine_label")
     label_name = args.channel or cfg.get("default_channel")
+    do_ack = _resolve_ack(args, cfg)
 
     if args.reset:
         config.clear_cursor(channel_id)
@@ -156,7 +163,7 @@ def cmd_relay(args: argparse.Namespace) -> int:
     with DiscordClient(token) as client:
         if not args.watch:
             messages = _relay_poll(client, channel_id, own_label, args.include_self, args.limit)
-            if args.ack:
+            if do_ack:
                 _ack_newest(client, channel_id, messages)
             if args.json:
                 print(json.dumps(messages, indent=2))
@@ -176,7 +183,7 @@ def cmd_relay(args: argparse.Namespace) -> int:
             while True:
                 messages = _relay_poll(client, channel_id, own_label, args.include_self, args.limit)
                 if messages:
-                    if args.ack:
+                    if do_ack:
                         _ack_newest(client, channel_id, messages)
                     if args.json:
                         print(json.dumps(messages, indent=2), flush=True)
@@ -355,6 +362,11 @@ def cmd_config(args: argparse.Namespace) -> int:
         cfg["machine_label"] = args.label
         config.save(cfg)
         print(f"machine label set to '{args.label}'")
+    elif action == "set-ack":
+        on = args.state.strip().lower() in ("on", "true", "1", "yes")
+        cfg["ack_on_read"] = on
+        config.save(cfg)
+        print(f"ack_on_read set to {on} (✅ auto-reaction on reads {'enabled' if on else 'disabled'})")
     elif action == "path":
         print(config.config_path())
     elif action == "show":
@@ -392,7 +404,8 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--after", help="only messages after this message id")
     rp.add_argument("--before", help="only messages before this message id")
     rp.add_argument("--newest-first", action="store_true", help="show newest first (default is chronological)")
-    rp.add_argument("--ack", action="store_true", help="react ✅ to the newest message read")
+    rp.add_argument("--ack", dest="ack", action="store_const", const=True, default=None, help="react ✅ to the newest message read")
+    rp.add_argument("--no-ack", dest="ack", action="store_const", const=False, help="do not react (overrides ack_on_read config)")
     rp.add_argument("--json", action="store_true", help="print messages as JSON")
     rp.set_defaults(func=cmd_read)
 
@@ -406,7 +419,8 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--include-self", action="store_true", help="also show your own messages")
     lp.add_argument("--reset", action="store_true", help="forget the saved position and re-show recent messages")
     lp.add_argument("-n", "--limit", type=int, default=20, help="how many recent messages to show on first run (default 20)")
-    lp.add_argument("--ack", action="store_true", help="react ✅ to the newest message from the other side")
+    lp.add_argument("--ack", dest="ack", action="store_const", const=True, default=None, help="react ✅ to the newest message from the other side")
+    lp.add_argument("--no-ack", dest="ack", action="store_const", const=False, help="do not react (overrides ack_on_read config)")
     lp.add_argument("--json", action="store_true", help="print messages as JSON")
     lp.set_defaults(func=cmd_relay)
 
@@ -444,6 +458,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("name")
     x = csub.add_parser("set-label", help="set this machine's message label")
     x.add_argument("label")
+    x = csub.add_parser("set-ack", help="auto-react ✅ to the newest message on every read (on/off)")
+    x.add_argument("state", choices=["on", "off"])
     csub.add_parser("show", help="print config (token redacted)")
     csub.add_parser("path", help="print the config file path")
     cfgp.set_defaults(func=cmd_config)

@@ -70,6 +70,7 @@ def read_messages(
     after: Optional[str] = None,
     before: Optional[str] = None,
     newest_first: bool = False,
+    ack: Optional[bool] = None,
 ) -> list[dict[str, Any]]:
     """Read recent messages from a Discord channel.
 
@@ -80,15 +81,22 @@ def read_messages(
         after: Only return messages after this message id (for polling new ones).
         before: Only return messages before this message id (for paging back).
         newest_first: If false (default), messages are returned oldest-first.
+        ack: React ✅ to the newest message read (needs Add Reactions). Defaults
+            to the configured ack_on_read setting when omitted.
 
     Returns a list of simplified message objects with id, author, timestamp,
     content and attachment urls.
     """
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
+    if ack is None:
+        ack = bool(cfg.get("ack_on_read"))
     with _client() as client:
         raw = client.read_messages(channel_id, limit=limit, after=after, before=before)
-    messages = [simplify_message(m) for m in raw]
+        messages = [simplify_message(m) for m in raw]
+        if ack and messages:
+            newest = max(messages, key=lambda m: int(m["id"]))
+            client.add_reaction(channel_id, newest["id"])
     if not newest_first:
         messages.reverse()
     return messages
@@ -99,7 +107,7 @@ def get_new_messages(
     channel: Optional[str] = None,
     include_self: bool = False,
     limit: int = 50,
-    ack: bool = False,
+    ack: Optional[bool] = None,
 ) -> list[dict[str, Any]]:
     """Get only NEW messages since the last time this tool was called for the
     channel — the relay primitive for two-way session handoff.
@@ -115,14 +123,17 @@ def get_new_messages(
         include_self: If true, also include your own machine's messages.
         limit: How many recent messages to return on the FIRST call (before a
             cursor exists). Subsequent calls return everything new since.
-        ack: If true, react ✅ to the newest returned message so the other side
-            can see it was read (needs Add Reactions permission).
+        ack: React ✅ to the newest returned message so the other side can see
+            it was read (needs Add Reactions permission). Defaults to the
+            configured ack_on_read setting when omitted.
 
     Returns simplified message objects in chronological order.
     """
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
     own_label = cfg.get("machine_label")
+    if ack is None:
+        ack = bool(cfg.get("ack_on_read"))
     cursor = config.get_cursor(channel_id)
 
     capped = max(1, min(int(limit), 100))
