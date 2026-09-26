@@ -43,8 +43,9 @@ class ConfigError(Exception):
 DEFAULTS: dict[str, Any] = {
     "token": None,
     "default_channel": None,
-    "channels": {},        # friendly name -> channel id (string)
+    "channels": {},         # friendly name -> channel id (string)
     "machine_label": None,  # optional tag prefixed to outgoing messages
+    "ack_on_read": False,   # auto-react ✅ to the newest message on every read
 }
 
 
@@ -113,6 +114,9 @@ def load() -> dict[str, Any]:
     env_channel = os.environ.get("DISCORDINATOR_CHANNEL")
     if env_channel:
         data["default_channel"] = env_channel
+    env_ack = os.environ.get("DISCORDINATOR_ACK")
+    if env_ack is not None:
+        data["ack_on_read"] = env_ack.strip().lower() in ("1", "true", "yes", "on")
 
     return data
 

@@ -5,6 +5,17 @@ single source of truth in `src/discordinator/__init__.py` (`__version__`);
 `discordinator version` prints it along with the git revision so you can tell
 exactly what a machine has and whether it needs updating.
 
+## [0.5.0] - 2026-09-25
+### Added
+- `ack_on_read` config setting (+ `DISCORDINATOR_ACK` env) to auto-react ✅ to the
+  newest message on EVERY read, so acks happen without passing a flag each time.
+  Set with `discordinator config set-ack on`.
+- `read_messages` MCP tool now supports `ack`; `read`/`relay` CLI gained `--no-ack`.
+
+### Changed
+- `--ack` / MCP `ack` are now tri-state: explicit flag wins, otherwise the
+  `ack_on_read` config decides. This is why plain reads weren't posting a ✅.
+
 ## [0.4.0] - 2026-09-25
 ### Added
 - `DISCORDINATOR_CHANNEL` env override for the default channel, so a per-project
