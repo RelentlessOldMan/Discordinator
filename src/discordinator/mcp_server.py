@@ -24,7 +24,7 @@ from typing import Any, Optional
 from mcp.server.mcpserver import MCPServer
 
 from . import config
-from .discord_client import DiscordClient, simplify_message
+from .discord_client import DiscordClient, DiscordError, simplify_message
 
 # Keep the HTTP client quiet: it logs an INFO line per request to stderr, which
 # is noise for a stdio MCP server (stdout carries the JSON-RPC protocol).
@@ -38,6 +38,18 @@ def _client() -> DiscordClient:
     cfg = config.load()
     token = config.require_token(cfg)
     return DiscordClient(token)
+
+
+def _try_ack(client: DiscordClient, channel_id: str, messages: list[dict[str, Any]]) -> None:
+    """React ✅ to the newest message. Best-effort: never fail a read because the
+    bot lacks the Add Reactions permission."""
+    if not messages:
+        return
+    newest = max(messages, key=lambda m: int(m["id"]))
+    try:
+        client.add_reaction(channel_id, newest["id"])
+    except DiscordError:
+        pass
 
 
 @mcp.tool()
@@ -94,9 +106,8 @@ def read_messages(
     with _client() as client:
         raw = client.read_messages(channel_id, limit=limit, after=after, before=before)
         messages = [simplify_message(m) for m in raw]
-        if ack and messages:
-            newest = max(messages, key=lambda m: int(m["id"]))
-            client.add_reaction(channel_id, newest["id"])
+        if ack:
+            _try_ack(client, channel_id, messages)
     if not newest_first:
         messages.reverse()
     return messages
@@ -152,9 +163,8 @@ def get_new_messages(
             prefix = f"[{own_label}]"
             messages = [m for m in messages if not m["content"].startswith(prefix)]
 
-        if ack and messages:
-            newest = max(messages, key=lambda m: int(m["id"]))
-            client.add_reaction(channel_id, newest["id"])
+        if ack:
+            _try_ack(client, channel_id, messages)
     return messages
 
 

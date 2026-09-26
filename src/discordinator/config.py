@@ -45,7 +45,7 @@ DEFAULTS: dict[str, Any] = {
     "default_channel": None,
     "channels": {},         # friendly name -> channel id (string)
     "machine_label": None,  # optional tag prefixed to outgoing messages
-    "ack_on_read": False,   # auto-react ✅ to the newest message on every read
+    "ack_on_read": True,    # auto-react ✅ to the newest message on every read
 }
 
 

@@ -46,7 +46,7 @@ python -m pip install -e .
    **Reset Token** → copy it.
 2. Invite it to your server (OAuth2 → URL Generator → scope `bot` → permissions:
    View Channels, Send Messages, Read Message History), or use:
-   `https://discord.com/api/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=68608`
+   `https://discord.com/api/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=68672`
 3. No privileged intents needed — reading history over REST only needs the
    channel permissions above.
 
@@ -112,11 +112,12 @@ Confirm inside Claude Code with `/mcp`.
 - `list_channels()` — configured channel names + default.
 - `whoami()` — verify token / bot identity.
 
-## Extra permissions (reactions / purge)
-Base invite is `permissions=68608` (View + Send + Read History). For ✅ read-acks
-add Add Reactions, and for `purge --all` (others' messages) add Manage Messages →
-re-invite with `permissions=76864`. Deleting the bot's OWN messages needs nothing
-extra.
+## Permissions
+Recommended invite: `permissions=68672` (View + Send + Read History + Add
+Reactions). Add Reactions powers the ✅ read-acks, which are ON by default
+(`ack_on_read`); without it, reads still work but skip the ✅. For `purge --all`
+(others' messages) also add Manage Messages → `permissions=76864`. Deleting the
+bot's OWN messages needs nothing extra.
 
 ## Reading human messages
 If a person just types a message directly in the channel (no `[label]` tag),

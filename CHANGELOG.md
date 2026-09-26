@@ -5,6 +5,15 @@ single source of truth in `src/discordinator/__init__.py` (`__version__`);
 `discordinator version` prints it along with the git revision so you can tell
 exactly what a machine has and whether it needs updating.
 
+## [0.6.0] - 2026-09-26
+### Changed
+- `ack_on_read` now defaults to **True** — a fresh install auto-posts ✅ read-acks
+  with no extra config. Disable with `config set-ack off` / `DISCORDINATOR_ACK=0`.
+- Recommended invite bumped to `permissions=68672` (adds Add Reactions).
+### Fixed
+- MCP read-ack is now best-effort: a missing Add Reactions permission no longer
+  fails the read (it just skips the ✅). Important now that acks are default-on.
+
 ## [0.5.0] - 2026-09-25
 ### Added
 - `ack_on_read` config setting (+ `DISCORDINATOR_ACK` env) to auto-react ✅ to the
