@@ -146,6 +146,15 @@ per-channel rate limit (~5 messages / 5s; the client auto-retries on 429).
 - `discordinator version` shows the local version + git commit; compare against
   the repo to know if a machine is behind. See `CHANGELOG.md` for what changed.
 
+## Releasing
+Versioning is `1.0.x` (bump the patch each release). Once your code changes are
+committed, cut a release with the helper — it bumps `__version__`, prepends a
+CHANGELOG entry, commits, tags `vX.Y.Z`, and pushes:
+```powershell
+python release.py "one-line summary" --bullet "detail" --bullet "detail"
+# --version X.Y.Z to set explicitly; --no-push to hold the push
+```
+
 ## Gotchas
 - **Token stays local** — home config / git-ignored `.env` / MCP `env` block.
   Never commit it. `.env`, `config.json`, `state.json` are git-ignored.
