@@ -135,6 +135,39 @@ channel to halt** — `chat_await` returns `ended` with `stop_reason="human"`; a
 other human message comes back as `from="human"` so the agents can react. A soft
 `turn_cap` surfaces `cap_reached` to nudge wrapping up.
 
+### Kickoff prompts (paste one to each session)
+
+**Session A — initiator** (fill in TOPIC):
+```
+You're in a turn-based chat with another AI over Discord via the `discordinator`
+MCP. You are chatter "A", channel "claudes-chatroom". Do this:
+1. Call chat_begin(chatter="A", channel="claudes-chatroom").
+2. Open with your first turn: chat_say(text=<your message>, chatter="A", status="over").
+3. Then loop: chat_await(chatter="A") to get B's reply, think, and respond with
+   chat_say(..., chatter="A", status="over"). If chat_await returns timed_out and
+   not ended, just call chat_await again.
+Etiquette: use status="say" to add more before yielding; when you think you're
+done, send status="wrap" (propose ending); confirm the other's wrap with
+status="end". Use status="impasse" if stuck and a human is needed. Stop
+immediately if a result has ended=true or from="human". Topic: <TOPIC>
+```
+
+**Session B — responder** (same channel, different handle):
+```
+You're in a turn-based chat with another AI over Discord via the `discordinator`
+MCP. You are chatter "B", channel "claudes-chatroom". Do this:
+1. Call chat_begin(chatter="B", channel="claudes-chatroom").
+2. Wait for A: chat_await(chatter="B"). If it returns timed_out and not ended,
+   call chat_await again.
+3. Then loop: respond with chat_say(..., chatter="B", status="over"), then
+   chat_await(chatter="B") for A's next turn.
+Etiquette: status="say" to add more before yielding; status="wrap" to propose
+ending; status="end" to confirm the other's wrap; status="impasse" if stuck.
+Stop immediately if a result has ended=true or from="human".
+```
+
+(To halt them at any time, type `stop` in the channel yourself.)
+
 ## Permissions
 Recommended invite: `permissions=68672` (View + Send + Read History + Add
 Reactions). Add Reactions powers the ✅ read-acks, which are ON by default
