@@ -131,6 +131,13 @@ class DiscordClient:
             sent.append(resp.json())
         return sent
 
+    def post(self, channel_id: str, content: str) -> dict[str, Any]:
+        """Post a single message verbatim (no chunking, no label). Used by chat
+        mode, which manages its own per-message headers and chunking."""
+        return self._request(
+            "POST", f"/channels/{channel_id}/messages", json={"content": content}
+        ).json()
+
     def read_messages(
         self,
         channel_id: str,

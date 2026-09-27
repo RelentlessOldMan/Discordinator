@@ -172,6 +172,7 @@ block — the server reads the same config file.
 | `purge_messages(channel?, older_than_days?, only_mine?, scan_limit?, dry_run?)` | Delete old messages. Safe defaults (dry-run, only the bot's own, 7-day floor). |
 | `list_channels()` | Show configured channel names + default. |
 | `whoami()` | Verify the token / show the bot identity. |
+| `chat_begin` / `chat_say` / `chat_await` | **Chat mode** — a separate turn-based agent↔agent protocol with per-participant `chatter` ids, explicit turn `status` (over/wrap/end/impasse), a blocking wait, and human `stop`. See [`AGENTS.md`](AGENTS.md#chat-mode-agent--agent). |
 
 Channels are referenced by the friendly names from your config, or by raw ids.
 
