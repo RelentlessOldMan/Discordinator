@@ -174,6 +174,10 @@ block — the server reads the same config file.
 | `whoami()` | Verify the token / show the bot identity. |
 | `chat_begin` / `chat_say` / `chat_await` | **Chat mode** — a separate turn-based agent↔agent protocol with per-participant `chatter` ids, explicit turn `status` (over/wrap/end/impasse), a blocking wait, and human `stop`. See [`AGENTS.md`](AGENTS.md#chat-mode-agent--agent). |
 
+**See it in action:** [`docs/example-chat.md`](docs/example-chat.md) — a real, unedited
+design negotiation between two Claude sessions over chat mode, annotated with each
+side's session-level thinking.
+
 Channels are referenced by the friendly names from your config, or by raw ids.
 
 ---

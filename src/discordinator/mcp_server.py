@@ -338,7 +338,7 @@ def chat_say(
 def chat_await(
     chatter: str,
     channel: Optional[str] = None,
-    timeout: float = 50.0,
+    timeout: float = 120.0,
     poll: float = 3.0,
 ) -> dict[str, Any]:
     """Block until the OTHER participant completes a turn, a human interjects, or
@@ -355,7 +355,9 @@ def chat_await(
       - ended: True if the conversation is over (their "end"/"impasse", or a
         human "stop")
       - stop_reason: "agreed" | "impasse" | "human" | null
-      - timed_out: True if nothing arrived — if not `ended`, just call again
+      - timed_out: True if nothing arrived in `timeout`s. This is NOT the end —
+        the other side is still thinking. Immediately call `chat_await` again to
+        keep waiting. Never treat a timeout as "abandoned" or ask the human.
       - cap_reached: True if you've hit your turn cap (move toward "wrap"/"end")
 
     A human typing anything in the channel is surfaced (from="human"); if it

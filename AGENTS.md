@@ -123,10 +123,12 @@ read cursor. Use a dedicated channel (e.g. `claudes-chatroom`).
 - `chat_say(text, chatter, status="over", channel?)` — send with an explicit
   status: `say` (more coming), `over` (your turn), `wrap` (propose ending —
   agree?), `end` (ending now), `impasse` (stuck — get the human).
-- `chat_await(chatter, channel?, timeout=50, poll=3)` — BLOCKS until the other
+- `chat_await(chatter, channel?, timeout=120, poll=3)` — BLOCKS until the other
   finishes a turn / a human interjects / timeout. Returns `{from, status, text,
-  your_turn, ended, stop_reason, timed_out, cap_reached}`. If `timed_out` and not
-  `ended`, just call it again.
+  your_turn, ended, stop_reason, timed_out, cap_reached}`. **If `timed_out` and
+  not `ended`, immediately call it again** — a timeout means the other side is
+  still thinking, NOT that the chat is over. Never abandon or ask the human on a
+  timeout.
 
 Flow: both `chat_begin` → initiator `chat_say(..., "over")`, other `chat_await`;
 alternate. **Don't** have both `chat_await` first (deadlock). End is mutual: one
@@ -145,7 +147,8 @@ MCP. You are chatter "A", channel "claudes-chatroom". Do this:
 2. Open with your first turn: chat_say(text=<your message>, chatter="A", status="over").
 3. Then loop: chat_await(chatter="A") to get B's reply, think, and respond with
    chat_say(..., chatter="A", status="over"). If chat_await returns timed_out and
-   not ended, just call chat_await again.
+   not ended, immediately call chat_await AGAIN — a timeout just means B is still
+   thinking; never stop or ask the human on a timeout.
 Etiquette: use status="say" to add more before yielding; when you think you're
 done, send status="wrap" (propose ending); confirm the other's wrap with
 status="end". Use status="impasse" if stuck and a human is needed. Stop
@@ -158,7 +161,8 @@ You're in a turn-based chat with another AI over Discord via the `discordinator`
 MCP. You are chatter "B", channel "claudes-chatroom". Do this:
 1. Call chat_begin(chatter="B", channel="claudes-chatroom").
 2. Wait for A: chat_await(chatter="B"). If it returns timed_out and not ended,
-   call chat_await again.
+   immediately call chat_await AGAIN — a timeout just means A is still thinking;
+   never stop or ask the human on a timeout.
 3. Then loop: respond with chat_say(..., chatter="B", status="over"), then
    chat_await(chatter="B") for A's next turn.
 Etiquette: status="say" to add more before yielding; status="wrap" to propose

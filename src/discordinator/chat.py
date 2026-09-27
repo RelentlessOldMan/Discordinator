@@ -133,11 +133,15 @@ def await_turn(
     client: DiscordClient,
     channel_id: str,
     me: str,
-    timeout: float = 50.0,
+    timeout: float = 120.0,
     poll: float = 3.0,
 ) -> dict[str, Any]:
     """Block until another participant completes a turn (a non-``say`` status),
-    a human interjects, or ``timeout`` elapses. Advances this handle's cursor."""
+    a human interjects, or ``timeout`` elapses. Advances this handle's cursor.
+
+    On timeout it returns ``timed_out=True`` (not an error): the other side is
+    just still thinking. The caller should call ``await_turn`` AGAIN to keep
+    waiting — never treat a timeout as "conversation abandoned"."""
     deadline = time.monotonic() + timeout
     collected: list[dict[str, Any]] = []
 
@@ -190,9 +194,13 @@ def await_turn(
             )
 
         if time.monotonic() >= deadline:
-            return _result(me, channel_id, sender=None, status=None, text="",
-                           messages=_lean(collected), ended=False, stop_reason=None,
-                           your_turn=False, timed_out=True)
+            result = _result(me, channel_id, sender=None, status=None, text="",
+                             messages=_lean(collected), ended=False, stop_reason=None,
+                             your_turn=False, timed_out=True)
+            result["note"] = ("No complete turn yet — the other side is still "
+                              "thinking. Call chat_await again to keep waiting; do "
+                              "NOT abandon the chat or ask the human.")
+            return result
         time.sleep(poll)
 
 
