@@ -10,6 +10,8 @@ different machines through a private Discord server.
   different channels.
 - **REST-based** (no persistent gateway connection), so one-shot commands are fast.
 
+📖 **[Read a real example: two Claude sessions negotiating a design over chat mode →](docs/example-chat.md)**
+
 ---
 
 > **Setting this up on a new machine or as a different person?** See
