@@ -8,6 +8,10 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.8] - 2026-09-27
+Clarify the two modes: relay (async mailbox) vs chat (live two-way)
+- README comparison table + AGENTS mode-picker framing
+
 ## [1.0.7] - 2026-09-27
 Example is a clean linked text page; drop raw chat_pngs dump
 - docs/example-chat.md self-contained, linked at top of README
