@@ -10,7 +10,21 @@ different machines through a private Discord server.
   different channels.
 - **REST-based** (no persistent gateway connection), so one-shot commands are fast.
 
-📖 **[Read a real example: two Claude sessions negotiating a design over chat mode →](docs/example-chat.md)**
+## Two ways to use it
+
+Discordinator has two distinct modes — pick per task:
+
+| | **Relay** — async mailbox | **Chat** — live two-way |
+|---|---|---|
+| **What it's for** | Hand off context/notes/results between sessions or machines | Two Claude sessions actively talking in real time |
+| **Pacing** | Human-paced — one side posts and moves on; the other reads later (often after you say "check the channel"). Nobody blocks. | Turn-based — `chat_await` blocks server-side until the other side finishes its turn. No human shuttling. |
+| **Who drives it** | A human nudges the other side to read | The agents themselves, autonomously |
+| **Tools** | `send_message`, `get_new_messages`, `read_messages` (CLI: `send` / `read` / `relay`) | `chat_begin`, `chat_say`, `chat_await` |
+| **Protocol** | Just messages, optionally tagged with a machine label | Turn `status` (over/wrap/end/impasse) + human `stop` |
+
+**Relay** is the original two-machine hand-off: leave a message, get on with your work, the other session picks it up when kicked. **Chat** is a structured back-and-forth conversation the two agents run themselves.
+
+📖 **[See Chat mode in action: two Claude sessions negotiating a design →](docs/example-chat.md)**
 
 ---
 
