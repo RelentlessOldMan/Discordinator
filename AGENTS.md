@@ -202,6 +202,20 @@ per-channel rate limit (~5 messages / 5s; the client auto-retries on 429).
 - `discordinator version` shows the local version + git commit; compare against
   the repo to know if a machine is behind. See `CHANGELOG.md` for what changed.
 
+### Syncing a machine to latest (e.g. Machine B)
+1. Pull (and reinstall only if a release added a dependency):
+   ```powershell
+   git -C C:\Playground\Discordinator pull
+   # only if CHANGELOG says deps changed:
+   python -m pip install -e C:\Playground\Discordinator -q
+   ```
+2. Pick up the new code where it runs:
+   - **CLI** — nothing to do; each command is a fresh process.
+   - **MCP** — a running server is on old code until restarted. In Claude Code,
+     `/mcp` → reconnect the `discordinator` server, or start a fresh session.
+3. Confirm: `discordinator version` should match the repo's latest tag
+   (`git -C C:\Playground\Discordinator describe --tags`).
+
 ## Releasing
 Versioning is `1.0.x` (bump the patch each release). Once your code changes are
 committed, cut a release with the helper — it bumps `__version__`, prepends a
