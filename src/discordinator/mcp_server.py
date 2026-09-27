@@ -349,7 +349,8 @@ def chat_await(
       - from: the sender's handle, or "human", or null on timeout
       - status: their turn status (over/wrap/end/impasse), "interjection"/"stop"
         for a human message, or null on timeout
-      - text: their turn's combined body (or the human's text)
+      - text: their turn's combined body (or the human's text) — the words live
+        here; `messages` is metadata-only ({id, from, status, timestamp})
       - your_turn: True if it's now your turn to `chat_say`
       - ended: True if the conversation is over (their "end"/"impasse", or a
         human "stop")

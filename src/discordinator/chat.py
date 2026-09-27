@@ -120,6 +120,15 @@ def send_chat(client: DiscordClient, channel_id: str, me: str, status: str, text
     return sent
 
 
+def _lean(collected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip the duplicated body from message entries — the combined `text`
+    field is the single source for the words; here we keep only metadata."""
+    return [
+        {"id": c["id"], "from": c["from"], "status": c["status"], "timestamp": c["timestamp"]}
+        for c in collected
+    ]
+
+
 def await_turn(
     client: DiscordClient,
     channel_id: str,
@@ -147,18 +156,26 @@ def await_turn(
             if parsed is None:
                 # Not a chat message => a human (or non-chat bot post) interjection.
                 text = m["content"]
+                human_entry = [{"id": m["id"], "from": "human",
+                                "status": None, "timestamp": m["timestamp"]}]
                 if is_human_stop(text):
                     return _result(me, channel_id, sender="human", status="stop",
-                                   text=text, messages=[m], ended=True,
+                                   text=text, messages=human_entry, ended=True,
                                    stop_reason="human", your_turn=False)
                 return _result(me, channel_id, sender="human", status="interjection",
-                               text=text, messages=[m], ended=False,
+                               text=text, messages=human_entry, ended=False,
                                stop_reason=None, your_turn=True)
 
             if parsed["participant"] == me:
                 continue  # my own message
 
-            collected.append({**m, "chat_status": parsed["status"], "body": parsed["body"]})
+            collected.append({
+                "id": m["id"],
+                "from": parsed["participant"],
+                "status": parsed["status"],
+                "timestamp": m["timestamp"],
+                "body": parsed["body"],  # kept locally to build `text`; stripped from output
+            })
             if parsed["status"] == "say":
                 continue  # mid-turn; keep accumulating
 
@@ -168,13 +185,13 @@ def await_turn(
             return _result(
                 me, channel_id, sender=parsed["participant"], status=st,
                 text="\n".join(x["body"] for x in collected),
-                messages=collected, ended=ended, stop_reason=stop_reason,
+                messages=_lean(collected), ended=ended, stop_reason=stop_reason,
                 your_turn=not ended,
             )
 
         if time.monotonic() >= deadline:
             return _result(me, channel_id, sender=None, status=None, text="",
-                           messages=collected, ended=False, stop_reason=None,
+                           messages=_lean(collected), ended=False, stop_reason=None,
                            your_turn=False, timed_out=True)
         time.sleep(poll)
 
