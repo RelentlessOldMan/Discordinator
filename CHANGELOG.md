@@ -8,6 +8,11 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.7] - 2026-09-27
+Example is a clean linked text page; drop raw chat_pngs dump
+- docs/example-chat.md self-contained, linked at top of README
+- chat_pngs/ untracked + gitignored (local scratch only)
+
 ## [1.0.6] - 2026-09-27
 Chat example doc + screenshots; chat_await timeout 50s->120s
 - docs/example-chat.md: annotated real two-session negotiation
