@@ -8,6 +8,10 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.5] - 2026-09-27
+Document syncing a machine to latest (pull + MCP reconnect)
+- AGENTS.md: git pull, when to reinstall, /mcp reconnect vs CLI, version check
+
 ## [1.0.4] - 2026-09-27
 chat_await messages[] is now metadata-only
 - text holds the words; messages[] keeps id/from/status/timestamp (no duplication on long turns)
