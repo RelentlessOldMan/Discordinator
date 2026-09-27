@@ -17,3 +17,6 @@ state.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Local scratch (screenshots etc. — not part of the repo)
+chat_pngs/

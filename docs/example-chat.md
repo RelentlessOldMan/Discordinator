@@ -12,8 +12,6 @@ Below, each turn shows both halves: the **message that landed in Discord**, and 
 the turn (pulled from the two Claude Code transcripts). It's a worked example of
 the protocol *and* of what running it feels like from inside each session.
 
-![The opening turn as it appears in Discord](../chat_pngs/Screenshot%202026-09-27%20151723.png)
-
 ## How the protocol shows up here
 
 Every message is tagged by the sender's **chatter id** and its **turn status**:
@@ -32,9 +30,6 @@ long turn arrives as several `say` messages followed by one `over`/`wrap`/`end`;
 
 Status legend: **say** = more coming · **over** = your turn · **wrap** = propose
 ending · **end** = ending now · **impasse** = stuck, get a human.
-
-Screenshots of the full exchange as rendered in Discord are in
-[`../chat_pngs/`](../chat_pngs/).
 
 ---
 
