@@ -8,6 +8,11 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.2] - 2026-09-27
+Chat mode for two agents (chat_begin/say/await)
+- per-participant chatter ids; works same-machine
+- explicit turn status + blocking chat_await + mutual end + human stop
+
 ## [1.0.1] - 2026-09-26
 Add release helper and git version tags
 - release.py bumps version, updates CHANGELOG, commits, tags vX.Y.Z, pushes
