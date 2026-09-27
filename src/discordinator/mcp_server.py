@@ -23,7 +23,7 @@ from typing import Any, Optional
 
 from mcp.server.mcpserver import MCPServer
 
-from . import config, use_system_certs
+from . import chat, config, use_system_certs
 from .discord_client import DiscordClient, DiscordError, simplify_message
 
 # Keep the HTTP client quiet: it logs an INFO line per request to stderr, which
@@ -258,6 +258,113 @@ def whoami() -> dict[str, Any]:
         "username": me.get("username"),
         "global_name": me.get("global_name"),
     }
+
+
+# ==========================================================================
+# CHAT MODE — a separate, turn-based agent<->agent protocol. Distinct from the
+# relay tools above so the two are never conflated. Every call takes a `chatter`
+# id (your handle) because both sides may be on the SAME machine and must stay
+# distinguishable; each chatter has its own read cursor.
+# ==========================================================================
+
+
+@mcp.tool()
+def chat_begin(chatter: str, channel: Optional[str] = None, turn_cap: int = 20) -> dict[str, Any]:
+    """Start or join a turn-based chat as participant `chatter`.
+
+    Seeds your read position to *now* (prior history is ignored) and resets your
+    turn counter. BOTH participants call this first, with DISTINCT `chatter`
+    handles (e.g. "A" and "B"). Then the initiator calls `chat_say`; the other
+    calls `chat_await`. Do NOT have both call `chat_await` first — that deadlocks.
+
+    Args:
+        chatter: your participant handle (short; used to tag and self-filter).
+        channel: chat channel name/id (a dedicated channel like claudes-chatroom
+            is recommended). Defaults to the configured default channel.
+        turn_cap: soft cap on your turns before you're nudged to wrap up.
+    """
+    me = chat.sanitize_handle(chatter)
+    cfg = config.load()
+    channel_id = config.resolve_channel(cfg, channel)
+    with _client() as client:
+        latest = client.read_messages(channel_id, limit=1)
+    cursor = latest[0]["id"] if latest else "0"
+    chat.reset(channel_id, me, cursor, turn_cap)
+    return {"channel": channel_id, "chatter": me, "turn_cap": turn_cap,
+            "next": "initiator: chat_say(...); other: chat_await(...)"}
+
+
+@mcp.tool()
+def chat_say(
+    text: str,
+    chatter: str,
+    status: str = "over",
+    channel: Optional[str] = None,
+) -> dict[str, Any]:
+    """Send a chat message as `chatter` with an explicit turn status.
+
+    status values:
+      - "say"     more of my turn is coming — do NOT yield (send more, then a
+                  terminal status).
+      - "over"    I'm done — your turn (the normal handoff).
+      - "wrap"    I think we can end this — do you agree? (yields your turn).
+      - "end"     ending now (use to confirm after the other proposed "wrap",
+                  or to end unilaterally). Terminal.
+      - "impasse" we're stuck — stop and get the human. Terminal.
+
+    Long text is split across messages, each re-tagged, so multi-part turns stay
+    intact. Returns your turn count and whether the cap was reached.
+    """
+    me = chat.sanitize_handle(chatter)
+    if status not in chat.STATUSES:
+        raise ValueError(f"status must be one of {chat.STATUSES}, got {status!r}")
+    cfg = config.load()
+    channel_id = config.resolve_channel(cfg, channel)
+    with _client() as client:
+        sent = chat.send_chat(client, channel_id, me, status, text)
+    turns = chat.bump_turn(channel_id, me) if status != "say" else chat.get_meta(channel_id, me)[0]
+    _, cap = chat.get_meta(channel_id, me)
+    return {
+        "sent_messages": len(sent),
+        "status": status,
+        "my_turns": turns,
+        "turn_cap": cap,
+        "cap_reached": turns >= cap,
+        "ended": status in chat.TERMINAL_STATUSES,
+    }
+
+
+@mcp.tool()
+def chat_await(
+    chatter: str,
+    channel: Optional[str] = None,
+    timeout: float = 50.0,
+    poll: float = 3.0,
+) -> dict[str, Any]:
+    """Block until the OTHER participant completes a turn, a human interjects, or
+    `timeout` seconds pass. This is how you wait for a reply — just call it and
+    it spins server-side; you don't poll yourself.
+
+    Returns a dict with:
+      - from: the sender's handle, or "human", or null on timeout
+      - status: their turn status (over/wrap/end/impasse), "interjection"/"stop"
+        for a human message, or null on timeout
+      - text: their turn's combined body (or the human's text)
+      - your_turn: True if it's now your turn to `chat_say`
+      - ended: True if the conversation is over (their "end"/"impasse", or a
+        human "stop")
+      - stop_reason: "agreed" | "impasse" | "human" | null
+      - timed_out: True if nothing arrived — if not `ended`, just call again
+      - cap_reached: True if you've hit your turn cap (move toward "wrap"/"end")
+
+    A human typing anything in the channel is surfaced (from="human"); if it
+    looks like a stop command ("stop"/"halt"/"[[STOP]]") the chat ends.
+    """
+    me = chat.sanitize_handle(chatter)
+    cfg = config.load()
+    channel_id = config.resolve_channel(cfg, channel)
+    with _client() as client:
+        return chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll)
 
 
 def main() -> None:

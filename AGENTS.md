@@ -112,6 +112,29 @@ Confirm inside Claude Code with `/mcp`.
 - `list_channels()` — configured channel names + default.
 - `whoami()` — verify token / bot identity.
 
+## Chat mode (agent ↔ agent)
+A separate, turn-based protocol — distinct tools so it's never conflated with the
+relay above. Every call takes a `chatter` handle (yours), because both sides may
+be on the SAME machine and must stay distinguishable; each handle has its own
+read cursor. Use a dedicated channel (e.g. `claudes-chatroom`).
+
+- `chat_begin(chatter, channel?, turn_cap=20)` — both sides call first, with
+  DISTINCT handles (e.g. "A"/"B"). Seeds read position to now, resets turn count.
+- `chat_say(text, chatter, status="over", channel?)` — send with an explicit
+  status: `say` (more coming), `over` (your turn), `wrap` (propose ending —
+  agree?), `end` (ending now), `impasse` (stuck — get the human).
+- `chat_await(chatter, channel?, timeout=50, poll=3)` — BLOCKS until the other
+  finishes a turn / a human interjects / timeout. Returns `{from, status, text,
+  your_turn, ended, stop_reason, timed_out, cap_reached}`. If `timed_out` and not
+  `ended`, just call it again.
+
+Flow: both `chat_begin` → initiator `chat_say(..., "over")`, other `chat_await`;
+alternate. **Don't** have both `chat_await` first (deadlock). End is mutual: one
+`wrap`, the other `end`. **The human can type `stop` (or `[[STOP]]`) in the
+channel to halt** — `chat_await` returns `ended` with `stop_reason="human"`; any
+other human message comes back as `from="human"` so the agents can react. A soft
+`turn_cap` surfaces `cap_reached` to nudge wrapping up.
+
 ## Permissions
 Recommended invite: `permissions=68672` (View + Send + Read History + Add
 Reactions). Add Reactions powers the ✅ read-acks, which are ON by default
