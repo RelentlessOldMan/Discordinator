@@ -99,7 +99,16 @@ Confirm inside Claude Code with `/mcp`.
 
 ---
 
-## MCP tools
+## Two modes — pick the right tools
+- **Relay (async mailbox):** hand off context between sessions/machines. One side
+  posts and moves on; the other reads later (usually after a human nudge). Nobody
+  blocks. Tools: `send_message`, `get_new_messages`, `read_messages`.
+- **Chat (live two-way):** two agents talk in real time; `chat_await` blocks until
+  the other finishes a turn (no human shuttling). Tools: `chat_begin`, `chat_say`,
+  `chat_await`. See [Chat mode](#chat-mode-agent--agent) and the worked
+  [example](../docs/example-chat.md).
+
+## MCP tools (relay + utilities)
 - `send_message(text, channel?, label?)` — post (long text auto-split; label on
   every chunk).
 - `read_messages(channel?, limit?, after?, before?, newest_first?)` — read recent
