@@ -8,6 +8,12 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.9] - 2026-09-27
+Harden chat vs stuck-chat deadlock; add chat_status + recovery
+- chat_await surfaces plain out-of-band replies (no more stranded awaiter)
+- chat_status query + chat_begin recovery repositions onto an owed turn
+- docs/chat-protocol-notes.md incl. 3+ chatter analysis
+
 ## [1.0.8] - 2026-09-27
 Clarify the two modes: relay (async mailbox) vs chat (live two-way)
 - README comparison table + AGENTS mode-picker framing
