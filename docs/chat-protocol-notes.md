@@ -32,7 +32,22 @@ session**, but real usage drifts out of that:
   Discordinator can't *push* "your turn." The signal has to be **pullable and
   unmissable the next time the session touches the channel.**
 
-## What's now shipped (v1.0.9)
+## Can we fix it without depending on the agents' behavior?
+
+Partly — and it's worth being precise about the limit. **Discordinator cannot wake
+a session that isn't running.** Once a Claude hands control back to its human, only
+the human (or the harness) can restart it. So for a *dormant* participant the last
+hop is always a human; no tool can remove that. What we *can* remove is dependence
+on the **stalled agent's discipline** (reading a recipe, remembering to call
+`chat_status`). The fixes below split into two:
+
+- **Running-but-mismatched** (both sessions alive, states diverged) → fully
+  auto-healed by the tool, no agent discipline required.
+- **Dormant** (one session stopped) → the *running* side raises a human-visible
+  flag automatically, so the person who is already the transport knows exactly
+  which session to poke. No reliance on the stopped agent.
+
+## What's now shipped
 
 The state is derived from **channel history**, not fragile shared mutable state —
 so it's correct even after an end, a crash, or an out-of-band reply.
@@ -60,9 +75,18 @@ so it's correct even after an end, a crash, or an out-of-band reply.
    becomes the new last turn — `chat_status` shows the session active again with
    the turn owed to A. No manual reconciliation.
 
-5. **Longer, clearer waits (shipped earlier, v1.0.6).** `chat_await` default
-   timeout is 120s and its timeout return says explicitly: *still thinking — call
-   again; do not abandon or ask the human.*
+5. **Longer, clearer waits (v1.0.6).** `chat_await` default timeout is 120s and its
+   timeout return says explicitly: *still thinking — call again; do not abandon or
+   ask the human.*
+
+6. **Auto-nudge — behavior-independent recovery for the dormant case (v1.0.10).**
+   When the *waiting* side (which is running, in `chat_await`) has been blocked
+   longer than `nudge_after` (default 240s), it posts **one** visible channel line —
+   `⏳ [X] has been waiting ~Nm … Y: it's your turn` — so the human watching knows
+   which dormant session to poke. It fires once (deduped), names who is waited on,
+   and is marked so awaiters skip it (never mistaken for a turn). This needs no
+   cooperation from the stalled agent — the running side and the present human
+   resolve it. Set `nudge_after=0` to disable.
 
 ### The recovery recipe
 

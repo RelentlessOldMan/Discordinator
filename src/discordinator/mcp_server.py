@@ -353,6 +353,7 @@ def chat_await(
     channel: Optional[str] = None,
     timeout: float = 120.0,
     poll: float = 3.0,
+    nudge_after: float = 240.0,
 ) -> dict[str, Any]:
     """Block until the OTHER participant completes a turn, a human interjects, or
     `timeout` seconds pass. This is how you wait for a reply — just call it and
@@ -371,6 +372,11 @@ def chat_await(
       - timed_out: True if nothing arrived in `timeout`s. This is NOT the end —
         the other side is still thinking. Immediately call `chat_await` again to
         keep waiting. Never treat a timeout as "abandoned" or ask the human.
+
+    If the cumulative wait exceeds `nudge_after` seconds (default 240), the tool
+    posts ONE visible reminder to the channel naming who is being waited on, so a
+    watching human can poke the dormant session — recovery doesn't depend on the
+    other agent reading any instructions. Set `nudge_after=0` to disable.
       - cap_reached: True if you've hit your turn cap (move toward "wrap"/"end")
 
     A human typing anything in the channel is surfaced (from="human"); if it
@@ -380,7 +386,8 @@ def chat_await(
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
     with _client() as client:
-        return chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll)
+        return chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll,
+                               nudge_after=nudge_after)
 
 
 @mcp.tool()
