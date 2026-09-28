@@ -158,8 +158,17 @@ def await_turn(
             parsed = parse(m["content"])
 
             if parsed is None:
-                # Not a chat message => a human (or non-chat bot post) interjection.
                 text = m["content"]
+                if m.get("bot"):
+                    # A participant replied OUT-OF-BAND via send_message (not
+                    # chat_say). Surface it as a `plain` turn so a plain reply
+                    # can never strand the awaiter (the stuck-chat footgun).
+                    entry = [{"id": m["id"], "from": "participant",
+                              "status": "plain", "timestamp": m["timestamp"]}]
+                    return _result(me, channel_id, sender="participant", status="plain",
+                                   text=text, messages=entry, ended=False,
+                                   stop_reason=None, your_turn=True)
+                # A real human (non-bot author) typed in the channel.
                 human_entry = [{"id": m["id"], "from": "human",
                                 "status": None, "timestamp": m["timestamp"]}]
                 if is_human_stop(text):
@@ -202,6 +211,65 @@ def await_turn(
                               "NOT abandon the chat or ask the human.")
             return result
         time.sleep(poll)
+
+
+def compute_state(
+    client: DiscordClient, channel_id: str, me: Optional[str] = None, scan: int = 100
+) -> dict[str, Any]:
+    """Derive the current chat state purely from recent channel history — no
+    reliance on shared mutable turn state. Used by chat_status and chat_begin so
+    an idle/re-joining session can tell whether a turn is owed to it (the fix for
+    the silent stuck-chat deadlock).
+
+    Returns: session_active, ended, participants, multiparty, last_turn,
+    pending_turn (a completed over/wrap turn with no reply after it), and — if
+    `me` is given — your_turn. `_pending_predecessor` is an internal cursor hint.
+    """
+    raw = client.read_messages(channel_id, limit=max(1, min(scan, 100)))
+    msgs = list(reversed([simplify_message(m) for m in raw]))  # chronological
+    parsed_list = [parse(m["content"]) for m in msgs]
+
+    participants: list[str] = []
+    last_turn: Optional[dict[str, Any]] = None
+    last_turn_i = -1
+    for i, (m, p) in enumerate(zip(msgs, parsed_list)):
+        if not p:
+            continue
+        if p["participant"] not in participants:
+            participants.append(p["participant"])
+        if p["status"] != "say":
+            last_turn = {"from": p["participant"], "status": p["status"],
+                         "id": m["id"], "ts": m["timestamp"]}
+            last_turn_i = i
+
+    ended = bool(last_turn and last_turn["status"] in TERMINAL_STATUSES)
+    pending = None
+    pending_predecessor = None
+    if last_turn and last_turn["status"] in ("over", "wrap"):
+        replied = any(
+            parsed_list[j] and parsed_list[j]["participant"] != last_turn["from"]
+            for j in range(last_turn_i + 1, len(msgs))
+        )
+        if not replied:
+            pending = last_turn
+            pending_predecessor = (
+                msgs[last_turn_i - 1]["id"] if last_turn_i > 0
+                else str(int(last_turn["id"]) - 1)
+            )
+
+    state: dict[str, Any] = {
+        "session_active": bool(last_turn) and not ended,
+        "ended": ended,
+        "participants": participants,
+        "multiparty": len(participants) > 2,
+        "last_turn": last_turn,
+        "pending_turn": pending,
+        "_pending_predecessor": pending_predecessor,
+    }
+    if me is not None:
+        me = sanitize_handle(me)
+        state["your_turn"] = bool(pending and pending["from"] != me)
+    return state
 
 
 def _result(me: str, channel_id: str, *, sender, status, text, messages,

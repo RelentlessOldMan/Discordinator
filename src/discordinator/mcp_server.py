@@ -287,11 +287,24 @@ def chat_begin(chatter: str, channel: Optional[str] = None, turn_cap: int = 20) 
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
     with _client() as client:
-        latest = client.read_messages(channel_id, limit=1)
-    cursor = latest[0]["id"] if latest else "0"
+        st = chat.compute_state(client, channel_id, me)
+        if st.get("your_turn") and st.get("_pending_predecessor"):
+            # A turn is already owed to me (e.g. I ended/dropped and the other
+            # side spoke again). Position the cursor so chat_await re-delivers it
+            # immediately — recovery instead of a silent stall.
+            cursor = st["_pending_predecessor"]
+        else:
+            latest = client.read_messages(channel_id, limit=1)
+            cursor = latest[0]["id"] if latest else "0"
     chat.reset(channel_id, me, cursor, turn_cap)
-    return {"channel": channel_id, "chatter": me, "turn_cap": turn_cap,
-            "next": "initiator: chat_say(...); other: chat_await(...)"}
+    owed = bool(st.get("your_turn"))
+    return {
+        "channel": channel_id, "chatter": me, "turn_cap": turn_cap,
+        "recovered_pending_turn": owed,
+        "state": {k: v for k, v in st.items() if not k.startswith("_")},
+        "next": ("A turn is owed to you — call chat_await now to receive it."
+                 if owed else "initiator: chat_say(...); other: chat_await(...)"),
+    }
 
 
 @mcp.tool()
@@ -368,6 +381,40 @@ def chat_await(
     channel_id = config.resolve_channel(cfg, channel)
     with _client() as client:
         return chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll)
+
+
+@mcp.tool()
+def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) -> dict[str, Any]:
+    """Report the current chat state on a channel, derived from history. **Call
+    this when (re)engaging a chat channel** — it tells you whether a turn is owed
+    to you, instead of eyeballing message tags. This is how you recover from a
+    stall (you ended/dropped, or the other side replied out-of-band).
+
+    Returns:
+      - session_active / ended
+      - participants: handles seen in recent history
+      - multiparty: True if >2 participants (turn-tracking is designed for 2 —
+        see note below)
+      - last_turn: {from, status, id, ts} — the most recent completed turn
+      - pending_turn: a completed `over`/`wrap` turn with no reply after it (a
+        turn awaiting an answer), or null
+      - your_turn (only if `chatter` given): True if that pending turn is someone
+        else's and you haven't answered — i.e. it's your move.
+
+    If your_turn is True: call `chat_begin` (it repositions you to receive the
+    pending turn) then `chat_await`, or `chat_say` if already in the session.
+
+    Note on 3+ chatters: turn-tracking assumes TWO participants. With more, a
+    turn has no addressed recipient, so `pending_turn`/`your_turn` become
+    heuristic (any non-sender could be "next"). `multiparty` flags this.
+    """
+    cfg = config.load()
+    channel_id = config.resolve_channel(cfg, channel)
+    with _client() as client:
+        st = chat.compute_state(client, channel_id, chatter)
+    public = {k: v for k, v in st.items() if not k.startswith("_")}
+    public["channel"] = channel_id
+    return public
 
 
 def main() -> None:

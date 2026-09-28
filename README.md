@@ -188,7 +188,7 @@ block — the server reads the same config file.
 | `purge_messages(channel?, older_than_days?, only_mine?, scan_limit?, dry_run?)` | Delete old messages. Safe defaults (dry-run, only the bot's own, 7-day floor). |
 | `list_channels()` | Show configured channel names + default. |
 | `whoami()` | Verify the token / show the bot identity. |
-| `chat_begin` / `chat_say` / `chat_await` | **Chat mode** — a separate turn-based agent↔agent protocol with per-participant `chatter` ids, explicit turn `status` (over/wrap/end/impasse), a blocking wait, and human `stop`. See [`AGENTS.md`](AGENTS.md#chat-mode-agent--agent). |
+| `chat_begin` / `chat_say` / `chat_await` / `chat_status` | **Chat mode** — a separate turn-based agent↔agent protocol with per-participant `chatter` ids, explicit turn `status` (over/wrap/end/impasse), a blocking wait, human `stop`, and `chat_status` for stall recovery. See [`AGENTS.md`](AGENTS.md#chat-mode-agent--agent) and the [protocol notes](docs/chat-protocol-notes.md). |
 
 **See it in action:** [`docs/example-chat.md`](docs/example-chat.md) — a real, unedited
 design negotiation between two Claude sessions over chat mode, annotated with each

@@ -133,11 +133,16 @@ read cursor. Use a dedicated channel (e.g. `claudes-chatroom`).
   status: `say` (more coming), `over` (your turn), `wrap` (propose ending —
   agree?), `end` (ending now), `impasse` (stuck — get the human).
 - `chat_await(chatter, channel?, timeout=120, poll=3)` — BLOCKS until the other
-  finishes a turn / a human interjects / timeout. Returns `{from, status, text,
-  your_turn, ended, stop_reason, timed_out, cap_reached}`. **If `timed_out` and
-  not `ended`, immediately call it again** — a timeout means the other side is
-  still thinking, NOT that the chat is over. Never abandon or ask the human on a
-  timeout.
+  finishes a turn / a human interjects / a participant posts out-of-band / timeout.
+  Returns `{from, status, text, your_turn, ended, stop_reason, timed_out,
+  cap_reached}`. **If `timed_out` and not `ended`, immediately call it again** — a
+  timeout means the other side is still thinking, NOT that the chat is over. Never
+  abandon or ask the human on a timeout. (A plain `send_message` from a participant
+  comes back as `status="plain"` so a non-`chat_say` reply can't strand you.)
+- `chat_status(chatter?, channel?)` — read the current state from history:
+  `{session_active, ended, participants, multiparty, last_turn, pending_turn,
+  your_turn}`. **Call this whenever you (re)engage a chat channel** to learn if a
+  turn is owed to you — don't eyeball message tags.
 
 Flow: both `chat_begin` → initiator `chat_say(..., "over")`, other `chat_await`;
 alternate. **Don't** have both `chat_await` first (deadlock). End is mutual: one
@@ -145,6 +150,17 @@ alternate. **Don't** have both `chat_await` first (deadlock). End is mutual: one
 channel to halt** — `chat_await` returns `ended` with `stop_reason="human"`; any
 other human message comes back as `from="human"` so the agents can react. A soft
 `turn_cap` surfaces `cap_reached` to nudge wrapping up.
+
+**Recovering from a stall.** If a chat seems stuck, it usually means one side
+`end`ed (or dropped) and the other spoke again, or someone replied with a plain
+`send_message`. Call `chat_status(chatter=you)`: if `your_turn` is true, call
+`chat_begin` (it repositions you onto the pending turn) then `chat_await`. See
+[`docs/chat-protocol-notes.md`](docs/chat-protocol-notes.md) for the full analysis.
+
+**3+ chatters.** Chat mode is designed for **two** participants. Turns carry no
+addressed recipient, so with more than two, "whose turn" is ambiguous —
+`chat_status` sets `multiparty: true` and `your_turn` becomes heuristic. For real
+N-way you'd need addressing (a `to` field) or a floor token; not built yet.
 
 ### Kickoff prompts (paste one to each session)
 
