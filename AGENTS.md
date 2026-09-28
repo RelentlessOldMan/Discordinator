@@ -138,7 +138,10 @@ read cursor. Use a dedicated channel (e.g. `claudes-chatroom`).
   cap_reached}`. **If `timed_out` and not `ended`, immediately call it again** — a
   timeout means the other side is still thinking, NOT that the chat is over. Never
   abandon or ask the human on a timeout. (A plain `send_message` from a participant
-  comes back as `status="plain"` so a non-`chat_say` reply can't strand you.)
+  comes back as `status="plain"` so a non-`chat_say` reply can't strand you.) After
+  a long wait (`nudge_after`, default 240s) it posts one visible channel reminder so
+  a human knows which dormant session to poke — recovery doesn't rely on the other
+  agent.
 - `chat_status(chatter?, channel?)` — read the current state from history:
   `{session_active, ended, participants, multiparty, last_turn, pending_turn,
   your_turn}`. **Call this whenever you (re)engage a chat channel** to learn if a
