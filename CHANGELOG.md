@@ -8,6 +8,11 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.10] - 2026-09-27
+chat_await auto-nudge for behavior-independent stall recovery
+- waiting side posts one channel reminder after nudge_after (default 240s)
+- names who is waited on; deduped; awaiters skip nudge messages
+
 ## [1.0.9] - 2026-09-27
 Harden chat vs stuck-chat deadlock; add chat_status + recovery
 - chat_await surfaces plain out-of-band replies (no more stranded awaiter)
