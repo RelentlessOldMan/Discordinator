@@ -8,6 +8,12 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.13] - 2026-09-29
+Local (no-Discord) transport: same-machine relay + chat over files
+- transport: discord|local (config set-transport / DISCORDINATOR_TRANSPORT); env > config > default 'discord'
+- local mode needs no token/network/channels — rooms are JSONL under ~/.discordinator/local/ (relay->'relay', chat->'chat')
+- both relay and chat work over either transport; same tools/protocol. Same-machine only; no human-in-channel affordances locally
+
 ## [1.0.12] - 2026-09-29
 N-way chat: addressing, floor token, anti-starvation
 - chat_say to= addresses a turn to one peer; a history-derived floor token wakes only the addressee
