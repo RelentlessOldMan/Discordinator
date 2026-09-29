@@ -11,7 +11,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import __version__, config, use_system_certs
+from .client_factory import make_client
 from .discord_client import DiscordClient, DiscordError, simplify_message
+from .local_client import local_dir
 
 
 def _err(msg: str) -> int:
@@ -79,14 +81,13 @@ def _print_messages(messages: list[dict[str, Any]]) -> None:
 
 def cmd_send(args: argparse.Namespace) -> int:
     cfg = config.load()
-    token = config.require_token(cfg)
     channel_id = config.resolve_channel(cfg, args.channel)
     content = _read_stdin_if_needed(args.text)
     if not content:
         return _err("nothing to send (empty message).")
     tag = args.label if args.label is not None else cfg.get("machine_label")
 
-    with DiscordClient(token) as client:
+    with make_client(cfg) as client:
         sent = client.send_message(channel_id, content, label=tag)
     if args.json:
         print(json.dumps([simplify_message(m) for m in sent], indent=2))
@@ -99,10 +100,9 @@ def cmd_send(args: argparse.Namespace) -> int:
 
 def cmd_read(args: argparse.Namespace) -> int:
     cfg = config.load()
-    token = config.require_token(cfg)
     channel_id = config.resolve_channel(cfg, args.channel)
 
-    with DiscordClient(token) as client:
+    with make_client(cfg) as client:
         raw = client.read_messages(
             channel_id, limit=args.limit, after=args.after, before=args.before
         )
@@ -151,16 +151,15 @@ def _relay_poll(
 
 def cmd_relay(args: argparse.Namespace) -> int:
     cfg = config.load()
-    token = config.require_token(cfg)
     channel_id = config.resolve_channel(cfg, args.channel)
     own_label = cfg.get("machine_label")
-    label_name = args.channel or cfg.get("default_channel")
+    label_name = args.channel or cfg.get("default_channel") or channel_id
     do_ack = _resolve_ack(args, cfg)
 
     if args.reset:
         config.clear_cursor(channel_id)
 
-    with DiscordClient(token) as client:
+    with make_client(cfg) as client:
         if not args.watch:
             messages = _relay_poll(client, channel_id, own_label, args.include_self, args.limit)
             if do_ack:
@@ -197,14 +196,13 @@ def cmd_relay(args: argparse.Namespace) -> int:
 
 def cmd_purge(args: argparse.Namespace) -> int:
     cfg = config.load()
-    token = config.require_token(cfg)
     channel_id = config.resolve_channel(cfg, args.channel)
 
     cutoff = None
     if args.older_than:
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=_parse_duration(args.older_than))
 
-    with DiscordClient(token) as client:
+    with make_client(cfg) as client:
         my_id = client.whoami().get("id")
 
         # Page back through history up to --limit messages.
@@ -271,10 +269,18 @@ def cmd_channels(args: argparse.Namespace) -> int:
     default = cfg.get("default_channel")
 
     if args.remote:
-        token = config.require_token(cfg)
+        if config.is_local(cfg):
+            # Local transport: list the room files that exist on disk.
+            with make_client(cfg) as client:
+                remote = client.list_guild_channels()
+            if not remote:
+                print("(no local rooms yet — they're created on first message)")
+            for c in remote:
+                print(f"{c['id']}  #{c.get('name')}")
+            return 0
         if not args.guild:
             return _err("--remote requires --guild <guild_id>.")
-        with DiscordClient(token) as client:
+        with make_client(cfg) as client:
             remote = client.list_guild_channels(args.guild)
         text_channels = [c for c in remote if c.get("type") in (0, 5)]
         for c in sorted(text_channels, key=lambda c: c.get("position", 0)):
@@ -292,19 +298,28 @@ def cmd_channels(args: argparse.Namespace) -> int:
 
 def cmd_whoami(args: argparse.Namespace) -> int:
     cfg = config.load()
-    token = config.require_token(cfg)
-    with DiscordClient(token) as client:
+    with make_client(cfg) as client:
         me = client.whoami()
     if args.json:
         print(json.dumps(me, indent=2))
     else:
         name = me.get("global_name") or me.get("username")
-        print(f"Authenticated as {name} (id {me.get('id')})")
+        if config.is_local(cfg):
+            print(f"Local transport — identity '{name}' (no Discord token in use)")
+        else:
+            print(f"Authenticated as {name} (id {me.get('id')})")
     return 0
 
 
 def cmd_version(args: argparse.Namespace) -> int:
     print(f"discordinator {__version__}")
+    try:
+        cfg = config.load()
+        print(f"transport:   {config.transport(cfg)}")
+        if config.is_local(cfg):
+            print(f"local dir:   {local_dir()}")
+    except config.ConfigError:
+        pass
     print(f"config file: {config.config_path()}")
     print(f"state file:  {config.state_path()}")
     # Best-effort git revision, so you can tell exactly what code is checked out.
@@ -365,6 +380,16 @@ def cmd_config(args: argparse.Namespace) -> int:
         cfg["chat_channel"] = args.name
         config.save(cfg)
         print(f"chat channel set to '{args.name}' (live chat_* default; relay unaffected)")
+    elif action == "set-transport":
+        val = args.mode.strip().lower()
+        cfg["transport"] = val
+        config.save(cfg)
+        if val == "local":
+            print("transport set to 'local' — no Discord token needed; messages "
+                  f"are stored on disk under {local_dir()} (same-machine only).")
+        else:
+            print("transport set to 'discord' — uses the Discord REST API "
+                  "(needs a bot token; works across machines).")
     elif action == "set-label":
         cfg["machine_label"] = args.label
         config.save(cfg)
@@ -465,6 +490,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("name")
     x = csub.add_parser("set-chat-channel", help="set the default channel for live chat_* tools (a shared room)")
     x.add_argument("name")
+    x = csub.add_parser("set-transport", help="switch transport: 'discord' (default, cross-machine) or 'local' (no Discord, same machine)")
+    x.add_argument("mode", choices=["discord", "local"])
     x = csub.add_parser("set-label", help="set this machine's message label")
     x.add_argument("label")
     x = csub.add_parser("set-ack", help="auto-react ✅ to the newest message on every read (on/off)")

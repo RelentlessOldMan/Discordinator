@@ -24,7 +24,8 @@ from typing import Any, Optional
 from mcp.server.mcpserver import MCPServer
 
 from . import chat, config, use_system_certs
-from .discord_client import DiscordClient, DiscordError, simplify_message
+from .client_factory import Client, make_client
+from .discord_client import DiscordError, simplify_message
 
 # Keep the HTTP client quiet: it logs an INFO line per request to stderr, which
 # is noise for a stdio MCP server (stdout carries the JSON-RPC protocol).
@@ -34,13 +35,11 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 mcp = MCPServer("discordinator")
 
 
-def _client() -> DiscordClient:
-    cfg = config.load()
-    token = config.require_token(cfg)
-    return DiscordClient(token)
+def _client() -> Client:
+    return make_client(config.load())
 
 
-def _try_ack(client: DiscordClient, channel_id: str, messages: list[dict[str, Any]]) -> None:
+def _try_ack(client: Client, channel_id: str, messages: list[dict[str, Any]]) -> None:
     """React ✅ to the newest message. Best-effort: never fail a read because the
     bot lacks the Add Reactions permission."""
     if not messages:

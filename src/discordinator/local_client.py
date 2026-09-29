@@ -1,0 +1,236 @@
+"""Local (no-Discord) transport backend.
+
+A drop-in replacement for :class:`~discordinator.discord_client.DiscordClient`
+that stores each "channel" as an append-only JSONL file under
+``~/.discordinator/local/``. Two sessions/processes on the **same machine** talk
+through the shared files — the exact same relay + chat protocols as Discord, but
+with no bot token and no network. (Cross-machine still needs the Discord
+transport: there is no shared filesystem between machines.)
+
+Message records mirror the subset of the Discord message shape that
+``simplify_message()`` and the chat protocol consume::
+
+    {"id", "author": {"id", "username", "global_name", "bot"},
+     "timestamp", "content", "attachments"}
+
+IDs are strictly increasing integer strings (``max(last + 1, time_ns())``), so
+the ``after=`` / ``before=`` cursors and the protocol's integer id comparisons
+behave like Discord snowflakes.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from . import config
+from .discord_client import MAX_MESSAGE_LEN, chunk_content
+
+
+def local_dir() -> Path:
+    """Directory holding the per-room JSONL files (beside the config file)."""
+    return config.config_path().parent / "local"
+
+
+def sanitize_room(name: str) -> str:
+    """Map a room name to a safe filename stem (alnum/dash/underscore)."""
+    safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in str(name))
+    return safe.strip("-").lower() or "room"
+
+
+class _AppendLock:
+    """Cross-process spin-lock via an ``O_EXCL`` lock file.
+
+    Appends are tiny, so contention is brief. A stale lock (holder crashed) is
+    stolen after ``stale`` seconds. If the lock can't be taken within
+    ``timeout`` seconds we proceed anyway rather than hang a chat forever — a
+    torn trailing line is tolerated by the reader (it skips unparseable lines).
+    """
+
+    def __init__(self, target: Path, timeout: float = 10.0, stale: float = 30.0):
+        self.lockpath = str(target) + ".lock"
+        self.timeout = timeout
+        self.stale = stale
+        self.fd: Optional[int] = None
+
+    def __enter__(self) -> "_AppendLock":
+        start = time.monotonic()
+        while True:
+            try:
+                self.fd = os.open(self.lockpath, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                return self
+            except FileExistsError:
+                try:
+                    age = time.time() - os.path.getmtime(self.lockpath)
+                    if age > self.stale:
+                        os.remove(self.lockpath)
+                        continue
+                except OSError:
+                    pass
+                if time.monotonic() - start > self.timeout:
+                    self.fd = None  # give up waiting; proceed unlocked
+                    return self
+                time.sleep(0.02)
+
+    def __exit__(self, *exc: object) -> None:
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            try:
+                os.remove(self.lockpath)
+            except OSError:
+                pass
+            self.fd = None
+
+
+class LocalClient:
+    """Filesystem-backed transport with the DiscordClient method surface."""
+
+    def __init__(self, label: Optional[str] = None):
+        self._label = label or "local"
+        self._dir = local_dir()
+
+    # -- context-manager parity with DiscordClient -------------------------
+    def close(self) -> None:  # nothing to close
+        pass
+
+    def __enter__(self) -> "LocalClient":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    # -- storage helpers ---------------------------------------------------
+    def _room_path(self, channel_id: str) -> Path:
+        return self._dir / f"{sanitize_room(channel_id)}.jsonl"
+
+    def _read_all(self, channel_id: str) -> list[dict[str, Any]]:
+        path = self._room_path(channel_id)
+        if not path.exists():
+            return []
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        out: list[dict[str, Any]] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # tolerate a torn trailing line written mid-append
+            if isinstance(rec, dict) and "id" in rec:
+                out.append(rec)
+        return out
+
+    def _append(self, channel_id: str, content: str) -> dict[str, Any]:
+        path = self._room_path(channel_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _AppendLock(path):
+            existing = self._read_all(channel_id)
+            last = max((int(r["id"]) for r in existing), default=0)
+            new_id = max(last + 1, time.time_ns())  # monotonic, snowflake-ish
+            rec = {
+                "id": str(new_id),
+                "author": {
+                    "id": self._label,
+                    "username": self._label,
+                    "global_name": self._label,
+                    "bot": True,
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "content": content,
+                "attachments": [],
+            }
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        return rec
+
+    # -- DiscordClient-compatible surface ----------------------------------
+    def whoami(self) -> dict[str, Any]:
+        return {
+            "id": self._label,
+            "username": self._label,
+            "global_name": self._label,
+            "bot": True,
+            "local": True,
+        }
+
+    def send_message(
+        self, channel_id: str, content: str, label: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """Send ``content`` (label-prefixed on every chunk), mirroring
+        DiscordClient so relay self-filtering behaves identically."""
+        prefix = f"[{label}] " if label else ""
+        body_limit = MAX_MESSAGE_LEN - len(prefix)
+        sent: list[dict[str, Any]] = []
+        for piece in chunk_content(content, body_limit):
+            sent.append(self._append(channel_id, f"{prefix}{piece}"))
+        return sent
+
+    def post(self, channel_id: str, content: str) -> dict[str, Any]:
+        """Post a single message verbatim (chat mode manages its own headers)."""
+        return self._append(channel_id, content)
+
+    def read_messages(
+        self,
+        channel_id: str,
+        limit: int = 20,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Return messages newest-first, matching Discord's ordering and its
+        ``after`` (forward-paging) / ``before`` (backward-paging) semantics."""
+        recs = self._read_all(channel_id)
+        recs.sort(key=lambda r: int(r["id"]))
+        if after is not None:
+            a = int(after)
+            recs = [r for r in recs if int(r["id"]) > a]
+        if before is not None:
+            b = int(before)
+            recs = [r for r in recs if int(r["id"]) < b]
+        cap = max(1, min(int(limit), 100))
+        if after is not None and before is None:
+            window = recs[:cap]   # oldest-after-cursor (forward paging)
+        else:
+            window = recs[-cap:]  # newest (default read + backward paging)
+        window.reverse()          # Discord returns newest-first
+        return window
+
+    def delete_message(self, channel_id: str, message_id: str) -> None:
+        path = self._room_path(channel_id)
+        if not path.exists():
+            return
+        with _AppendLock(path):
+            kept = [r for r in self._read_all(channel_id) if str(r["id"]) != str(message_id)]
+            tmp = str(path) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                for r in kept:
+                    fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+            os.replace(tmp, path)
+
+    def add_reaction(
+        self, channel_id: str, message_id: str, emoji: str = "✅"
+    ) -> None:
+        # No reaction UI locally; ✅ read-acks are cosmetic. No-op (best-effort
+        # parity so _try_ack callers don't need to special-case the transport).
+        return None
+
+    def get_channel(self, channel_id: str) -> dict[str, Any]:
+        stem = sanitize_room(channel_id)
+        return {"id": stem, "name": stem, "local": True}
+
+    def list_guild_channels(self, guild_id: Optional[str] = None) -> list[dict[str, Any]]:
+        rooms: list[dict[str, Any]] = []
+        if self._dir.exists():
+            for p in sorted(self._dir.glob("*.jsonl")):
+                rooms.append({"id": p.stem, "name": p.stem, "type": 0})
+        return rooms

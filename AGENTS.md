@@ -36,6 +36,24 @@ The bot/token is **per owner**, not shared with strangers:
 
 ## Setup on a new machine (in order)
 
+### 0. Choose a transport
+Discordinator runs over one of two transports:
+- **`discord`** (default) — the Discord REST API. Works across machines. Needs a
+  bot token + channels (steps 2–3 below).
+- **`local`** — **no Discord at all.** Messages live in JSONL files under
+  `~/.discordinator/local/`. Two sessions on the **same machine** relay/chat with
+  **no token, no network, no channel setup**. Great for a locked-down work laptop
+  or offline dev; it cannot reach another machine.
+
+For local mode, do step 1, then just:
+```powershell
+discordinator config set-transport local   # (or set DISCORDINATOR_TRANSPORT=local per project)
+discordinator config set-label <SESSION_LABEL>   # distinct per session for relay self-filtering
+```
+Skip steps 2–3 (bot/token/channels). Relay defaults to room `relay`, chat to room
+`chat`; pass any `channel="..."` to use another room. Then jump to step 5. The
+rest of this doc's tool usage is identical on both transports.
+
 ### 1. Install (Python 3.10+)
 ```powershell
 python -m pip install -e .
