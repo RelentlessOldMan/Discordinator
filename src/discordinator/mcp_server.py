@@ -315,38 +315,67 @@ def chat_say(
     chatter: str,
     status: str = "over",
     channel: Optional[str] = None,
+    to: Optional[str] = None,
 ) -> dict[str, Any]:
     """Send a chat message as `chatter` with an explicit turn status.
 
     status values:
       - "say"     more of my turn is coming — do NOT yield (send more, then a
                   terminal status).
+      - "ask"     raise a hand — "I'd like the floor" — WITHOUT taking the current
+                  turn. Use when someone else holds the floor and you want in; it
+                  doesn't interrupt them, it just registers a request others see.
       - "over"    I'm done — your turn (the normal handoff).
       - "wrap"    I think we can end this — do you agree? (yields your turn).
       - "end"     ending now (use to confirm after the other proposed "wrap",
                   or to end unilaterally). Terminal.
       - "impasse" we're stuck — stop and get the human. Terminal.
 
-    Long text is split across messages, each re-tagged, so multi-part turns stay
-    intact. Returns your turn count and whether the cap was reached.
+    `to`: address this turn to ONE participant by handle (e.g. to="C"). Required
+    discipline in a 3+ party room — an addressed `over`/`wrap` passes the floor to
+    exactly that peer, so only they wake; leaving it unset broadcasts (anyone may
+    answer, which can collide). In a 2-party chat just omit it. Special targets
+    all/everyone/* broadcast explicitly.
+
+    Long text is split across messages, each re-tagged (and re-addressed), so
+    multi-part turns stay intact. Returns your turn count and, in a multiparty
+    room after you yield, who is waiting and the fair next addressee.
     """
     me = chat.sanitize_handle(chatter)
     if status not in chat.STATUSES:
         raise ValueError(f"status must be one of {chat.STATUSES}, got {status!r}")
+    target = chat.sanitize_handle(to) if to else None
     cfg = config.load()
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client() as client:
-        sent = chat.send_chat(client, channel_id, me, status, text)
-    turns = chat.bump_turn(channel_id, me) if status != "say" else chat.get_meta(channel_id, me)[0]
-    _, cap = chat.get_meta(channel_id, me)
-    return {
-        "sent_messages": len(sent),
-        "status": status,
-        "my_turns": turns,
-        "turn_cap": cap,
-        "cap_reached": turns >= cap,
-        "ended": status in chat.TERMINAL_STATUSES,
-    }
+        sent = chat.send_chat(client, channel_id, me, status, text, to=target)
+        # `say`/`ask` don't complete a turn, so they don't count against the cap.
+        took_turn = status not in chat.NON_TURN_STATUSES
+        turns = chat.bump_turn(channel_id, me) if took_turn else chat.get_meta(channel_id, me)[0]
+        _, cap = chat.get_meta(channel_id, me)
+        out = {
+            "sent_messages": len(sent),
+            "status": status,
+            "to": target,
+            "my_turns": turns,
+            "turn_cap": cap,
+            "cap_reached": turns >= cap,
+            "ended": status in chat.TERMINAL_STATUSES,
+        }
+        # After yielding in a multiparty room, tell the model who's waiting so it
+        # can rotate fairly (address suggest_next next time to avoid starving).
+        if status in chat.YIELD_STATUSES:
+            st = chat.compute_state(client, channel_id, me)
+            if st.get("multiparty"):
+                out["pending_requests"] = st.get("floor_requests", [])
+                out["waiting"] = st.get("waiting", [])
+                out["suggest_next"] = st.get("suggest_next")
+                if not target:
+                    out["note"] = ("Multiparty room: you yielded without a `to`, so "
+                                   "anyone may answer. Address your next turn "
+                                   "(to=...) to avoid collisions and starvation — "
+                                   f"suggested: {st.get('suggest_next')}.")
+    return out
 
 
 @mcp.tool()
@@ -356,17 +385,25 @@ def chat_await(
     timeout: float = 120.0,
     poll: float = 3.0,
     nudge_after: float = 240.0,
+    from_whom: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Block until the OTHER participant completes a turn, a human interjects, or
-    `timeout` seconds pass. This is how you wait for a reply — just call it and
-    it spins server-side; you don't poll yourself.
+    """Block until a turn comes to YOU, a human interjects, or `timeout` seconds
+    pass. This is how you wait for a reply — just call it and it spins
+    server-side; you don't poll yourself.
+
+    Floor rules: a turn "comes to you" when another participant `over`/`wrap`s
+    and addresses you (or broadcasts), OR anyone ends the chat. A turn addressed
+    to a DIFFERENT peer does not wake you — you keep holding the wait (the floor
+    token). `ask` (a hand-raise) and `say` never wake you. `from_whom` optionally
+    waits for a yielded turn from that one specific peer.
 
     Returns a dict with:
       - from: the sender's handle, or "human", or null on timeout
+      - to: who that turn was addressed to (null if broadcast/unaddressed)
       - status: their turn status (over/wrap/end/impasse), "interjection"/"stop"
-        for a human message, or null on timeout
+        for a human message, "plain" for an out-of-band send, or null on timeout
       - text: their turn's combined body (or the human's text) — the words live
-        here; `messages` is metadata-only ({id, from, status, timestamp})
+        here; `messages` is metadata-only ({id, from, to, status, timestamp})
       - your_turn: True if it's now your turn to `chat_say`
       - ended: True if the conversation is over (their "end"/"impasse", or a
         human "stop")
@@ -374,12 +411,15 @@ def chat_await(
       - timed_out: True if nothing arrived in `timeout`s. This is NOT the end —
         the other side is still thinking. Immediately call `chat_await` again to
         keep waiting. Never treat a timeout as "abandoned" or ask the human.
+      - cap_reached: True if you've hit your turn cap (move toward "wrap"/"end")
+      - (multiparty only, when the floor comes to you) floor, pending_requests,
+        waiting, suggest_next — so you can rotate fairly and not starve a peer.
 
     If the cumulative wait exceeds `nudge_after` seconds (default 240), the tool
-    posts ONE visible reminder to the channel naming who is being waited on, so a
-    watching human can poke the dormant session — recovery doesn't depend on the
-    other agent reading any instructions. Set `nudge_after=0` to disable.
-      - cap_reached: True if you've hit your turn cap (move toward "wrap"/"end")
+    posts ONE visible reminder to the channel — naming who should respond, or (if
+    you raised a hand and are being passed over) asking the floor holder to yield
+    to you. Recovery doesn't depend on the other agent reading anything. Set
+    `nudge_after=0` to disable.
 
     A human typing anything in the channel is surfaced (from="human"); if it
     looks like a stop command ("stop"/"halt"/"[[STOP]]") the chat ends.
@@ -389,7 +429,7 @@ def chat_await(
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client() as client:
         return chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll,
-                               nudge_after=nudge_after)
+                               nudge_after=nudge_after, from_whom=from_whom)
 
 
 @mcp.tool()
@@ -402,20 +442,26 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
     Returns:
       - session_active / ended
       - participants: handles seen in recent history
-      - multiparty: True if >2 participants (turn-tracking is designed for 2 —
-        see note below)
-      - last_turn: {from, status, id, ts} — the most recent completed turn
-      - pending_turn: a completed `over`/`wrap` turn with no reply after it (a
-        turn awaiting an answer), or null
-      - your_turn (only if `chatter` given): True if that pending turn is someone
-        else's and you haven't answered — i.e. it's your move.
+      - multiparty: True if >2 participants
+      - last_turn: {from, to, status, id, ts} — the most recent completed turn
+      - pending_turn: the last `over`/`wrap` turn awaiting an answer, or null
+      - floor: who may speak next (the pending turn's addressee; in a 2-party
+        chat the other party; null = open floor / nobody owes a turn)
+      - floor_requests: [{from}] outstanding hand-raises (`ask`), oldest first
+      - waiting: participants ranked most-starved first (longest since they last
+        took a turn)
+      - suggest_next: the fair next addressee in a multiparty room (an
+        outstanding request, else the most-starved non-speaker), or null
+      - your_turn (only if `chatter` given): True if the pending turn is owed to
+        you — it's addressed to you (or broadcast) and isn't your own.
 
     If your_turn is True: call `chat_begin` (it repositions you to receive the
     pending turn) then `chat_await`, or `chat_say` if already in the session.
 
-    Note on 3+ chatters: turn-tracking assumes TWO participants. With more, a
-    turn has no addressed recipient, so `pending_turn`/`your_turn` become
-    heuristic (any non-sender could be "next"). `multiparty` flags this.
+    3+ chatters: supported via addressing + a derived floor. Address turns with
+    `chat_say(..., to="handle")` so the floor passes to exactly one peer; raise a
+    hand with `status="ask"` when someone else holds the floor. Leave `to` unset
+    only in a 2-party chat (or to deliberately broadcast — anyone may answer).
     """
     cfg = config.load()
     channel_id = config.resolve_chat_channel(cfg, channel)

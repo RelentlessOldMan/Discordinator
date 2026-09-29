@@ -12,7 +12,8 @@ Layered on top of the plain relay. Design goals (from real ad-hoc use):
 
 Wire format of a chat message::
 
-    [<handle>|<status>] <body>
+    [<handle>|<status>] <body>            # unaddressed (broadcast / 2-party)
+    [<handle>><target>|<status>] <body>   # addressed to one peer (N-way)
 
 status values:
     say      more of my turn is coming (do not yield)
@@ -20,6 +21,15 @@ status values:
     wrap     I think we can end — do you agree? (yields turn)
     end      ending now (terminal)
     impasse  we're stuck, stop and get the human (terminal)
+
+Addressing & the floor (N-way). With three or more participants a bare status
+("your turn") is ambiguous, so a turn may name a recipient: ``[A>B|over]`` yields
+the floor to B. The "floor holder" — who may speak next — is derived from history
+(the addressee of the last yielded turn), not stored, so it stays correct after a
+crash or re-join. ``await_turn`` only wakes when a completed turn is addressed to
+you, is a broadcast (unaddressed, or ``to`` in {all, everyone, *, any, anyone}),
+or is terminal (which ends the chat for everyone). Two-party chats simply omit
+``to`` and behave exactly as before.
 
 Chat state lives under state.json ``["chat"][channel_id][handle]`` = {cursor, turns, cap},
 separate from the relay cursor so the two never collide.
@@ -40,34 +50,57 @@ from .discord_client import (
     simplify_message,
 )
 
-STATUSES = ("say", "over", "wrap", "end", "impasse")
-TERMINAL_STATUSES = ("end", "impasse")
+STATUSES = ("say", "ask", "over", "wrap", "end", "impasse")
+TERMINAL_STATUSES = ("end", "impasse")     # ends the chat for everyone
+YIELD_STATUSES = ("over", "wrap")          # completes a turn, passes the floor
+NON_TURN_STATUSES = ("say", "ask")         # do NOT complete a turn / take the floor
 DEFAULT_TURN_CAP = 20
+
+# Addressing: an unaddressed turn, or one whose target is one of these, wakes
+# every waiting participant (open floor). Otherwise only the named peer wakes.
+BROADCAST_ALIASES = frozenset({"all", "everyone", "*", "any", "anyone"})
 
 # Prefix on system "waiting" reminders. chat_await skips any message starting
 # with this so a nudge is never mistaken for a participant's turn.
 NUDGE_MARK = "⏳"  # ⏳
 
-_HEADER_RE = re.compile(r"^\[([^|\]]{1,32})\|([a-z]+)\]\s?(.*)$", re.S)
+# [from] or [from>to], then |status], then the body.
+_HEADER_RE = re.compile(r"^\[([^|\]>]{1,32})(?:>([^|\]]{1,32}))?\|([a-z]+)\]\s?(.*)$", re.S)
 
 
 def sanitize_handle(handle: str) -> str:
-    h = re.sub(r"[|\]\[]", "", str(handle)).strip()
+    h = re.sub(r"[|\]\[>]", "", str(handle)).strip()
     if not h:
-        raise ValueError("participant handle is empty after removing []| characters")
+        raise ValueError("participant handle is empty after removing []|> characters")
     return h[:32]
 
 
-def header(handle: str, status: str) -> str:
+def header(handle: str, status: str, to: Optional[str] = None) -> str:
+    if to:
+        return f"[{handle}>{to}|{status}] "
     return f"[{handle}|{status}] "
 
 
-def parse(content: str) -> Optional[dict[str, str]]:
-    """Return {participant, status, body} for a chat-formatted message, else None."""
+def parse(content: str) -> Optional[dict[str, Optional[str]]]:
+    """Return {participant, to, status, body} for a chat-formatted message, else
+    None. ``to`` is None when the turn is unaddressed (broadcast / 2-party)."""
     m = _HEADER_RE.match(content or "")
     if not m:
         return None
-    return {"participant": m.group(1), "status": m.group(2), "body": m.group(3)}
+    return {"participant": m.group(1), "to": m.group(2),
+            "status": m.group(3), "body": m.group(4)}
+
+
+def _is_broadcast(to: Optional[str]) -> bool:
+    return to is None or str(to).strip().lower() in BROADCAST_ALIASES
+
+
+def _targets(to: Optional[str], me: str) -> bool:
+    """True if a turn addressed ``to`` should wake participant ``me`` — i.e. it's
+    a broadcast, or names ``me`` (case-insensitive)."""
+    if _is_broadcast(to):
+        return True
+    return str(to).strip().lower() == str(me).strip().lower()
 
 
 def is_human_stop(text: str) -> bool:
@@ -118,15 +151,18 @@ def bump_turn(channel_id: str, me: str) -> int:
 # -- send / await ----------------------------------------------------------
 
 
-def send_chat(client: DiscordClient, channel_id: str, me: str, status: str, text: str) -> list[dict[str, Any]]:
+def send_chat(client: DiscordClient, channel_id: str, me: str, status: str, text: str,
+              to: Optional[str] = None) -> list[dict[str, Any]]:
     """Post a chat message, splitting long text so EVERY piece carries the header
-    (earlier pieces as ``say`` continuations, the final piece with ``status``)."""
-    reserve = len(header(me, "impasse"))  # reserve for the longest status word
+    (earlier pieces as ``say`` continuations, the final piece with ``status``).
+    ``to`` addresses the turn to one peer; every piece keeps the address so a
+    multi-part turn stays targeted."""
+    reserve = len(header(me, "impasse", to))  # longest status word, incl. address
     pieces = chunk_content(text, MAX_MESSAGE_LEN - reserve) or [""]
     sent: list[dict[str, Any]] = []
     for i, piece in enumerate(pieces):
         st = status if i == len(pieces) - 1 else "say"
-        sent.append(client.post(channel_id, f"{header(me, st)}{piece}"))
+        sent.append(client.post(channel_id, f"{header(me, st, to)}{piece}"))
     return sent
 
 
@@ -134,7 +170,8 @@ def _lean(collected: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Strip the duplicated body from message entries — the combined `text`
     field is the single source for the words; here we keep only metadata."""
     return [
-        {"id": c["id"], "from": c["from"], "status": c["status"], "timestamp": c["timestamp"]}
+        {"id": c["id"], "from": c["from"], "to": c.get("to"),
+         "status": c["status"], "timestamp": c["timestamp"]}
         for c in collected
     ]
 
@@ -168,19 +205,49 @@ def _finish(channel_id: str, me: str, result: dict[str, Any]) -> dict[str, Any]:
 
 def _post_nudge(client: DiscordClient, channel_id: str, me: str, waited_s: float) -> None:
     """Post one human-visible line so whoever is watching knows a session is
-    blocked waiting — no dependence on the dormant side's behavior."""
+    blocked waiting — no dependence on the dormant side's behavior.
+
+    Two flavors: if I'm owed the floor (I hold it / a turn is addressed to me and
+    the other side has gone quiet), name whoever should respond. If instead I've
+    raised a hand and am being passed over, name the current floor holder and ask
+    them to yield to me — that's the anti-starvation signal."""
     try:
-        others = [p for p in compute_state(client, channel_id).get("participants", []) if p != me]
-        who = ", ".join(others) if others else "the other side"
+        st = compute_state(client, channel_id, me)
+        floor = st.get("floor")
+        participants = st.get("participants", [])
+        others = [p for p in participants if p != me]
         mins = max(1, int(waited_s // 60))
-        client.post(
-            channel_id,
-            f"{NUDGE_MARK} [{me}] has been waiting ~{mins}m for the next turn. "
-            f"{who}: it's your turn (chat_say/chat_await). "
-            f"A human watching can poke that session to resume.",
-        )
+        requests = [r["from"] for r in st.get("floor_requests", [])]
+
+        if me in requests and floor and floor != me:
+            # I raised a hand and I'm not the one holding the floor — starvation.
+            msg = (f"{NUDGE_MARK} [{me}] raised a hand ~{mins}m ago and is waiting to "
+                   f"speak. [{floor}] holds the floor — please yield to [{me}] "
+                   f"(chat_say(status=\"over\", to=\"{me}\")) or a human can prompt them.")
+        else:
+            who = floor or (", ".join(others) if others else "the other side")
+            msg = (f"{NUDGE_MARK} [{me}] has been waiting ~{mins}m for the next turn. "
+                   f"{who}: it's your turn (chat_say/chat_await). "
+                   f"A human watching can poke that session to resume.")
+        client.post(channel_id, msg)
     except DiscordError:
         pass
+
+
+def _floor_context(client: DiscordClient, channel_id: str, me: str) -> dict[str, Any]:
+    """Multiparty fairness snapshot, attached to a return that hands ``me`` the
+    floor so the model can rotate fairly without a separate chat_status call.
+    Empty for a 2-party chat (nothing to arbitrate)."""
+    st = compute_state(client, channel_id, me)
+    if not st.get("multiparty"):
+        return {}
+    return {
+        "multiparty": True,
+        "floor": st.get("floor"),
+        "pending_requests": st.get("floor_requests", []),
+        "suggest_next": st.get("suggest_next"),
+        "waiting": st.get("waiting", []),
+    }
 
 
 def await_turn(
@@ -190,9 +257,17 @@ def await_turn(
     timeout: float = 120.0,
     poll: float = 3.0,
     nudge_after: float = 240.0,
+    from_whom: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Block until another participant completes a turn (a non-``say`` status),
-    a human interjects, or ``timeout`` elapses. Advances this handle's cursor.
+    """Block until a turn comes to ``me``, a human interjects, or ``timeout``
+    elapses. Advances this handle's cursor.
+
+    "Comes to me" means another participant completes a turn (``over``/``wrap``)
+    that is addressed to me or broadcast, OR any participant ends the chat
+    (``end``/``impasse``, which is terminal for everyone). A turn addressed to a
+    different peer does NOT wake me — that's the floor token: I keep holding
+    until the floor is mine. ``ask`` (a hand-raise) and ``say`` never wake me.
+    ``from_whom`` optionally narrows waking to a yielded turn from that one peer.
 
     On timeout it returns ``timed_out=True`` (not an error): the other side is
     just still thinking. The caller should call ``await_turn`` AGAIN to keep
@@ -200,9 +275,13 @@ def await_turn(
 
     If the cumulative wait (across repeated calls) exceeds ``nudge_after``
     seconds, one visible reminder is posted to the channel so a watching human
-    knows which dormant session to poke. Set ``nudge_after<=0`` to disable."""
+    knows which dormant session to poke (and, if I raised a hand and am being
+    passed over, that I'm being starved). Set ``nudge_after<=0`` to disable."""
     deadline = time.monotonic() + timeout
-    collected: list[dict[str, Any]] = []
+    # Per-sender say-continuation buffers so interleaved multiparty turns don't
+    # bleed into each other's text.
+    pending_by_sender: dict[str, list[dict[str, Any]]] = {}
+    want = None if from_whom is None else str(from_whom).strip().lower()
 
     # Track cumulative wait across repeated calls (for the nudge).
     since, nudged = _get_wait(channel_id, me)
@@ -231,14 +310,14 @@ def await_turn(
                     # A participant replied OUT-OF-BAND via send_message (not
                     # chat_say). Surface it as a `plain` turn so a plain reply
                     # can never strand the awaiter (the stuck-chat footgun).
-                    entry = [{"id": m["id"], "from": "participant",
+                    entry = [{"id": m["id"], "from": "participant", "to": None,
                               "status": "plain", "timestamp": m["timestamp"]}]
                     return _finish(channel_id, me, _result(
                         me, channel_id, sender="participant", status="plain",
                         text=text, messages=entry, ended=False,
                         stop_reason=None, your_turn=True))
                 # A real human (non-bot author) typed in the channel.
-                human_entry = [{"id": m["id"], "from": "human",
+                human_entry = [{"id": m["id"], "from": "human", "to": None,
                                 "status": None, "timestamp": m["timestamp"]}]
                 if is_human_stop(text):
                     return _finish(channel_id, me, _result(
@@ -250,28 +329,46 @@ def await_turn(
                     text=text, messages=human_entry, ended=False,
                     stop_reason=None, your_turn=True))
 
-            if parsed["participant"] == me:
+            sender = parsed["participant"]
+            if sender == me:
                 continue  # my own message
 
-            collected.append({
-                "id": m["id"],
-                "from": parsed["participant"],
-                "status": parsed["status"],
-                "timestamp": m["timestamp"],
-                "body": parsed["body"],  # kept locally to build `text`; stripped from output
-            })
-            if parsed["status"] == "say":
-                continue  # mid-turn; keep accumulating
+            status = parsed["status"]
+            to = parsed["to"]
+            if status == "ask":
+                continue  # a hand-raise — recorded in history, doesn't wake me
 
-            st = parsed["status"]
-            ended = st in TERMINAL_STATUSES
-            stop_reason = "agreed" if st == "end" else ("impasse" if st == "impasse" else None)
-            return _finish(channel_id, me, _result(
-                me, channel_id, sender=parsed["participant"], status=st,
-                text="\n".join(x["body"] for x in collected),
-                messages=_lean(collected), ended=ended, stop_reason=stop_reason,
-                your_turn=not ended,
-            ))
+            buf = pending_by_sender.setdefault(sender, [])
+            buf.append({
+                "id": m["id"], "from": sender, "to": to, "status": status,
+                "timestamp": m["timestamp"],
+                "body": parsed["body"],  # local only; stripped from output
+            })
+            if status == "say":
+                continue  # mid-turn; keep accumulating for this sender
+
+            pieces = pending_by_sender.pop(sender)
+            text = "\n".join(x["body"] for x in pieces)
+
+            if status in TERMINAL_STATUSES:  # ends the chat for everyone
+                stop_reason = "agreed" if status == "end" else "impasse"
+                return _finish(channel_id, me, _result(
+                    me, channel_id, sender=sender, status=status, text=text,
+                    messages=_lean(pieces), ended=True, stop_reason=stop_reason,
+                    your_turn=False, addressed_to=to))
+
+            # A yielded turn (over/wrap). Does the floor actually come to me?
+            if want is not None and sender.lower() != want:
+                continue  # waiting specifically for a different peer
+            if not _targets(to, me):
+                continue  # addressed to another peer — keep holding the wait
+
+            result = _result(
+                me, channel_id, sender=sender, status=status, text=text,
+                messages=_lean(pieces), ended=False, stop_reason=None,
+                your_turn=True, addressed_to=to)
+            result.update(_floor_context(client, channel_id, me))
+            return _finish(channel_id, me, result)
 
         if time.monotonic() >= deadline:
             waited = time.time() - since
@@ -279,8 +376,9 @@ def await_turn(
                 _post_nudge(client, channel_id, me, waited)
                 _set_wait(channel_id, me, since, True)
                 nudged = True
+            leftover = [e for buf in pending_by_sender.values() for e in buf]
             result = _result(me, channel_id, sender=None, status=None, text="",
-                             messages=_lean(collected), ended=False, stop_reason=None,
+                             messages=_lean(leftover), ended=False, stop_reason=None,
                              your_turn=False, timed_out=True)
             result["waited_seconds"] = round(waited)
             result["nudged"] = nudged
@@ -302,61 +400,127 @@ def compute_state(
     the silent stuck-chat deadlock).
 
     Returns: session_active, ended, participants, multiparty, last_turn,
-    pending_turn (a completed over/wrap turn with no reply after it), and — if
-    `me` is given — your_turn. `_pending_predecessor` is an internal cursor hint.
+    pending_turn (the last over/wrap turn, owed to its addressee), floor (who may
+    speak next), floor_requests (outstanding hand-raises, oldest first), waiting
+    (participants ranked most-starved first), suggest_next (the fair next
+    addressee in a multiparty room), and — if `me` is given — your_turn.
+    last_turn/pending_turn carry `to` (the addressee, or None). `_pending_predecessor`
+    is an internal cursor hint.
     """
     raw = client.read_messages(channel_id, limit=max(1, min(scan, 100)))
     msgs = list(reversed([simplify_message(m) for m in raw]))  # chronological
     parsed_list = [parse(m["content"]) for m in msgs]
 
+    me_norm = sanitize_handle(me) if me is not None else None
+    real = YIELD_STATUSES + TERMINAL_STATUSES  # statuses that complete a turn
     participants: list[str] = []
     last_turn: Optional[dict[str, Any]] = None
     last_turn_i = -1
+    last_turn_index_by: dict[str, int] = {}   # participant -> index of their last completed turn
+    last_significant: dict[str, dict[str, Any]] = {}  # ignoring pure `say`
     for i, (m, p) in enumerate(zip(msgs, parsed_list)):
         if not p:
             continue
-        if p["participant"] not in participants:
-            participants.append(p["participant"])
-        if p["status"] != "say":
-            last_turn = {"from": p["participant"], "status": p["status"],
+        who = p["participant"]
+        if who not in participants:
+            participants.append(who)
+        # An addressed peer is a known participant even before it has posted.
+        if p["to"] and not _is_broadcast(p["to"]) and p["to"] not in participants:
+            participants.append(p["to"])
+        if p["status"] == "say":
+            continue
+        last_significant[who] = {"status": p["status"], "i": i}
+        if p["status"] in real:
+            last_turn_index_by[who] = i
+            last_turn = {"from": who, "to": p["to"], "status": p["status"],
                          "id": m["id"], "ts": m["timestamp"]}
             last_turn_i = i
 
+    # The querying caller is a participant too (it may not have posted yet).
+    if me_norm and me_norm not in participants:
+        participants.append(me_norm)
+
     ended = bool(last_turn and last_turn["status"] in TERMINAL_STATUSES)
+    multiparty = len(participants) > 2
+
+    # The last yielded turn is owed until someone completes a turn after it —
+    # and since last_turn IS the most recent completed turn, a yield there is
+    # by definition unanswered.
     pending = None
     pending_predecessor = None
-    if last_turn and last_turn["status"] in ("over", "wrap"):
-        replied = any(
-            parsed_list[j] and parsed_list[j]["participant"] != last_turn["from"]
-            for j in range(last_turn_i + 1, len(msgs))
+    if last_turn and last_turn["status"] in YIELD_STATUSES:
+        pending = last_turn
+        pending_predecessor = (
+            msgs[last_turn_i - 1]["id"] if last_turn_i > 0
+            else str(int(last_turn["id"]) - 1)
         )
-        if not replied:
-            pending = last_turn
-            pending_predecessor = (
-                msgs[last_turn_i - 1]["id"] if last_turn_i > 0
-                else str(int(last_turn["id"]) - 1)
-            )
+
+    # Floor: who may speak next. An addressed pending names its target; an
+    # unaddressed pending in a 2-party chat implies the other party; unaddressed
+    # in a multiparty room is an open floor (no single holder).
+    floor: Optional[str] = None
+    if pending:
+        if pending["to"] and not _is_broadcast(pending["to"]):
+            floor = pending["to"]
+        elif not multiparty:
+            others = [p for p in participants if p != pending["from"]]
+            floor = others[0] if others else None
+
+    # Outstanding hand-raises: a participant whose most recent non-`say` message
+    # is an `ask` (and who doesn't already hold the floor) is waiting to speak.
+    floor_requests = [
+        {"from": p, "i": sig["i"]}
+        for p, sig in last_significant.items()
+        if sig["status"] == "ask" and p != floor
+    ]
+    floor_requests.sort(key=lambda r: r["i"])
+    floor_requests = [{"from": r["from"]} for r in floor_requests]
+
+    # Waiting, most-starved first: everyone but the floor holder, ranked by how
+    # long since they last completed a turn (never-spoke sorts first).
+    waiting = sorted(
+        [p for p in participants if p != floor],
+        key=lambda p: last_turn_index_by.get(p, -1),
+    )
+
+    # The fair next addressee (multiparty only): an outstanding request wins,
+    # else the most-starved participant who isn't the one who just spoke.
+    suggest_next: Optional[str] = None
+    if multiparty:
+        last_speaker = (pending or last_turn or {}).get("from")
+        if floor_requests:
+            suggest_next = floor_requests[0]["from"]
+        else:
+            cands = [p for p in waiting if p != last_speaker]
+            suggest_next = cands[0] if cands else None
 
     state: dict[str, Any] = {
         "session_active": bool(last_turn) and not ended,
         "ended": ended,
         "participants": participants,
-        "multiparty": len(participants) > 2,
+        "multiparty": multiparty,
         "last_turn": last_turn,
         "pending_turn": pending,
+        "floor": floor,
+        "floor_requests": floor_requests,
+        "waiting": waiting,
+        "suggest_next": suggest_next,
         "_pending_predecessor": pending_predecessor,
     }
-    if me is not None:
-        me = sanitize_handle(me)
-        state["your_turn"] = bool(pending and pending["from"] != me)
+    if me_norm is not None:
+        state["your_turn"] = bool(
+            pending and pending["from"] != me_norm and _targets(pending.get("to"), me_norm)
+        )
     return state
 
 
 def _result(me: str, channel_id: str, *, sender, status, text, messages,
-            ended: bool, stop_reason, your_turn: bool, timed_out: bool = False) -> dict[str, Any]:
+            ended: bool, stop_reason, your_turn: bool, timed_out: bool = False,
+            addressed_to: Optional[str] = None) -> dict[str, Any]:
     turns, cap = get_meta(channel_id, me)
     return {
         "from": sender,
+        "to": addressed_to,
         "status": status,
         "text": text,
         "messages": messages,

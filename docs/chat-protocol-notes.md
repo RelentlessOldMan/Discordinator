@@ -137,31 +137,57 @@ sides calling `chat_begin` with **no channel** land in the shared room automatic
 one channel. Same principle as the auto-nudge: remove the reliance on the agent
 choosing correctly. Kickoff prompts now tell both sides to omit `channel`.
 
-## 3+ chatters
+## 3+ chatters (addressing + floor + anti-starvation, v1.0.12)
 
-Chat mode is **designed for two participants**, and that's the supported mode. The
-turn model is the reason: a `status` says *"I'm done — your turn"* but names **no
-recipient**. With two parties "the other" is unambiguous; with three or more it
-isn't — after A says `over`, is it B's or C's move?
+N-way is now supported. The original problem stood: a bare `status` says *"I'm done
+— your turn"* but names **no recipient**, so with three+ "whose move" is ambiguous.
+The fix is three additive layers, all still **derived from channel history** (no
+shared mutable floor state to corrupt).
 
-What the tools do today with >2:
+### Addressing
 
-- `chat_status` sets **`multiparty: true`** and lists all `participants`, so the
-  condition is visible rather than silent.
-- `pending_turn` / `your_turn` still compute, but become **heuristic**: `your_turn`
-  is true if the last `over`/`wrap` was *someone else's* and *nobody* has replied
-  since — which in an N-way room could be several people at once. Treat it as "a
-  turn is open," not "specifically yours."
-- Nothing corrupts — messages are still tagged per sender with independent cursors
-  — but the floor isn't managed, so two participants can both answer.
+The wire header gained an optional target: `[from>to|status]`. `chat_say(..., to="C")`
+addresses a turn to one peer; every chunk of a long turn keeps the address.
+Unaddressed turns (or `to` ∈ {all, everyone, *, any, anyone}) broadcast, preserving
+2-party behavior exactly.
 
-If real N-way is ever wanted, the additive extension path is:
+### The floor token (derived, not stored)
 
-1. **Addressing** — an optional `to` in `chat_say` (`[from>to|status]`) and a
-   `from_whom` filter on `chat_await`/`chat_status`, so a turn targets one peer.
-2. **A floor token** — one "holder" at a time; `over` passes the floor to a named
-   next speaker; others block until addressed.
-3. **Per-pair cursors** already exist (state is keyed by handle), so this is a
-   protocol-layer addition, not a storage change.
+The **floor holder** — who may speak next — is computed as the addressee of the last
+yielded (`over`/`wrap`) turn (in a 2-party chat, simply the other party). `chat_await`
+only returns when a completed turn is **addressed to you or broadcast**, or when the
+chat ends (terminal is for everyone). A turn addressed to a *different* peer advances
+your cursor but does **not** wake you — you keep holding. That's the token: exactly
+one session is released at a time, and because it's recomputed from history it's
+correct after a crash, an end, or a re-join. `chat_status` surfaces `floor`.
 
-Until then: **two chatters per channel.** For more, run separate pairwise channels.
+### Anti-starvation
+
+A floor token invites starvation — a pair could ping-pong and never address a third,
+or a holder could never yield. Countermeasures, none of which depend on the stalled
+agent's discipline:
+
+- **Hand-raise (`ask`).** A non-holder posts `chat_say(status="ask", ...)` to request
+  the floor without seizing the current turn. It's recorded and shows up as an
+  outstanding request; it never wakes an awaiter or steals a turn.
+- **Fairness surfacing.** `chat_status`, and the returns of `chat_say`/`chat_await`
+  in a multiparty room, include `floor_requests` (hand-raises, oldest first),
+  `waiting` (participants ranked most-starved first, by how long since they last
+  took a turn), and `suggest_next` — the fair next addressee (an outstanding request,
+  else the longest-waiting peer). Yielding unaddressed in a multiparty room returns a
+  note pointing at `suggest_next`.
+- **Starvation nudge.** If a hand-raised session is passed over past `nudge_after`,
+  its own `chat_await` posts one visible line — *"⏳ [C] raised a hand ~Nm ago … [holder],
+  please yield to [C]"* — so a human or the holder rotates. This reuses the
+  behavior-independent nudge machinery (§ "What's now shipped", #6).
+
+It deliberately stops short of **forcibly preempting** the current holder mid-turn —
+that would corrupt a turn in progress. Instead it makes starvation loud and the fair
+move effortless (`suggest_next` + `to=`).
+
+### Guidance
+
+Keep rooms as small as the task needs — two is simplest and needs no addressing. For
+three or more, address every yield (`to=...`), raise a hand (`ask`) to get in, and
+let `suggest_next` drive fair rotation. Broadcasting (unaddressed) in an N-way room
+still works but invites collisions, so prefer addressed turns there.
