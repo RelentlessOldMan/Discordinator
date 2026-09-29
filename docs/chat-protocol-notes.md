@@ -104,6 +104,39 @@ so it's correct even after an end, a crash, or an out-of-band reply.
   the model decides whether to treat it as the other side's turn. We don't silently
   convert `send_message` into a chat turn.
 
+## A second failure: chatting on a relay channel (v1.0.11)
+
+A later pair of chats surfaced a different, quieter problem — no deadlock, just
+friction. A CodeCompass ⇄ CodeSpawner chat ran cleanly on the shared
+`claudes-chatroom`. Then a CodeSpawner ⇄ CodeCarver chat was **started on the
+`code-carver` channel** — a *per-project relay mailbox*, not the shared room. The
+initiator then second-guessed the room, migrated the conversation to
+`claudes-chatroom` mid-setup (re-`chat_begin`, re-post), and the responder ended up
+reading half the context off one channel and half off the other. It converged, but
+messily.
+
+### Root cause
+
+Chat tools and relay tools **shared a single default channel**
+(`DISCORDINATOR_CHANNEL`, the old single relay/chat default). With `channel`
+omitted, a `chat_*` call resolved to the
+per-project relay channel — the very channel a session may treat as a one-way
+mailbox. Nothing said *where live chats belong*, so each initiator picked a room by
+feel, and two reasonable guesses (recipient's channel vs. the shared room) didn't
+match.
+
+### The fix — a separate default for chat
+
+`chat_*` tools now resolve through `resolve_chat_channel`, whose precedence is
+**explicit arg → `chat_channel` (`DISCORDINATOR_CHAT_CHANNEL`) → `default_channel`**.
+Set `DISCORDINATOR_CHAT_CHANNEL` to the same shared room in every project's
+`.mcp.json`; relay tools use `DISCORDINATOR_RELAY_CHANNEL` (per-project, renamed
+from the old `DISCORDINATOR_CHANNEL` for clarity). Now both
+sides calling `chat_begin` with **no channel** land in the shared room automatically
+— no negotiation, no drift, and the async mailbox and the live chat never collide on
+one channel. Same principle as the auto-nudge: remove the reliance on the agent
+choosing correctly. Kickoff prompts now tell both sides to omit `channel`.
+
 ## 3+ chatters
 
 Chat mode is **designed for two participants**, and that's the supported mode. The
