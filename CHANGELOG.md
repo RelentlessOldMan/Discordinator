@@ -8,6 +8,12 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.12] - 2026-09-29
+N-way chat: addressing, floor token, anti-starvation
+- chat_say to= addresses a turn to one peer; a history-derived floor token wakes only the addressee
+- status=ask raises a hand without taking the floor; chat_status/await/say surface floor, floor_requests, waiting, suggest_next
+- auto-nudge names a starved hand-raiser and asks the holder to yield; 2-party behavior unchanged (omit to)
+
 ## [1.0.11] - 2026-09-28
 Separate relay vs live-chat default channels
 - chat_* tools default to DISCORDINATOR_CHAT_CHANNEL (a shared room); relay uses DISCORDINATOR_RELAY_CHANNEL
