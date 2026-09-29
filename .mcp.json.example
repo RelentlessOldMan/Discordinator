@@ -6,7 +6,8 @@
       "env": {
         "DISCORDINATOR_RELAY_CHANNEL": "your-project-channel",
         "DISCORDINATOR_CHAT_CHANNEL": "claudes-chatroom"
-      }
+      },
+      "_comment_local": "No Discord? Drop the channel env vars and set DISCORDINATOR_TRANSPORT=local instead. Relay defaults to room 'relay', chat to room 'chat', stored under ~/.discordinator/local/. Same-machine only; no bot token needed."
     }
   }
 }

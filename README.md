@@ -28,6 +28,35 @@ Discordinator has two distinct modes — pick per task:
 
 ---
 
+## Transports: Discord or local
+
+Both modes above ride on a swappable **transport**, chosen once per machine:
+
+| | **`discord`** (default) | **`local`** |
+|---|---|---|
+| **Transport** | Discord REST API | JSONL files under `~/.discordinator/local/` |
+| **Reach** | Any machine, anywhere | **Same machine only** (shared filesystem) |
+| **Setup** | Bot token + server + channel ids | **Nothing** — no token, no network |
+| **Use it when** | Sessions on different machines, or you want durable history you can eyeball in Discord | Sessions on one box (e.g. a locked-down work laptop), offline dev, or trying it out with zero setup |
+
+`relay` **and** `chat` both work over either transport — same tools, same
+protocol (turn-taking, floor token, addressing, anti-starvation). Switch with:
+
+```powershell
+discordinator config set-transport local     # or: discord
+# or per-project / per-session, via env:
+#   DISCORDINATOR_TRANSPORT=local
+```
+
+Precedence is the usual **env var → config → default (`discord`)**. In `local`
+mode, channels are just room names (any string; no ids needed) — relay defaults
+to a room called `relay`, chat to `chat`, so it works out of the box. Local mode
+has **no human-in-the-channel affordances** (there's no Discord UI to watch), so
+the visible nudge/`stop` signals still get written but nobody's eyeballing them;
+it's built for agent↔agent on one machine.
+
+---
+
 > **Setting this up on a new machine or as a different person?** See
 > [`AGENTS.md`](AGENTS.md) for a step-by-step guide (it also covers who needs
 > their own bot). Changelog is in [`CHANGELOG.md`](CHANGELOG.md).
@@ -82,6 +111,7 @@ discordinator config set-token <YOUR_BOT_TOKEN>
 discordinator config add-channel relay      123456789012345678   # first channel becomes default
 discordinator config add-channel projectx   987654321098765432
 discordinator config set-label  laptop        # optional: tags your messages as [laptop]
+discordinator config set-transport local      # optional: no-Discord local mode (default: discord)
 discordinator config show
 ```
 

@@ -42,12 +42,24 @@ class ConfigError(Exception):
 
 DEFAULTS: dict[str, Any] = {
     "token": None,
+    "transport": "discord",  # "discord" (REST) or "local" (no-Discord, files)
     "default_channel": None,
     "chat_channel": None,   # default channel for CHAT tools (a shared room)
     "channels": {},         # friendly name -> channel id (string)
     "machine_label": None,  # optional tag prefixed to outgoing messages
     "ack_on_read": True,    # auto-react ✅ to the newest message on every read
 }
+
+
+def transport(cfg: dict[str, Any]) -> str:
+    """Normalize the configured transport to ``"discord"`` or ``"local"``."""
+    val = str(cfg.get("transport") or "discord").strip().lower()
+    return "local" if val in ("local", "file", "offline") else "discord"
+
+
+def is_local(cfg: dict[str, Any]) -> bool:
+    """True when running the no-Discord local filesystem transport."""
+    return transport(cfg) == "local"
 
 
 def config_path() -> Path:
@@ -109,6 +121,9 @@ def load() -> dict[str, Any]:
     env_token = os.environ.get("DISCORD_BOT_TOKEN")
     if env_token:
         data["token"] = env_token
+    env_transport = os.environ.get("DISCORDINATOR_TRANSPORT")
+    if env_transport:
+        data["transport"] = env_transport
     env_label = os.environ.get("DISCORDINATOR_LABEL")
     if env_label:
         data["machine_label"] = env_label
@@ -144,25 +159,33 @@ def require_token(cfg: dict[str, Any]) -> str:
 
 
 def resolve_channel(cfg: dict[str, Any], channel: Optional[str]) -> str:
-    """Resolve a channel name/id to a numeric channel id string.
+    """Resolve a channel name/id to a channel id string.
 
     Precedence: explicit ``channel`` arg (a config name or a raw numeric id),
-    otherwise the configured ``default_channel``.
+    otherwise the configured ``default_channel``. In **local** transport, any
+    string is a valid room name (stored as a JSONL file), and the default relay
+    room falls back to ``"relay"`` so local mode needs zero channel setup.
     """
     channels = cfg.get("channels") or {}
+    local = is_local(cfg)
     name = channel if channel is not None else cfg.get("default_channel")
 
     if name is None:
-        raise ConfigError(
-            "No channel specified and no default configured. Either pass "
-            "--channel <name-or-id> or run: discordinator config set-default <name>"
-        )
+        if local:
+            name = "relay"  # built-in default local room; no config needed
+        else:
+            raise ConfigError(
+                "No channel specified and no default configured. Either pass "
+                "--channel <name-or-id> or run: discordinator config set-default <name>"
+            )
 
     name = str(name)
     if name in channels:
         return str(channels[name])
     if name.isdigit():
         return name
+    if local:
+        return name  # arbitrary room name (LocalClient sanitizes for storage)
 
     known = ", ".join(sorted(channels)) or "(none)"
     raise ConfigError(
@@ -185,11 +208,14 @@ def resolve_chat_channel(cfg: dict[str, Any], channel: Optional[str]) -> str:
         return resolve_channel(cfg, channel)
     fallback = cfg.get("chat_channel") or cfg.get("default_channel")
     if fallback is None:
-        raise ConfigError(
-            "No chat channel specified and none configured. Pass channel=<name-or-id>, "
-            "or set a shared room with: discordinator config set-chat-channel <name-or-id> "
-            "(or export DISCORDINATOR_CHAT_CHANNEL)."
-        )
+        if is_local(cfg):
+            fallback = "chat"  # built-in default local chat room, distinct from relay
+        else:
+            raise ConfigError(
+                "No chat channel specified and none configured. Pass channel=<name-or-id>, "
+                "or set a shared room with: discordinator config set-chat-channel <name-or-id> "
+                "(or export DISCORDINATOR_CHAT_CHANNEL)."
+            )
     return resolve_channel(cfg, fallback)
 
 
