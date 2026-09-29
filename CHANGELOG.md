@@ -8,6 +8,12 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.11] - 2026-09-28
+Separate relay vs live-chat default channels
+- chat_* tools default to DISCORDINATOR_CHAT_CHANNEL (a shared room); relay uses DISCORDINATOR_RELAY_CHANNEL
+- stops live chats from landing on a per-project relay mailbox; both sides meet in the shared room with no channel arg
+- renamed DISCORDINATOR_CHANNEL -> DISCORDINATOR_RELAY_CHANNEL; added config set-chat-channel
+
 ## [1.0.10] - 2026-09-27
 chat_await auto-nudge for behavior-independent stall recovery
 - waiting side posts one channel reminder after nudge_after (default 240s)
