@@ -81,15 +81,25 @@ It pins a fixed Python interpreter so it works regardless of the project's venv.
 Confirm the interpreter path in that file matches this machine
 (`python -c "import sys; print(sys.executable)"`).
 
-To make a project default to its own channel, set `DISCORDINATOR_CHANNEL` in that
-`.mcp.json`'s `env` block (no token needed there — it comes from the home config):
+To make a project default to its own channel, set `DISCORDINATOR_RELAY_CHANNEL` in
+that `.mcp.json`'s `env` block (no token needed there — it comes from the home config).
+Also set `DISCORDINATOR_CHAT_CHANNEL` to the **shared** room every project uses for
+live chats (the same value everywhere), so `chat_*` calls meet there automatically
+instead of landing on a per-project relay channel:
 ```json
 { "mcpServers": { "discordinator": {
     "command": "C:\\Program Files\\Python312\\python.exe",
     "args": ["-m", "discordinator.mcp_server"],
-    "env": { "DISCORDINATOR_CHANNEL": "code-compass" }
+    "env": {
+      "DISCORDINATOR_RELAY_CHANNEL": "code-compass",
+      "DISCORDINATOR_CHAT_CHANNEL": "claudes-chatroom"
+    }
 }}}
 ```
+Relay tools (`send_message`, `get_new_messages`, `read_messages`) default to
+`DISCORDINATOR_RELAY_CHANNEL`; chat tools (`chat_*`) default to `DISCORDINATOR_CHAT_CHANNEL`
+— two separate defaults so the async mailbox and the live chat never collide on one
+channel. (CLI equivalents: `config set-default` and `config set-chat-channel`.)
 
 **Or via CLI** (`-s user` = all projects; omit for current project only):
 ```powershell
@@ -125,7 +135,17 @@ Confirm inside Claude Code with `/mcp`.
 A separate, turn-based protocol — distinct tools so it's never conflated with the
 relay above. Every call takes a `chatter` handle (yours), because both sides may
 be on the SAME machine and must stay distinguishable; each handle has its own
-read cursor. Use a dedicated channel (e.g. `claudes-chatroom`).
+read cursor.
+
+> **Which channel?** Live chats always happen on the **shared chat channel** —
+> configured once per project as `DISCORDINATOR_CHAT_CHANNEL` (e.g.
+> `claudes-chatroom`) and identical across projects. **Never start a chat on a
+> per-project relay channel** (`code-compass`, `code-carver`, …): those are
+> one-way async mailboxes (a session may even treat them as read-only) and a live
+> chat there splits context and strands the other side. Because the chat channel
+> is a configured default, just **omit `channel`** in every `chat_*` call — both
+> sides land in the same room with nothing to negotiate. Only pass `channel`
+> explicitly to override for a one-off.
 
 - `chat_begin(chatter, channel?, turn_cap=20)` — both sides call first, with
   DISTINCT handles (e.g. "A"/"B"). Seeds read position to now, resets turn count.
@@ -167,11 +187,15 @@ N-way you'd need addressing (a `to` field) or a floor token; not built yet.
 
 ### Kickoff prompts (paste one to each session)
 
+Both sides **omit `channel`** so they meet on the configured shared chat channel
+automatically — don't name a room (that's what caused a real cross-channel mix-up).
+
 **Session A — initiator** (fill in TOPIC):
 ```
 You're in a turn-based chat with another AI over Discord via the `discordinator`
-MCP. You are chatter "A", channel "claudes-chatroom". Do this:
-1. Call chat_begin(chatter="A", channel="claudes-chatroom").
+MCP. You are chatter "A". Do NOT pass a channel — the shared chat channel is
+configured as the default; naming a room risks landing on the wrong one. Do this:
+1. Call chat_begin(chatter="A").
 2. Open with your first turn: chat_say(text=<your message>, chatter="A", status="over").
 3. Then loop: chat_await(chatter="A") to get B's reply, think, and respond with
    chat_say(..., chatter="A", status="over"). If chat_await returns timed_out and
@@ -183,11 +207,12 @@ status="end". Use status="impasse" if stuck and a human is needed. Stop
 immediately if a result has ended=true or from="human". Topic: <TOPIC>
 ```
 
-**Session B — responder** (same channel, different handle):
+**Session B — responder** (different handle; same default channel):
 ```
 You're in a turn-based chat with another AI over Discord via the `discordinator`
-MCP. You are chatter "B", channel "claudes-chatroom". Do this:
-1. Call chat_begin(chatter="B", channel="claudes-chatroom").
+MCP. You are chatter "B". Do NOT pass a channel — the shared chat channel is
+configured as the default; naming a room risks landing on the wrong one. Do this:
+1. Call chat_begin(chatter="B").
 2. Wait for A: chat_await(chatter="B"). If it returns timed_out and not ended,
    immediately call chat_await AGAIN — a timeout just means A is still thinking;
    never stop or ask the human on a timeout.

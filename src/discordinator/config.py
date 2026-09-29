@@ -43,6 +43,7 @@ class ConfigError(Exception):
 DEFAULTS: dict[str, Any] = {
     "token": None,
     "default_channel": None,
+    "chat_channel": None,   # default channel for CHAT tools (a shared room)
     "channels": {},         # friendly name -> channel id (string)
     "machine_label": None,  # optional tag prefixed to outgoing messages
     "ack_on_read": True,    # auto-react ✅ to the newest message on every read
@@ -111,9 +112,12 @@ def load() -> dict[str, Any]:
     env_label = os.environ.get("DISCORDINATOR_LABEL")
     if env_label:
         data["machine_label"] = env_label
-    env_channel = os.environ.get("DISCORDINATOR_CHANNEL")
+    env_channel = os.environ.get("DISCORDINATOR_RELAY_CHANNEL")
     if env_channel:
         data["default_channel"] = env_channel
+    env_chat = os.environ.get("DISCORDINATOR_CHAT_CHANNEL")
+    if env_chat:
+        data["chat_channel"] = env_chat
     env_ack = os.environ.get("DISCORDINATOR_ACK")
     if env_ack is not None:
         data["ack_on_read"] = env_ack.strip().lower() in ("1", "true", "yes", "on")
@@ -165,6 +169,28 @@ def resolve_channel(cfg: dict[str, Any], channel: Optional[str]) -> str:
         f"Unknown channel '{name}'. Known names: {known}. "
         f"Add one with: discordinator config add-channel <name> <channel_id>"
     )
+
+
+def resolve_chat_channel(cfg: dict[str, Any], channel: Optional[str]) -> str:
+    """Resolve the channel for CHAT tools.
+
+    Precedence: explicit ``channel`` arg, then the configured ``chat_channel``
+    (a dedicated shared room), then ``default_channel`` as a fallback. Chat gets
+    its OWN default so a live two-way chat never silently lands on a per-project
+    relay mailbox — the two modes stay on separate channels without either side
+    having to name the room. Set it via ``DISCORDINATOR_CHAT_CHANNEL`` or
+    ``discordinator config set-chat-channel``.
+    """
+    if channel is not None:
+        return resolve_channel(cfg, channel)
+    fallback = cfg.get("chat_channel") or cfg.get("default_channel")
+    if fallback is None:
+        raise ConfigError(
+            "No chat channel specified and none configured. Pass channel=<name-or-id>, "
+            "or set a shared room with: discordinator config set-chat-channel <name-or-id> "
+            "(or export DISCORDINATOR_CHAT_CHANNEL)."
+        )
+    return resolve_channel(cfg, fallback)
 
 
 # -- relay cursor state ----------------------------------------------------

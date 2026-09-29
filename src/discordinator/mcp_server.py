@@ -279,13 +279,15 @@ def chat_begin(chatter: str, channel: Optional[str] = None, turn_cap: int = 20) 
 
     Args:
         chatter: your participant handle (short; used to tag and self-filter).
-        channel: chat channel name/id (a dedicated channel like claudes-chatroom
-            is recommended). Defaults to the configured default channel.
+        channel: chat channel name/id. Omit to use the dedicated chat channel
+            (chat_channel / DISCORDINATOR_CHAT_CHANNEL — a shared room like
+            claudes-chatroom); both sides then meet there with no negotiation.
+            Never defaults to a per-project relay channel unless one isn't set.
         turn_cap: soft cap on your turns before you're nudged to wrap up.
     """
     me = chat.sanitize_handle(chatter)
     cfg = config.load()
-    channel_id = config.resolve_channel(cfg, channel)
+    channel_id = config.resolve_chat_channel(cfg, channel)
     with _client() as client:
         st = chat.compute_state(client, channel_id, me)
         if st.get("your_turn") and st.get("_pending_predecessor"):
@@ -332,7 +334,7 @@ def chat_say(
     if status not in chat.STATUSES:
         raise ValueError(f"status must be one of {chat.STATUSES}, got {status!r}")
     cfg = config.load()
-    channel_id = config.resolve_channel(cfg, channel)
+    channel_id = config.resolve_chat_channel(cfg, channel)
     with _client() as client:
         sent = chat.send_chat(client, channel_id, me, status, text)
     turns = chat.bump_turn(channel_id, me) if status != "say" else chat.get_meta(channel_id, me)[0]
@@ -384,7 +386,7 @@ def chat_await(
     """
     me = chat.sanitize_handle(chatter)
     cfg = config.load()
-    channel_id = config.resolve_channel(cfg, channel)
+    channel_id = config.resolve_chat_channel(cfg, channel)
     with _client() as client:
         return chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll,
                                nudge_after=nudge_after)
@@ -416,7 +418,7 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
     heuristic (any non-sender could be "next"). `multiparty` flags this.
     """
     cfg = config.load()
-    channel_id = config.resolve_channel(cfg, channel)
+    channel_id = config.resolve_chat_channel(cfg, channel)
     with _client() as client:
         st = chat.compute_state(client, channel_id, chatter)
     public = {k: v for k, v in st.items() if not k.startswith("_")}

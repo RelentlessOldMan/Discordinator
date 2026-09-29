@@ -358,6 +358,13 @@ def cmd_config(args: argparse.Namespace) -> int:
         cfg["default_channel"] = args.name
         config.save(cfg)
         print(f"default channel set to '{args.name}'")
+    elif action == "set-chat-channel":
+        channels = cfg.get("channels") or {}
+        if not args.name.isdigit() and args.name not in channels:
+            return _err(f"no channel named '{args.name}'. Add it first.")
+        cfg["chat_channel"] = args.name
+        config.save(cfg)
+        print(f"chat channel set to '{args.name}' (live chat_* default; relay unaffected)")
     elif action == "set-label":
         cfg["machine_label"] = args.label
         config.save(cfg)
@@ -454,7 +461,9 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("channel_id")
     x = csub.add_parser("remove-channel", help="remove a channel mapping")
     x.add_argument("name")
-    x = csub.add_parser("set-default", help="set the default channel name")
+    x = csub.add_parser("set-default", help="set the default channel name (relay tools)")
+    x.add_argument("name")
+    x = csub.add_parser("set-chat-channel", help="set the default channel for live chat_* tools (a shared room)")
     x.add_argument("name")
     x = csub.add_parser("set-label", help="set this machine's message label")
     x.add_argument("label")
