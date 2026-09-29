@@ -149,23 +149,29 @@ read cursor.
 
 - `chat_begin(chatter, channel?, turn_cap=20)` — both sides call first, with
   DISTINCT handles (e.g. "A"/"B"). Seeds read position to now, resets turn count.
-- `chat_say(text, chatter, status="over", channel?)` — send with an explicit
-  status: `say` (more coming), `over` (your turn), `wrap` (propose ending —
-  agree?), `end` (ending now), `impasse` (stuck — get the human).
-- `chat_await(chatter, channel?, timeout=120, poll=3)` — BLOCKS until the other
-  finishes a turn / a human interjects / a participant posts out-of-band / timeout.
-  Returns `{from, status, text, your_turn, ended, stop_reason, timed_out,
-  cap_reached}`. **If `timed_out` and not `ended`, immediately call it again** — a
-  timeout means the other side is still thinking, NOT that the chat is over. Never
-  abandon or ask the human on a timeout. (A plain `send_message` from a participant
-  comes back as `status="plain"` so a non-`chat_say` reply can't strand you.) After
-  a long wait (`nudge_after`, default 240s) it posts one visible channel reminder so
-  a human knows which dormant session to poke — recovery doesn't rely on the other
+- `chat_say(text, chatter, status="over", channel?, to?)` — send with an explicit
+  status: `say` (more coming), `ask` (raise a hand — request the floor without
+  taking the turn), `over` (your turn), `wrap` (propose ending — agree?), `end`
+  (ending now), `impasse` (stuck — get the human). `to="handle"` addresses the turn
+  to one peer (see 3+ chatters); omit it in a 2-party chat.
+- `chat_await(chatter, channel?, timeout=120, poll=3, from_whom?)` — BLOCKS until a
+  turn comes to YOU / a human interjects / a participant posts out-of-band / timeout.
+  Returns `{from, to, status, text, your_turn, ended, stop_reason, timed_out,
+  cap_reached}` (plus `floor, pending_requests, waiting, suggest_next` when the floor
+  comes to you in a multiparty room). A turn addressed to a *different* peer doesn't
+  wake you — you hold until the floor is yours. `from_whom` narrows waking to one
+  peer. **If `timed_out` and not `ended`, immediately call it again** — a timeout
+  means the other side is still thinking, NOT that the chat is over. Never abandon or
+  ask the human on a timeout. (A plain `send_message` from a participant comes back
+  as `status="plain"` so a non-`chat_say` reply can't strand you.) After a long wait
+  (`nudge_after`, default 240s) it posts one visible channel reminder so a human
+  knows which dormant/starved session to poke — recovery doesn't rely on the other
   agent.
 - `chat_status(chatter?, channel?)` — read the current state from history:
-  `{session_active, ended, participants, multiparty, last_turn, pending_turn,
-  your_turn}`. **Call this whenever you (re)engage a chat channel** to learn if a
-  turn is owed to you — don't eyeball message tags.
+  `{session_active, ended, participants, multiparty, last_turn, pending_turn, floor,
+  floor_requests, waiting, suggest_next, your_turn}`. **Call this whenever you
+  (re)engage a chat channel** to learn if a turn is owed to you — don't eyeball
+  message tags.
 
 Flow: both `chat_begin` → initiator `chat_say(..., "over")`, other `chat_await`;
 alternate. **Don't** have both `chat_await` first (deadlock). End is mutual: one
@@ -180,10 +186,27 @@ other human message comes back as `from="human"` so the agents can react. A soft
 `chat_begin` (it repositions you onto the pending turn) then `chat_await`. See
 [`docs/chat-protocol-notes.md`](docs/chat-protocol-notes.md) for the full analysis.
 
-**3+ chatters.** Chat mode is designed for **two** participants. Turns carry no
-addressed recipient, so with more than two, "whose turn" is ambiguous —
-`chat_status` sets `multiparty: true` and `your_turn` becomes heuristic. For real
-N-way you'd need addressing (a `to` field) or a floor token; not built yet.
+**3+ chatters (addressing + floor + anti-starvation).** N-way is supported. Because
+a bare "your turn" is ambiguous with three or more, discipline is: **address every
+yielding turn** with `chat_say(..., status="over", to="handle")`. The addressee is
+the **floor holder** — only they wake from `chat_await`; everyone else keeps
+holding. The floor is derived from history (the addressee of the last yielded turn),
+so it survives a crash or re-join.
+
+- **Want in while someone else holds the floor?** `chat_say(status="ask", ...)` —
+  a hand-raise that's recorded without interrupting the current turn.
+- **Not starving anyone:** after you yield in a multiparty room, `chat_say` and
+  `chat_await` return `pending_requests` (who raised a hand), `waiting` (ranked
+  most-starved first), and `suggest_next` (the fair next addressee — an outstanding
+  request, else the longest-waiting peer). Address `suggest_next` to rotate fairly.
+- **If you're passed over:** your `chat_await` keeps blocking; past `nudge_after` it
+  posts one visible line naming you and asking the floor holder to yield to you, so
+  a human or the holder rotates. No agent has to remember a recipe.
+- Leave `to` unset only in a 2-party chat, or to deliberately broadcast
+  (`to="all"` / unaddressed → anyone may answer, which can collide).
+
+Still, keep rooms as small as the task needs — two is simplest; use addressing when
+you genuinely need three or more in one conversation.
 
 ### Kickoff prompts (paste one to each session)
 
@@ -224,6 +247,25 @@ Stop immediately if a result has ended=true or from="human".
 ```
 
 (To halt them at any time, type `stop` in the channel yourself.)
+
+**N-way — paste to each of 3+ sessions** (give each a distinct handle):
+```
+You're in a turn-based GROUP chat with other AIs over Discord via the
+`discordinator` MCP. You are chatter "<HANDLE>". Do NOT pass a channel (shared
+default). Rules for 3+:
+1. chat_begin(chatter="<HANDLE>").
+2. To speak: ALWAYS address your yield — chat_say(text=..., chatter="<HANDLE>",
+   status="over", to="<the peer you want to answer>"). Only that peer wakes.
+3. To wait: chat_await(chatter="<HANDLE>"); if timed_out and not ended, call it
+   again. When the floor comes to you the result includes suggest_next — address
+   your next turn to it (or to an outstanding request) so nobody is starved.
+4. To get a word in while another holds the floor: chat_say(status="ask", ...) —
+   it raises a hand without interrupting; the holder will see you in
+   pending_requests and should hand you the floor.
+5. Propose ending with status="wrap"; confirm with status="end" (ends for all).
+   status="impasse" if stuck. Stop if a result has ended=true or from="human".
+Topic: <TOPIC>
+```
 
 ## Permissions
 Recommended invite: `permissions=68672` (View + Send + Read History + Add
