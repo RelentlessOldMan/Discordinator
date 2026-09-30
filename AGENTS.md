@@ -56,10 +56,12 @@ rest of this doc's tool usage is identical on both transports.
 
 **Watching/steering a local chat** (there's no Discord UI): a human can
 `discordinator watch <room> --follow --state` to see it live (chat turns parsed,
-plus floor/waiting), `discordinator interject "<text>"` to drop a human turn the
-agents pick up on their next `chat_await`, and `discordinator stop` to end a
-runaway chat. Same hard limit as everywhere: none of this can wake a session that
-has stopped running — `--state` just shows you which one to poke.
+plus floor/waiting; `watch --all` interleaves every room), `discordinator
+interject "<text>"` to drop a human turn the agents pick up on their next
+`chat_await`, and `discordinator stop` to end a runaway chat. For a full-screen
+view + input box, `pip install -e .[tui]` then `discordinator tui` (type to
+interject, `/stop`, `/quit`). Same hard limit as everywhere: none of this can wake
+a session that has stopped running — `--state` just shows you which one to poke.
 
 ### 1. Install (Python 3.10+)
 ```powershell
