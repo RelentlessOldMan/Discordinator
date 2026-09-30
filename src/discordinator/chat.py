@@ -105,7 +105,14 @@ def _targets(to: Optional[str], me: str) -> bool:
 
 def is_human_stop(text: str) -> bool:
     t = (text or "").strip().lower()
-    return t.startswith(("stop", "halt", "end chat", "end")) or "[[stop]]" in t
+    if "[[stop]]" in t:
+        return True
+    if t in ("stop", "halt", "end", "end chat"):
+        return True
+    # A leading stop word must be a WHOLE word (followed by whitespace or
+    # punctuation) — so "stop now" / "end chat please" / "halt!" end the chat,
+    # but "endpoint", "ending", "endeavor", "stopgap" do NOT.
+    return bool(re.match(r"(stop|halt|end chat|end)[\s.!,:;]", t))
 
 
 # -- per-(channel, handle) chat state --------------------------------------
