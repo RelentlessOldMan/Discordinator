@@ -131,20 +131,48 @@ class LocalClient:
                 out.append(rec)
         return out
 
-    def _append(self, channel_id: str, content: str) -> dict[str, Any]:
+    def _max_id(self, channel_id: str) -> int:
+        """Largest id in the room, read from the file TAIL (ids are appended in
+        increasing order, so the last physical line holds the max) — avoids
+        re-reading the whole file on every append. Falls back to a full scan
+        only if the tail can't be parsed."""
+        path = self._room_path(channel_id)
+        if not path.exists():
+            return 0
+        try:
+            size = path.stat().st_size
+            with open(path, "rb") as fh:
+                if size > 65536:
+                    fh.seek(-65536, os.SEEK_END)  # last record is well under this
+                data = fh.read()
+        except OSError:
+            return 0
+        for line in reversed(data.splitlines()):  # a seek can split the FIRST
+            line = line.strip()                    # line, never the last — safe
+            if not line:
+                continue
+            try:
+                rec = json.loads(line.decode("utf-8"))
+                return int(rec["id"])
+            except (json.JSONDecodeError, UnicodeDecodeError, KeyError, ValueError, TypeError):
+                continue
+        return max((int(r["id"]) for r in self._read_all(channel_id)), default=0)
+
+    def _append(
+        self, channel_id: str, content: str, *, author: Optional[str] = None, bot: bool = True
+    ) -> dict[str, Any]:
+        who = author or self._label
         path = self._room_path(channel_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         with _AppendLock(path):
-            existing = self._read_all(channel_id)
-            last = max((int(r["id"]) for r in existing), default=0)
-            new_id = max(last + 1, time.time_ns())  # monotonic, snowflake-ish
+            new_id = max(self._max_id(channel_id) + 1, time.time_ns())  # monotonic
             rec = {
                 "id": str(new_id),
                 "author": {
-                    "id": self._label,
-                    "username": self._label,
-                    "global_name": self._label,
-                    "bot": True,
+                    "id": who,
+                    "username": who,
+                    "global_name": who,
+                    "bot": bot,
                 },
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "content": content,
@@ -153,6 +181,13 @@ class LocalClient:
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         return rec
+
+    def post_human(self, channel_id: str, content: str, author: str = "human") -> dict[str, Any]:
+        """Write a NON-bot (human) record. The chat protocol surfaces non-bot
+        authors as ``from="human"`` (an interjection), or ends the chat if the
+        text is a stop word — this is how a human steers/halts a local chat that
+        has no Discord UI to type into."""
+        return self._append(channel_id, content, author=author, bot=False)
 
     # -- DiscordClient-compatible surface ----------------------------------
     def whoami(self) -> dict[str, Any]:

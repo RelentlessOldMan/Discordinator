@@ -151,11 +151,37 @@ def test_chat_nway_addressing() -> None:
           "suggest_next favors the hand-raiser (anti-starvation)")
 
 
+def test_human_interject_and_stop() -> None:
+    print("human interject + stop (the viewer's steering primitive):")
+    c = LocalClient()
+    room = "steered"
+    chat.reset(room, "A", latest_id(c, room), 20)
+    chat.reset(room, "B", latest_id(c, room), 20)
+
+    chat.send_chat(c, room, "A", "over", "B, thoughts?")
+    r1 = chat.await_turn(c, room, "B", timeout=5, poll=0.1, nudge_after=0)
+    check(r1["from"] == "A", "B first receives A's over-turn")
+
+    # Now a human interjects (bot:false record) — B picks it up next.
+    c.post_human(room, "actually focus on the parser first")
+    r2 = chat.await_turn(c, room, "B", timeout=5, poll=0.1, nudge_after=0)
+    check(r2["from"] == "human" and r2["status"] == "interjection"
+          and "parser" in r2["text"] and not r2["ended"],
+          "a human interjection surfaces as from=human (steers, doesn't end)")
+
+    # A human stop ends the chat for the awaiting side.
+    c.post_human(room, "[[STOP]]")
+    r3 = chat.await_turn(c, room, "B", timeout=5, poll=0.1, nudge_after=0)
+    check(r3["ended"] and r3["status"] == "stop" and r3["stop_reason"] == "human",
+          "a human [[STOP]] ends the chat")
+
+
 def main() -> int:
     test_client_primitives()
     test_relay_roundtrip()
     test_chat_two_party()
     test_chat_nway_addressing()
+    test_human_interject_and_stop()
     print(f"\nALL {_passed} CHECKS PASSED")
     print(f"(temp tree: {_TMP})")
     return 0

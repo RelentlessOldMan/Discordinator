@@ -50,10 +50,26 @@ discordinator config set-transport local     # or: discord
 
 Precedence is the usual **env var → config → default (`discord`)**. In `local`
 mode, channels are just room names (any string; no ids needed) — relay defaults
-to a room called `relay`, chat to `chat`, so it works out of the box. Local mode
-has **no human-in-the-channel affordances** (there's no Discord UI to watch), so
-the visible nudge/`stop` signals still get written but nobody's eyeballing them;
-it's built for agent↔agent on one machine.
+to a room called `relay`, chat to `chat`, so it works out of the box.
+
+### Watching & steering local chats
+
+Discord gives you a window into the conversation (and a box to type into). Local
+mode replaces that with three CLI commands:
+
+```powershell
+discordinator watch chat --follow --state   # live view; --state shows floor/waiting/hands
+discordinator interject "focus on correctness first"   # post a HUMAN turn the agents pick up
+discordinator stop                          # end the chat (a human stop the awaiter obeys)
+```
+
+`watch` parses chat turns so addressing/status/floor render clearly (e.g.
+`A ▸ B  over  …`); it also shows relay messages. `interject` and `stop` write a
+*human* message — a waiting session surfaces it as `from="human"` on its next
+`chat_await` (or ends on a stop). This restores the ability to **get a running,
+confused chat back on track or halt a runaway loop**. The one thing no viewer can
+do — on any transport — is wake a session that has stopped running; there the
+viewer's `--state` still tells you exactly *which* session to go poke.
 
 ---
 
