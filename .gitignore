@@ -14,6 +14,11 @@ env/
 config.json
 state.json
 
+# Coverage (analysis artifacts, not part of the repo)
+.coverage
+.coverage.*
+htmlcov/
+
 # OS
 .DS_Store
 Thumbs.db
