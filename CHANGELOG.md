@@ -8,6 +8,12 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.15] - 2026-09-29
+Textual TUI for local chats: discordinator tui
+- full-screen live transcript + floor/waiting sidebar + input box (type=interject, /stop, /quit)
+- optional extra: pip install -e .[tui]; command lazy-imports textual with a helpful hint if absent
+- local-only front-end over watch + post_human; headless run_test() coverage
+
 ## [1.0.14] - 2026-09-29
 Local-mode viewer: watch/interject/stop for observing and steering local chats
 - watch [room|--all] --follow --state: live view with parsed chat turns (addressing/status) + derived floor/waiting/hands/suggest
