@@ -53,7 +53,9 @@ class ChatTUI(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="body"):
-            yield RichLog(id="transcript", wrap=True, markup=False, highlight=False)
+            # min_width low so wrapping happens at the actual panel width
+            # (RichLog defaults to 78, which would crop long turns instead).
+            yield RichLog(id="transcript", wrap=True, markup=False, highlight=False, min_width=20)
             yield Static("", id="sidebar")
         yield Input(placeholder="type to interject as human · /stop to end · /quit to leave", id="input")
         yield Footer()
