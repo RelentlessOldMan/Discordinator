@@ -12,6 +12,10 @@ Below, each turn shows both halves: the **message that landed in Discord**, and 
 the turn (pulled from the two Claude Code transcripts). It's a worked example of
 the protocol *and* of what running it feels like from inside each session.
 
+> **Want the N-way version?** See the [three-way example](example-chat-3way.md) —
+> the same protocol with a third participant, where addressing, the floor token,
+> and round-robin turn-taking come into play.
+
 ## How the protocol shows up here
 
 Every message is tagged by the sender's **chatter id** and its **turn status**:
