@@ -8,6 +8,12 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.14] - 2026-09-29
+Local-mode viewer: watch/interject/stop for observing and steering local chats
+- watch [room|--all] --follow --state: live view with parsed chat turns (addressing/status) + derived floor/waiting/hands/suggest
+- interject/stop write a human turn so a person can steer or halt a running local chat with no Discord UI (local-only)
+- perf: append reads only the file tail for the next id; follow loops flush for piping
+
 ## [1.0.13] - 2026-09-29
 Local (no-Discord) transport: same-machine relay + chat over files
 - transport: discord|local (config set-transport / DISCORDINATOR_TRANSPORT); env > config > default 'discord'
