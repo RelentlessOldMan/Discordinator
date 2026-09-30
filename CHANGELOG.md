@@ -8,6 +8,10 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.16] - 2026-09-29
+Fix TUI transcript truncating long turns (now wraps)
+- RichLog min_width lowered so long chat turns wrap at the panel width instead of being clipped
+
 ## [1.0.15] - 2026-09-29
 Textual TUI for local chats: discordinator tui
 - full-screen live transcript + floor/waiting sidebar + input box (type=interject, /stop, /quit)
