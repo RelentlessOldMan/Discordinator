@@ -15,6 +15,11 @@ dependencies = [
     "truststore>=0.9",
 ]
 
+[project.optional-dependencies]
+# Full-screen terminal viewer for local mode: `discordinator tui`.
+# Install with:  pip install -e .[tui]
+tui = ["textual>=0.60"]
+
 [project.scripts]
 discordinator = "discordinator.cli:main"
 discordinator-mcp = "discordinator.mcp_server:main"

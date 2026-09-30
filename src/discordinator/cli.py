@@ -380,6 +380,23 @@ def _watch_all(cfg: dict[str, Any], args: argparse.Namespace, color: bool) -> in
             return 0
 
 
+def cmd_tui(args: argparse.Namespace) -> int:
+    cfg = config.load()
+    guard = _require_local(cfg, "tui")
+    if guard is not None:
+        return guard
+    room = config.resolve_chat_channel(cfg, args.room)
+    try:
+        from .tui import run_tui
+    except ImportError:
+        return _err(
+            "the TUI needs the optional 'textual' dependency. Install it with:\n"
+            "  pip install -e .[tui]   (or: pip install textual)"
+        )
+    run_tui(room=room, poll=args.interval, limit=args.limit, label=cfg.get("machine_label"))
+    return 0
+
+
 def _require_local(cfg: dict[str, Any], action: str) -> Optional[int]:
     if not config.is_local(cfg):
         return _err(
@@ -696,6 +713,12 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("stop", help="end a local chat (writes a human stop the awaiting session obeys)")
     st.add_argument("-c", "--channel", help="room name/id (default: the chat room)")
     st.set_defaults(func=cmd_stop)
+
+    tp = sub.add_parser("tui", help="full-screen local chat viewer + input box (needs: pip install -e .[tui])")
+    tp.add_argument("room", nargs="?", help="room name/id (default: the chat room)")
+    tp.add_argument("--interval", type=float, default=1.0, help="seconds between polls (default 1.0)")
+    tp.add_argument("-n", "--limit", type=int, default=200, help="how many recent messages to load first (default 200)")
+    tp.set_defaults(func=cmd_tui)
 
     pp = sub.add_parser("purge", help="delete old messages (on request; safe defaults)")
     pp.add_argument("-c", "--channel", help="channel name (from config) or raw id")

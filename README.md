@@ -71,6 +71,18 @@ confused chat back on track or halt a runaway loop**. The one thing no viewer ca
 do — on any transport — is wake a session that has stopped running; there the
 viewer's `--state` still tells you exactly *which* session to go poke.
 
+**Full-screen TUI.** For a nicer experience — a live transcript, a floor/waiting
+sidebar, and an input box that doesn't fight the scrolling output — there's a
+Textual app:
+
+```powershell
+pip install -e .[tui]        # one-time: pulls in textual
+discordinator tui            # (or: discordinator tui <room>)
+```
+
+Type to interject as a human, `/stop` to end the chat, `/quit` to leave. Same
+primitives as `watch` + `interject`, just a single-screen front-end. Local only.
+
 ---
 
 > **Setting this up on a new machine or as a different person?** See
