@@ -54,6 +54,13 @@ Skip steps 2–3 (bot/token/channels). Relay defaults to room `relay`, chat to r
 `chat`; pass any `channel="..."` to use another room. Then jump to step 5. The
 rest of this doc's tool usage is identical on both transports.
 
+**Watching/steering a local chat** (there's no Discord UI): a human can
+`discordinator watch <room> --follow --state` to see it live (chat turns parsed,
+plus floor/waiting), `discordinator interject "<text>"` to drop a human turn the
+agents pick up on their next `chat_await`, and `discordinator stop` to end a
+runaway chat. Same hard limit as everywhere: none of this can wake a session that
+has stopped running — `--state` just shows you which one to poke.
+
 ### 1. Install (Python 3.10+)
 ```powershell
 python -m pip install -e .

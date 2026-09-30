@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import __version__, config, use_system_certs
+from . import __version__, chat, config, use_system_certs
 from .client_factory import make_client
 from .discord_client import DiscordClient, DiscordError, simplify_message
 from .local_client import local_dir
@@ -192,6 +192,228 @@ def cmd_relay(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             print("\nstopped.")
             return 0
+
+
+# -- local viewer ----------------------------------------------------------
+# `watch` renders a room live (chat turns are parsed so floor/addressing/status
+# show clearly); `interject`/`stop` write a human turn so a person can steer or
+# halt a local chat that has no Discord UI to type into.
+
+_PALETTE = (36, 32, 35, 33, 34, 31, 92, 95, 93, 94)  # cyan/green/magenta/...
+_COLOR_CACHE: dict[str, str] = {}
+
+
+def _color_for(name: str, enabled: bool) -> tuple[str, str]:
+    if not enabled:
+        return "", ""
+    if name not in _COLOR_CACHE:
+        _COLOR_CACHE[name] = f"\033[{_PALETTE[len(_COLOR_CACHE) % len(_PALETTE)]}m"
+    return _COLOR_CACHE[name], "\033[0m"
+
+
+def _fmt_watch(m: dict[str, Any], color: bool, room: Optional[str] = None) -> str:
+    ts = (m.get("timestamp") or "")[11:19]  # HH:MM:SS
+    tag = ""
+    tag_w = 0
+    if room is not None:  # --all mode: prefix each line with its room
+        rc, rr = _color_for(f"#{room}", color)
+        tag = f"{rc}{room[:10]:<11}{rr} "
+        tag_w = 12
+    parsed = chat.parse(m["content"])
+    if parsed:  # a chat turn: [from>to|status] body
+        handle, to = parsed["participant"], parsed["to"]
+        status, body = parsed["status"], parsed["body"] or ""
+        c, r = _color_for(handle, color)
+        addr = f"{handle} ▸ {to}" if to else handle
+        head = f"{tag}{ts}  {c}{addr:<16}{r} {status:<7}"
+    else:  # relay / plain / human / nudge
+        content = m["content"]
+        if content.lstrip().startswith("⏳"):  # system waiting-nudge line
+            base = f"{tag}{ts}  {content}"
+            return f"\033[2m{base}\033[0m" if color else base
+        label = "human" if not m.get("bot") else (m.get("author") or "?")
+        c, r = _color_for(label, color)
+        head = f"{tag}{ts}  {c}{label:<16}{r} {'':<7}"
+        body = content
+    lines = body.splitlines() or [""]
+    indent = " " * (tag_w + 35)  # align continuation lines under the body
+    out = f"{head} {lines[0]}"
+    for extra in lines[1:]:
+        out += f"\n{indent}{extra}"
+    return out
+
+
+def _state_footer(client: Any, room: str) -> Optional[str]:
+    """One-line derived chat state (floor / waiting / hands / suggestion)."""
+    try:
+        st = chat.compute_state(client, room, None)
+    except Exception:
+        return None
+    if not st.get("participants"):
+        return None
+    # A human stop isn't a chat_say turn, so compute_state won't mark it ended;
+    # detect it directly so the footer stays honest after `stop`/an interjection.
+    human_stop = False
+    try:
+        newest = client.read_messages(room, limit=1)
+        if newest:
+            nm = simplify_message(newest[0])
+            human_stop = (not nm.get("bot")) and chat.is_human_stop(nm["content"])
+    except Exception:
+        pass
+    if st.get("ended") or human_stop:
+        return "ENDED" + (" (human stop)" if human_stop else "")
+    bits = [f"floor: {st.get('floor') or '-'}"]
+    waiting = st.get("waiting") or []
+    if waiting:
+        bits.append("waiting: " + ", ".join(waiting))
+    hands = [r["from"] for r in (st.get("floor_requests") or [])]
+    if hands:
+        bits.append("hands: " + ", ".join(hands))
+    if st.get("suggest_next"):
+        bits.append(f"suggest: {st['suggest_next']}")
+    return " · ".join(bits)
+
+
+def _dim(text: str, color: bool) -> str:
+    return f"\033[2m{text}\033[0m" if color else text
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    cfg = config.load()
+    color = sys.stdout.isatty() and not args.no_color
+    if args.all:
+        return _watch_all(cfg, args, color)
+
+    # Default to the chat room (the interesting one); any name/id also works.
+    room = config.resolve_channel(cfg, args.room) if args.room else config.resolve_chat_channel(cfg, None)
+
+    def show_state(client: Any) -> None:
+        if args.state:
+            footer = _state_footer(client, room)
+            if footer:
+                print(_dim(f"[{footer}]", color))
+
+    with make_client(cfg) as client:
+        raw = client.read_messages(room, limit=args.limit)
+        msgs = [simplify_message(m) for m in raw]
+        msgs.reverse()
+        print(f"─ #{room} " + "─" * max(0, 40 - len(room)))
+        for m in msgs:
+            print(_fmt_watch(m, color))
+        show_state(client)
+
+        if not args.follow:
+            if not msgs:
+                print("(empty)")
+            return 0
+
+        # Seed to the last shown id (or "0" for an empty room) and always page
+        # forward with after= — no backfill branch to accidentally re-print.
+        cursor = msgs[-1]["id"] if msgs else "0"
+        print(_dim("(following — Ctrl+C to stop)", color))
+        try:
+            while True:
+                raw = client.read_messages(room, limit=100, after=cursor)
+                new = [simplify_message(m) for m in raw]
+                new.reverse()
+                if new:
+                    for m in new:
+                        print(_fmt_watch(m, color))
+                    cursor = new[-1]["id"]
+                    show_state(client)
+                    sys.stdout.flush()  # stream promptly even when piped
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            print("\nstopped.")
+            return 0
+
+
+def _watch_all(cfg: dict[str, Any], args: argparse.Namespace, color: bool) -> int:
+    """Interleave every local room into one merged, time-ordered stream. Cross-
+    room ordering works because ids are time-based, so sorting by id ≈ wall
+    clock. Local-only (needs the room list on disk)."""
+    if not config.is_local(cfg):
+        return _err("watch --all is only supported on the local transport "
+                    "(in Discord mode, watch a specific channel).")
+
+    def rooms_now(client: Any) -> list[str]:
+        return [c["id"] for c in client.list_guild_channels()]
+
+    def collect(client: Any, cursors: dict[str, str], initial: bool) -> list[tuple[int, str, dict]]:
+        out: list[tuple[int, str, dict]] = []
+        for room in rooms_now(client):
+            cur = cursors.get(room)
+            if initial and cur is None:
+                raw = client.read_messages(room, limit=args.limit)
+            else:
+                raw = client.read_messages(room, limit=100, after=(cur or "0"))
+            msgs = [simplify_message(m) for m in raw]
+            msgs.reverse()
+            for m in msgs:
+                out.append((int(m["id"]), room, m))
+            cursors[room] = msgs[-1]["id"] if msgs else (cur or "0")
+        out.sort(key=lambda e: e[0])
+        return out
+
+    with make_client(cfg) as client:
+        cursors: dict[str, str] = {}
+        print("─ #(all local rooms) " + "─" * 24)
+        entries = collect(client, cursors, initial=True)
+        for _id, room, m in entries:
+            print(_fmt_watch(m, color, room=room))
+        if not args.follow:
+            if not entries:
+                print("(no rooms yet)")
+            return 0
+        print(_dim("(following all rooms — Ctrl+C to stop)", color))
+        try:
+            while True:
+                batch = collect(client, cursors, initial=False)
+                if batch:
+                    for _id, room, m in batch:
+                        print(_fmt_watch(m, color, room=room))
+                    sys.stdout.flush()  # stream promptly even when piped
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            print("\nstopped.")
+            return 0
+
+
+def _require_local(cfg: dict[str, Any], action: str) -> Optional[int]:
+    if not config.is_local(cfg):
+        return _err(
+            f"{action} only applies to the local transport. In Discord mode, "
+            "just type in the channel yourself."
+        )
+    return None
+
+
+def cmd_interject(args: argparse.Namespace) -> int:
+    cfg = config.load()
+    guard = _require_local(cfg, "interject")
+    if guard is not None:
+        return guard
+    room = config.resolve_chat_channel(cfg, args.channel)
+    text = _read_stdin_if_needed(args.text)
+    if not text:
+        return _err("nothing to interject (empty message).")
+    with make_client(cfg) as client:
+        client.post_human(room, text)
+    print(f"interjected as human in #{room}. A waiting session will see it on its next chat_await.")
+    return 0
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    cfg = config.load()
+    guard = _require_local(cfg, "stop")
+    if guard is not None:
+        return guard
+    room = config.resolve_chat_channel(cfg, args.channel)
+    with make_client(cfg) as client:
+        client.post_human(room, "[[STOP]]")
+    print(f"sent stop to #{room}. Any session waiting there will end the chat.")
+    return 0
 
 
 def cmd_purge(args: argparse.Namespace) -> int:
@@ -455,6 +677,25 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--no-ack", dest="ack", action="store_const", const=False, help="do not react (overrides ack_on_read config)")
     lp.add_argument("--json", action="store_true", help="print messages as JSON")
     lp.set_defaults(func=cmd_relay)
+
+    wc = sub.add_parser("watch", help="live-view a room (parses chat turns; great for local mode)")
+    wc.add_argument("room", nargs="?", help="room name/id (default: the chat room)")
+    wc.add_argument("--all", action="store_true", help="interleave ALL local rooms into one stream (local only)")
+    wc.add_argument("-f", "--follow", action="store_true", help="keep streaming new messages")
+    wc.add_argument("--interval", type=float, default=1.5, help="seconds between polls in --follow (default 1.5)")
+    wc.add_argument("-n", "--limit", type=int, default=30, help="how many recent messages to show first (default 30)")
+    wc.add_argument("--state", action="store_true", help="also show derived chat state (floor/waiting/hands)")
+    wc.add_argument("--no-color", action="store_true", help="disable ANSI colors")
+    wc.set_defaults(func=cmd_watch)
+
+    ij = sub.add_parser("interject", help="post a HUMAN turn into a local chat room (steer the agents)")
+    ij.add_argument("text", nargs="?", help="message text (use '-' or omit to read from stdin)")
+    ij.add_argument("-c", "--channel", help="room name/id (default: the chat room)")
+    ij.set_defaults(func=cmd_interject)
+
+    st = sub.add_parser("stop", help="end a local chat (writes a human stop the awaiting session obeys)")
+    st.add_argument("-c", "--channel", help="room name/id (default: the chat room)")
+    st.set_defaults(func=cmd_stop)
 
     pp = sub.add_parser("purge", help="delete old messages (on request; safe defaults)")
     pp.add_argument("-c", "--channel", help="channel name (from config) or raw id")
