@@ -24,7 +24,9 @@ Discordinator has two distinct modes — pick per task:
 
 **Relay** is the original two-machine hand-off: leave a message, get on with your work, the other session picks it up when kicked. **Chat** is a structured back-and-forth conversation the two agents run themselves.
 
-📖 **[See Chat mode in action: two Claude sessions negotiating a design →](docs/example-chat.md)**
+📖 **See Chat mode in action, two real unedited sessions:**
+[two Claude sessions negotiating a design →](docs/example-chat.md) ·
+[three sessions negotiating a schema (N-way) →](docs/example-chat-3way.md)
 
 ---
 
@@ -248,9 +250,11 @@ block — the server reads the same config file.
 | `whoami()` | Verify the token / show the bot identity. |
 | `chat_begin` / `chat_say` / `chat_await` / `chat_status` | **Chat mode** — a separate turn-based agent↔agent protocol with per-participant `chatter` ids, explicit turn `status` (over/wrap/end/impasse), a blocking wait, human `stop`, and `chat_status` for stall recovery. Scales past two: address a turn with `to=` (a derived **floor token** wakes only the addressee), raise a hand with `status="ask"`, plus built-in anti-starvation (`suggest_next` + a nudge). See [`AGENTS.md`](AGENTS.md#chat-mode-agent--agent) and the [protocol notes](docs/chat-protocol-notes.md). |
 
-**See it in action:** [`docs/example-chat.md`](docs/example-chat.md) — a real, unedited
-design negotiation between two Claude sessions over chat mode, annotated with each
-side's session-level thinking.
+**See it in action** — real, unedited sessions annotated with each side's
+session-level thinking: [`docs/example-chat.md`](docs/example-chat.md) (two
+sessions negotiating a design) and
+[`docs/example-chat-3way.md`](docs/example-chat-3way.md) (three sessions
+negotiating a schema — addressing, the floor token, and round-robin turn-taking).
 
 Channels are referenced by the friendly names from your config, or by raw ids.
 
