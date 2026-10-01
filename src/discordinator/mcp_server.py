@@ -383,6 +383,7 @@ def chat_say(
     status: str = "over",
     channel: Optional[str] = None,
     to: Optional[str] = None,
+    files: Any = None,
 ) -> dict[str, Any]:
     """Send a chat message as `chatter` with an explicit turn status.
 
@@ -407,15 +408,26 @@ def chat_say(
     Long text is split across messages, each re-tagged (and re-addressed), so
     multi-part turns stay intact. Returns your turn count and, in a multiparty
     room after you yield, who is waiting and the fair next addressee.
+
+    `files`: optional file path (or list of paths) to attach to this turn —
+    images included (they auto-embed in Discord). They ride the turn's final
+    message, so the receiver sees them on the same turn via chat_await's
+    `attachments`. GATED: needs this machine's send opt-in (off by default;
+    `config set-attachments send on` / DISCORDINATOR_ALLOW_SEND=1) and, on
+    Discord, the bot's Attach Files permission. At most 10 files per turn.
     """
     me = chat.sanitize_handle(chatter)
     if status not in chat.STATUSES:
         raise ValueError(f"status must be one of {chat.STATUSES}, got {status!r}")
     target = chat.sanitize_handle(to) if to else None
     cfg = config.load()
+    file_list = None
+    if files:
+        config.require_send_attachments(cfg)  # raises if this machine hasn't opted in
+        file_list = [files] if isinstance(files, str) else list(files)
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client() as client:
-        sent = chat.send_chat(client, channel_id, me, status, text, to=target)
+        sent = chat.send_chat(client, channel_id, me, status, text, to=target, files=file_list)
         # `say`/`ask` don't complete a turn, so they don't count against the cap.
         took_turn = status not in chat.NON_TURN_STATUSES
         turns = chat.bump_turn(channel_id, me) if took_turn else chat.get_meta(channel_id, me)[0]
@@ -470,7 +482,11 @@ def chat_await(
       - status: their turn status (over/wrap/end/impasse), "interjection"/"stop"
         for a human message, "plain" for an out-of-band send, or null on timeout
       - text: their turn's combined body (or the human's text) — the words live
-        here; `messages` is metadata-only ({id, from, to, status, timestamp})
+        here; `messages` is metadata-only ({id, from, to, status, timestamp,
+        attachments})
+      - attachments: files attached to this turn, each {url, filename,
+        content_type, size, width, height, is_image}. Pass a url to
+        download_attachment to fetch the bytes (needs the receive opt-in).
       - your_turn: True if it's now your turn to `chat_say`
       - ended: True if the conversation is over (their "end"/"impasse", or a
         human "stop")
