@@ -109,7 +109,14 @@ primitives as `watch` + `interject`, just a single-screen front-end. Local only.
      History**, **Add Reactions** (`permissions=68672`). Add Reactions powers the
      ✅ read-acks, which are **on by default**. For `purge --all` also add
      **Manage Messages** → `permissions=76864`.
-   - Open the generated URL and add the bot to your server.
+   - To **upload attachments** (`send --file/--image`, `send_file`) the bot also
+     needs **Attach Files** → `permissions=101440` (or `109632` with Manage
+     Messages too). This is a *separate* permission from Send Messages: without
+     it, text posts fine but every file upload is rejected with a 403. Receiving
+     (downloading) attachments needs no extra permission.
+   - Open the generated URL and add the bot to your server. (Already invited?
+     Re-open the URL with the new permission integer to update the bot's role,
+     or toggle the permission on its role in Server Settings → Roles.)
 
 That's it — no privileged intents are needed. Reading history over REST works
 with just the channel permissions above. Read-acks degrade gracefully: if the bot
@@ -206,8 +213,26 @@ discordinator purge --channel test --older-than 7d --all    # everyone's (needs 
 ```
 
 ### Notes on messages
-- **Text only.** Discordinator never uploads file attachments. When reading, an
-  attachment URL on someone else's message is shown for reference only.
+- **Attachments are opt-in, off by default** — and set *per machine*, so a
+  locked-down box never touches files unless you turn it on. Two independent
+  flags: **receive** (download attachments someone sent in) and **send**
+  (upload files/images out). Reading always *parses* attachment metadata
+  (filename/type/size/`is_image`) even with both off:
+  ```powershell
+  # SEND (upload) - also needs the bot's "Attach Files" permission (see §1)
+  discordinator config set-attachments send on
+  discordinator send "here's the config + a chart" --channel test \
+      --file app.yaml --image chart.png      # images auto-embed inline in Discord
+
+  # RECEIVE (download) - no extra Discord permission needed
+  discordinator config set-attachments receive on
+  discordinator read --download --download-dir .\in   # fetch attachments off the read messages
+  # per-session instead of persisting: DISCORDINATOR_ALLOW_SEND=1 / _ALLOW_RECEIVE=1
+  ```
+  Limits: ≤10 files per message (larger lists split automatically) and ~10 MB
+  per file on a non-boosted server. Discord CDN urls are signed and **expire**,
+  so download from a *fresh* read rather than a stashed url. Local transport has
+  none of these limits — files are copied into `~/.discordinator/local/files/`.
 - **Size:** Discord's limit is **2000 characters per message** for bots. Longer
   text is auto-split into multiple ≤2000-char messages (on newline boundaries
   where possible), each carrying the label prefix. Very large sends become many
@@ -243,7 +268,9 @@ block — the server reads the same config file.
 | Tool | Purpose |
 |------|---------|
 | `send_message(text, channel?, label?)` | Send a message (long text auto-split). |
-| `read_messages(channel?, limit?, after?, before?, newest_first?)` | Read recent messages. |
+| `send_file(paths, text?, channel?, label?)` | Upload file(s)/image(s) as attachments. **Gated**: needs the per-machine send opt-in (off by default) *and* the bot's Attach Files permission. |
+| `read_messages(channel?, limit?, after?, before?, newest_first?)` | Read recent messages. Each attachment is returned as `{url, filename, content_type, size, width, height, is_image}`. |
+| `download_attachment(url, dest?)` | Fetch an attachment (by url from a read result) to local disk. **Gated**: needs the per-machine receive opt-in (off by default). |
 | `get_new_messages(channel?, include_self?, limit?, ack?)` | **Relay primitive** — only messages new since the last call (advances a per-channel cursor), with your own messages filtered out. `ack` reacts ✅ to the newest. |
 | `purge_messages(channel?, older_than_days?, only_mine?, scan_limit?, dry_run?)` | Delete old messages. Safe defaults (dry-run, only the bot's own, 7-day floor). |
 | `list_channels()` | Show configured channel names + default. |

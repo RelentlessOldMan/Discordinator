@@ -8,6 +8,13 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.17] - 2026-10-01
+Attachments: send/receive files and images (opt-in, off by default)
+- send --file/--image + MCP send_file: multipart upload, images auto-embed inline; ≤10 files/msg (larger lists auto-batched), ~10MB/file, oversize/missing rejected up front
+- read --download + MCP download_attachment: fetch attachments to disk; reads now parse rich attachment metadata {url,filename,content_type,size,width,height,is_image} (clean swap from bare url strings)
+- two independent per-machine opt-ins, OFF by default: config set-attachments send|receive on (or DISCORDINATOR_ALLOW_SEND/RECEIVE); sending also needs the bot's Attach Files permission (permissions=101440)
+- local transport parity: files copied under ~/.discordinator/local/files/<msg-id>/, same attachment shape on read, cleaned up on delete
+
 ## [1.0.16] - 2026-09-29
 Fix TUI transcript truncating long turns (now wraps)
 - RichLog min_width lowered so long chat turns wrap at the panel width instead of being clipped

@@ -82,13 +82,18 @@ def test_simplify_message() -> None:
         "author": {"id": "7", "username": "user7", "global_name": "Seven", "bot": True},
         "timestamp": "2026-01-01T00:00:00+00:00",
         "content": "hi",
-        "attachments": [{"url": "http://x/y.png"}, {"filename": "no-url"}],
+        "attachments": [
+            {"url": "http://x/y.png", "filename": "y.png", "content_type": "image/png"},
+            {"filename": "no-url"},  # dropped: no url
+        ],
     }
     s = simplify_message(raw)
     check(s["author"] == "Seven", "global_name is preferred over username")
     check(s["bot"] is True and s["author_id"] == "7", "bot flag and author_id surfaced")
-    check(s["attachments"] == ["http://x/y.png"],
+    check(len(s["attachments"]) == 1 and s["attachments"][0]["url"] == "http://x/y.png",
           "attachments without a url are dropped, urls kept")
+    check(s["attachments"][0]["is_image"] is True,
+          "each attachment is now a rich dict (is_image derived), not a bare url string")
 
     # Fallbacks: no global_name -> username; no author at all -> 'unknown'.
     check(simplify_message({"author": {"username": "bob"}})["author"] == "bob",
