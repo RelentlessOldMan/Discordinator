@@ -9,14 +9,27 @@ Read Message History permissions in the target channel.
 
 from __future__ import annotations
 
+import json
+import mimetypes
 import time
-from typing import Any, Optional
-from urllib.parse import quote
+from pathlib import Path
+from typing import Any, Optional, Union
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
 API_BASE = "https://discord.com/api/v10"
 MAX_MESSAGE_LEN = 2000  # Discord hard limit per message
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # Discord's default (non-boosted) per-file size limit
+MAX_FILES_PER_MESSAGE = 10           # Discord caps attachments per message at 10
+
+# Extensions treated as images when a message's attachment carries no
+# content_type (Discord usually sets one, but local-transport records and odd
+# clients may not). content_type, when present, is authoritative.
+IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+    ".svg", ".tiff", ".tif", ".ico", ".heic", ".avif",
+}
 
 
 class DiscordError(Exception):
@@ -52,7 +65,10 @@ class DiscordClient:
             headers={
                 "Authorization": f"Bot {token}",
                 "User-Agent": "Discordinator (https://github.com/discordinator, 0.1.0)",
-                "Content-Type": "application/json",
+                # NB: no global Content-Type. httpx sets it per request from the
+                # body kind (json= -> application/json, files= -> multipart with
+                # a boundary). A global application/json would clobber the
+                # multipart content-type and break file uploads.
             },
             timeout=timeout,
         )
@@ -131,6 +147,60 @@ class DiscordClient:
             sent.append(resp.json())
         return sent
 
+    def send_files(
+        self,
+        channel_id: str,
+        content: str,
+        file_paths: list[Union[str, Path]],
+        label: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Upload one or more files (images included — Discord auto-embeds image
+        types) to a channel as attachments, with optional text ``content``.
+
+        Each file must exist and be within ``MAX_UPLOAD_BYTES``; over-limit or
+        missing files raise a ``DiscordError`` *before* anything is sent. Discord
+        caps a message at ``MAX_FILES_PER_MESSAGE`` attachments, so larger lists
+        are split across several messages (the text ``content`` rides only the
+        first). ``label`` is prefixed to the content, as with
+        :meth:`send_message`, so relay self-filtering still works. Returns the
+        created message object(s).
+        """
+        paths = [Path(p) for p in file_paths]
+        for p in paths:
+            if not p.is_file():
+                raise DiscordError(f"File not found: {p}")
+            size = p.stat().st_size
+            if size > MAX_UPLOAD_BYTES:
+                raise DiscordError(
+                    f"'{p.name}' is {size} bytes, over the {MAX_UPLOAD_BYTES}-byte "
+                    "per-file upload limit (Discord, non-boosted server)."
+                )
+        prefix = f"[{label}] " if label else ""
+        full = f"{prefix}{content}" if content else prefix.strip()
+
+        sent: list[dict[str, Any]] = []
+        for start in range(0, len(paths), MAX_FILES_PER_MESSAGE):
+            batch = paths[start : start + MAX_FILES_PER_MESSAGE]
+            files_payload = [
+                (
+                    f"files[{i}]",
+                    (p.name, p.read_bytes(), guess_content_type(p.name) or "application/octet-stream"),
+                )
+                for i, p in enumerate(batch)
+            ]
+            payload = {
+                "content": full if start == 0 else "",  # text only on the first message
+                "attachments": [{"id": i, "filename": p.name} for i, p in enumerate(batch)],
+            }
+            resp = self._request(
+                "POST",
+                f"/channels/{channel_id}/messages",
+                data={"payload_json": json.dumps(payload)},
+                files=files_payload,
+            )
+            sent.append(resp.json())
+        return sent
+
     def post(self, channel_id: str, content: str) -> dict[str, Any]:
         """Post a single message verbatim (no chunking, no label). Used by chat
         mode, which manages its own per-message headers and chunking."""
@@ -155,6 +225,24 @@ class DiscordClient:
             "GET", f"/channels/{channel_id}/messages", params=params
         ).json()
 
+    def download_attachment(self, url: str, dest: Union[str, Path]) -> Path:
+        """Download an attachment ``url`` to ``dest`` and return the written path.
+
+        If ``dest`` is an existing directory the filename is derived from the url
+        (:func:`_filename_from_url`); otherwise ``dest`` is used verbatim as the
+        file path. Discord CDN urls are public (signed), so no special auth is
+        needed — this reuses the client's retry/backoff and error mapping. Note
+        the signed urls expire, so download from a FRESH read rather than a
+        stashed url.
+        """
+        resp = self._request("GET", url)
+        dest = Path(dest)
+        if dest.is_dir():
+            dest = dest / _filename_from_url(url)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(resp.content)
+        return dest
+
     def delete_message(self, channel_id: str, message_id: str) -> None:
         """Delete a single message. Deleting the bot's OWN messages needs no
         special permission; deleting others' messages requires Manage Messages."""
@@ -178,8 +266,59 @@ class DiscordClient:
         return self._request("GET", f"/guilds/{guild_id}/channels").json()
 
 
+def guess_content_type(filename: str) -> Optional[str]:
+    """Best-effort MIME type from a filename (None if unknown). Used to label a
+    multipart upload part and to derive ``is_image`` for locally stored files."""
+    content_type, _ = mimetypes.guess_type(filename)
+    return content_type
+
+
+def _looks_like_image(content_type: Optional[str], filename: Optional[str]) -> bool:
+    """True if an attachment is an image — by content_type if present, else by
+    the filename's extension."""
+    if content_type and content_type.lower().startswith("image/"):
+        return True
+    name = (filename or "").lower()
+    return any(name.endswith(ext) for ext in IMAGE_EXTENSIONS)
+
+
+def attachment_info(a: dict[str, Any]) -> dict[str, Any]:
+    """Normalize ONE raw attachment object into the shape consumers use.
+
+    Transport-agnostic: Discord supplies these fields on read; the local
+    transport stores records in this same shape. ``is_image`` is derived so
+    callers can decide whether to render inline vs. treat as a file. Keep in
+    sync with :func:`simplify_message`, which maps it over a message's list.
+    """
+    content_type = a.get("content_type")
+    filename = a.get("filename")
+    return {
+        "url": a.get("url"),
+        "filename": filename,
+        "content_type": content_type,
+        "size": a.get("size"),
+        "width": a.get("width"),
+        "height": a.get("height"),
+        "is_image": _looks_like_image(content_type, filename),
+    }
+
+
+def _filename_from_url(url: str) -> str:
+    """Best-effort filename for an attachment whose download dest is a directory:
+    strip the query (Discord CDN urls are signed with ?ex=&is=&hm=) and take the
+    last path segment, percent-decoded. Falls back to 'attachment'."""
+    path = urlparse(url).path
+    name = unquote(path.rsplit("/", 1)[-1]) if path else ""
+    return name or "attachment"
+
+
 def simplify_message(msg: dict[str, Any]) -> dict[str, Any]:
-    """Reduce a raw Discord message object to the fields we care about."""
+    """Reduce a raw Discord message object to the fields we care about.
+
+    ``attachments`` is a list of normalized dicts (see :func:`attachment_info`),
+    not bare url strings — so filename / content_type / is_image travel with
+    each one. Attachments without a url are dropped.
+    """
     author = msg.get("author") or {}
     name = author.get("global_name") or author.get("username") or "unknown"
     return {
@@ -189,5 +328,7 @@ def simplify_message(msg: dict[str, Any]) -> dict[str, Any]:
         "bot": bool(author.get("bot")),
         "timestamp": msg.get("timestamp"),
         "content": msg.get("content", ""),
-        "attachments": [a.get("url") for a in msg.get("attachments", []) if a.get("url")],
+        "attachments": [
+            attachment_info(a) for a in msg.get("attachments", []) if a.get("url")
+        ],
     }

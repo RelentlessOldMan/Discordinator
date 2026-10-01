@@ -22,13 +22,19 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from . import config
-from .discord_client import MAX_MESSAGE_LEN, chunk_content
+from .discord_client import (
+    MAX_MESSAGE_LEN,
+    attachment_info,
+    chunk_content,
+    guess_content_type,
+)
 
 
 def local_dir() -> Path:
@@ -158,14 +164,49 @@ class LocalClient:
                 continue
         return max((int(r["id"]) for r in self._read_all(channel_id)), default=0)
 
+    def _files_dir(self, message_id: str) -> Path:
+        """Per-message directory holding copies of that message's attachments."""
+        return self._dir / "files" / str(message_id)
+
+    def _store_files(
+        self, message_id: str, source_files: list[Union[str, Path]]
+    ) -> list[dict[str, Any]]:
+        """Copy each source file into this message's store and return attachment
+        dicts (same shape as a Discord read) whose ``url`` is the stored path."""
+        fdir = self._files_dir(message_id)
+        fdir.mkdir(parents=True, exist_ok=True)
+        attachments: list[dict[str, Any]] = []
+        for src in source_files:
+            src = Path(src)
+            dest = fdir / src.name
+            shutil.copyfile(src, dest)
+            attachments.append(
+                attachment_info(
+                    {
+                        "url": str(dest),
+                        "filename": src.name,
+                        "content_type": guess_content_type(src.name),
+                        "size": dest.stat().st_size,
+                    }
+                )
+            )
+        return attachments
+
     def _append(
-        self, channel_id: str, content: str, *, author: Optional[str] = None, bot: bool = True
+        self,
+        channel_id: str,
+        content: str,
+        *,
+        author: Optional[str] = None,
+        bot: bool = True,
+        source_files: Optional[list[Union[str, Path]]] = None,
     ) -> dict[str, Any]:
         who = author or self._label
         path = self._room_path(channel_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         with _AppendLock(path):
             new_id = max(self._max_id(channel_id) + 1, time.time_ns())  # monotonic
+            attachments = self._store_files(str(new_id), source_files) if source_files else []
             rec = {
                 "id": str(new_id),
                 "author": {
@@ -176,7 +217,7 @@ class LocalClient:
                 },
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "content": content,
-                "attachments": [],
+                "attachments": attachments,
             }
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -211,6 +252,25 @@ class LocalClient:
             sent.append(self._append(channel_id, f"{prefix}{piece}"))
         return sent
 
+    def send_files(
+        self,
+        channel_id: str,
+        content: str,
+        file_paths: list[Union[str, Path]],
+        label: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Attach files to a local message by copying them into the room's file
+        store. Mirrors :meth:`DiscordClient.send_files` so callers are
+        transport-blind; local mode has no CDN, size cap, or 10-file limit, so
+        all files ride one message. Missing sources raise ``FileNotFoundError``
+        before anything is written. Returns the created record."""
+        for p in file_paths:
+            if not Path(p).is_file():
+                raise FileNotFoundError(f"File not found: {p}")
+        prefix = f"[{label}] " if label else ""
+        full = f"{prefix}{content}" if content else prefix.strip()
+        return [self._append(channel_id, full, source_files=list(file_paths))]
+
     def post(self, channel_id: str, content: str) -> dict[str, Any]:
         """Post a single message verbatim (chat mode manages its own headers)."""
         return self._append(channel_id, content)
@@ -240,6 +300,24 @@ class LocalClient:
         window.reverse()          # Discord returns newest-first
         return window
 
+    def download_attachment(self, url: str, dest: Union[str, Path]) -> Path:
+        """"Download" a local attachment and return the written path.
+
+        Local mode has no CDN — an attachment ``url`` IS a filesystem path on the
+        shared disk — so this copies the stored file to ``dest`` (keeping the
+        source filename when ``dest`` is a directory). Mirrors
+        :meth:`DiscordClient.download_attachment` so callers are transport-blind.
+        """
+        src = Path(url)
+        if not src.exists():
+            raise FileNotFoundError(f"Local attachment not found: {url}")
+        dest = Path(dest)
+        if dest.is_dir():
+            dest = dest / src.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest)
+        return dest
+
     def delete_message(self, channel_id: str, message_id: str) -> None:
         path = self._room_path(channel_id)
         if not path.exists():
@@ -251,6 +329,10 @@ class LocalClient:
                 for r in kept:
                     fh.write(json.dumps(r, ensure_ascii=False) + "\n")
             os.replace(tmp, path)
+        # Drop any stored attachment files for the deleted message (hygiene).
+        fdir = self._files_dir(message_id)
+        if fdir.exists():
+            shutil.rmtree(fdir, ignore_errors=True)
 
     def add_reaction(
         self, channel_id: str, message_id: str, emoji: str = "✅"

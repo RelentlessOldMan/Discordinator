@@ -8,6 +8,7 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from . import __version__, chat, config, use_system_certs
@@ -70,8 +71,10 @@ def _print_messages(messages: list[dict[str, Any]]) -> None:
         if m["content"]:
             for line in m["content"].splitlines() or [""]:
                 print(f"    {line}")
-        for url in m["attachments"]:
-            print(f"    <attachment> {url}")
+        for a in m["attachments"]:
+            kind = "image" if a.get("is_image") else "file"
+            name = a.get("filename") or "(unnamed)"
+            print(f"    <{kind}> {name}  {a.get('url')}")
         print(f"    #id={m['id']}")
         print()
 
@@ -82,26 +85,48 @@ def _print_messages(messages: list[dict[str, Any]]) -> None:
 def cmd_send(args: argparse.Namespace) -> int:
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, args.channel)
-    content = _read_stdin_if_needed(args.text)
-    if not content:
+    files = getattr(args, "file", None) or []
+    if files:
+        config.require_send_attachments(cfg)  # gate: raises if this machine hasn't opted in
+
+    # Resolve the text body. With files present we don't block on stdin — a
+    # files-only message is allowed (empty content).
+    if args.text == "-":
+        content = _read_stdin_if_needed(args.text)
+    elif args.text is not None:
+        content = args.text
+    elif files:
+        content = ""
+    else:
+        content = _read_stdin_if_needed(None)
+
+    if not content and not files:
         return _err("nothing to send (empty message).")
     tag = args.label if args.label is not None else cfg.get("machine_label")
 
     with make_client(cfg) as client:
-        sent = client.send_message(channel_id, content, label=tag)
+        if files:
+            sent = client.send_files(channel_id, content, files, label=tag)
+        else:
+            sent = client.send_message(channel_id, content, label=tag)
     if args.json:
         print(json.dumps([simplify_message(m) for m in sent], indent=2))
     else:
         n = len(sent)
         plural = "s" if n != 1 else ""
-        print(f"sent {n} message{plural} to channel {channel_id}")
+        extra = f" with {len(files)} file(s)" if files else ""
+        print(f"sent {n} message{plural}{extra} to channel {channel_id}")
     return 0
 
 
 def cmd_read(args: argparse.Namespace) -> int:
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, args.channel)
+    want_download = getattr(args, "download", False)
+    if want_download:
+        config.require_receive_attachments(cfg)  # gate: raises if disabled
 
+    saved: list[str] = []
     with make_client(cfg) as client:
         raw = client.read_messages(
             channel_id, limit=args.limit, after=args.after, before=args.before
@@ -109,17 +134,29 @@ def cmd_read(args: argparse.Namespace) -> int:
         messages = [simplify_message(m) for m in raw]
         if _resolve_ack(args, cfg):
             _ack_newest(client, channel_id, messages)
+        if want_download:
+            dest_dir = Path(args.download_dir)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            for m in messages:
+                for a in m["attachments"]:
+                    saved.append(str(client.download_attachment(a["url"], dest_dir)))
     if not args.newest_first:
         messages.reverse()  # default: oldest -> newest (chronological)
 
     if args.json:
         print(json.dumps(messages, indent=2))
+        if saved:
+            print(json.dumps({"downloaded": saved}, indent=2))
         return 0
 
     if not messages:
         print("(no messages)")
         return 0
     _print_messages(messages)
+    if want_download:
+        print(f"downloaded {len(saved)} attachment(s) to {args.download_dir}")
+        for p in saved:
+            print(f"    -> {p}")
     return 0
 
 
@@ -638,6 +675,13 @@ def cmd_config(args: argparse.Namespace) -> int:
         cfg["ack_on_read"] = on
         config.save(cfg)
         print(f"ack_on_read set to {on} (✅ auto-reaction on reads {'enabled' if on else 'disabled'})")
+    elif action == "set-attachments":
+        on = args.state.strip().lower() in ("on", "true", "1", "yes")
+        key = "allow_send_attachments" if args.direction == "send" else "allow_receive_attachments"
+        cfg[key] = on
+        config.save(cfg)
+        verb = "upload files out" if args.direction == "send" else "download attachments in"
+        print(f"{key} set to {on} (this machine {'may now' if on else 'will NOT'} {verb})")
     elif action == "path":
         print(config.config_path())
     elif action == "show":
@@ -666,6 +710,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("text", nargs="?", help="message text (use '-' or omit to read from stdin)")
     sp.add_argument("-c", "--channel", help="channel name (from config) or raw id")
     sp.add_argument("--label", help="tag to prefix onto this message (overrides config machine_label)")
+    sp.add_argument("--file", action="append", metavar="PATH", help="attach a file (repeatable); needs send opt-in")
+    sp.add_argument("--image", action="append", dest="file", metavar="PATH", help="attach an image (same as --file; images auto-embed in Discord)")
     sp.add_argument("--json", action="store_true", help="print created messages as JSON")
     sp.set_defaults(func=cmd_send)
 
@@ -678,6 +724,8 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--ack", dest="ack", action="store_const", const=True, default=None, help="react ✅ to the newest message read")
     rp.add_argument("--no-ack", dest="ack", action="store_const", const=False, help="do not react (overrides ack_on_read config)")
     rp.add_argument("--json", action="store_true", help="print messages as JSON")
+    rp.add_argument("--download", action="store_true", help="download attachments from the read messages (needs receive opt-in)")
+    rp.add_argument("--download-dir", default=".", help="where to save downloaded attachments (default: current dir)")
     rp.set_defaults(func=cmd_read)
 
     lp = sub.add_parser(
@@ -759,6 +807,9 @@ def build_parser() -> argparse.ArgumentParser:
     x = csub.add_parser("set-label", help="set this machine's message label")
     x.add_argument("label")
     x = csub.add_parser("set-ack", help="auto-react ✅ to the newest message on every read (on/off)")
+    x.add_argument("state", choices=["on", "off"])
+    x = csub.add_parser("set-attachments", help="opt in to sending/receiving files (off by default, per machine)")
+    x.add_argument("direction", choices=["send", "receive"], help="send = upload local files out; receive = download attachments in")
     x.add_argument("state", choices=["on", "off"])
     csub.add_parser("show", help="print config (token redacted)")
     csub.add_parser("path", help="print the config file path")

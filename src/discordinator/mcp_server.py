@@ -96,7 +96,9 @@ def read_messages(
             to the configured ack_on_read setting when omitted.
 
     Returns a list of simplified message objects with id, author, timestamp,
-    content and attachment urls.
+    content and attachments. Each attachment is an object
+    {url, filename, content_type, size, width, height, is_image} — pass its url
+    to download_attachment to fetch the bytes.
     """
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
@@ -110,6 +112,72 @@ def read_messages(
     if not newest_first:
         messages.reverse()
     return messages
+
+
+@mcp.tool()
+def send_file(
+    paths: Any,
+    text: str = "",
+    channel: Optional[str] = None,
+    label: Optional[str] = None,
+) -> str:
+    """Upload one or more files (images included) to a channel, with optional text.
+
+    Images auto-embed in Discord so a remote human can just look at them; other
+    files land as downloadable attachments. Large lists are split across messages
+    (Discord caps a message at 10 files); over-limit or missing files error
+    before anything is sent.
+
+    GATED: this machine must opt in to SENDING attachments, which is OFF by
+    default. Enable with `discordinator config set-attachments send on` (or
+    DISCORDINATOR_ALLOW_SEND=1). This is what stops a locked-down machine from
+    uploading local files unless deliberately allowed.
+
+    Args:
+        paths: a file path, or a list of file paths, to upload.
+        text: optional message body (rides the first message).
+        channel: configured channel name or raw id; defaults to the default channel.
+        label: tag prefixed to the message; falls back to the configured machine_label.
+    """
+    cfg = config.load()
+    config.require_send_attachments(cfg)  # raises if this machine hasn't opted in
+    channel_id = config.resolve_channel(cfg, channel)
+    tag = label if label is not None else cfg.get("machine_label")
+    file_list = [paths] if isinstance(paths, str) else list(paths)
+    with _client() as client:
+        sent = client.send_files(channel_id, text, file_list, label=tag)
+    return f"Sent {len(sent)} message(s) with {len(file_list)} file(s) to channel {channel_id}."
+
+
+@mcp.tool()
+def download_attachment(url: str, dest: Optional[str] = None) -> dict[str, Any]:
+    """Download an attachment to local disk and return where it was saved.
+
+    Attachments show up on read results as objects with a ``url`` (plus
+    filename, content_type, is_image). Pass that ``url`` here to fetch the bytes
+    — e.g. to read a config file someone relayed, or save an image. Works on
+    both transports (Discord downloads over HTTP; local mode copies the file
+    off the shared disk).
+
+    GATED: this machine must opt in to RECEIVING attachments, which is OFF by
+    default. Enable with `discordinator config set-attachments receive on` (or
+    DISCORDINATOR_ALLOW_RECEIVE=1). This keeps locked-down machines from pulling
+    files unless deliberately allowed.
+
+    Args:
+        url: the attachment url from a read result (fetch a FRESH read — Discord
+            CDN urls are signed and expire).
+        dest: a directory (filename taken from the url) or a full file path.
+            Defaults to the current working directory.
+
+    Returns {"saved": "<path>", "filename": "<name>"}.
+    """
+    cfg = config.load()
+    config.require_receive_attachments(cfg)  # raises if this machine hasn't opted in
+    target = dest if dest is not None else "."
+    with _client() as client:
+        saved = client.download_attachment(url, target)
+    return {"saved": str(saved), "filename": saved.name}
 
 
 @mcp.tool()

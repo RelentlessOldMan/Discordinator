@@ -48,7 +48,19 @@ DEFAULTS: dict[str, Any] = {
     "channels": {},         # friendly name -> channel id (string)
     "machine_label": None,  # optional tag prefixed to outgoing messages
     "ack_on_read": True,    # auto-react ✅ to the newest message on every read
+    # Attachment opt-ins, OFF by default and set PER MACHINE: a locked-down box
+    # (e.g. a work laptop) never uploads or downloads files unless deliberately
+    # turned on. Send = uploading a local file out; receive = downloading an
+    # attachment someone sent in. Independent so a machine can receive without
+    # being allowed to send.
+    "allow_send_attachments": False,
+    "allow_receive_attachments": False,
 }
+
+
+def _truthy(val: str) -> bool:
+    """Parse an env-var string as a boolean (1/true/yes/on -> True)."""
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
 def transport(cfg: dict[str, Any]) -> str:
@@ -135,7 +147,13 @@ def load() -> dict[str, Any]:
         data["chat_channel"] = env_chat
     env_ack = os.environ.get("DISCORDINATOR_ACK")
     if env_ack is not None:
-        data["ack_on_read"] = env_ack.strip().lower() in ("1", "true", "yes", "on")
+        data["ack_on_read"] = _truthy(env_ack)
+    env_send = os.environ.get("DISCORDINATOR_ALLOW_SEND")
+    if env_send is not None:
+        data["allow_send_attachments"] = _truthy(env_send)
+    env_receive = os.environ.get("DISCORDINATOR_ALLOW_RECEIVE")
+    if env_receive is not None:
+        data["allow_receive_attachments"] = _truthy(env_receive)
 
     return data
 
@@ -156,6 +174,36 @@ def require_token(cfg: dict[str, Any]) -> str:
             "or export DISCORD_BOT_TOKEN=<TOKEN>"
         )
     return str(token)
+
+
+def can_send_attachments(cfg: dict[str, Any]) -> bool:
+    """True if this machine is allowed to UPLOAD files (default False)."""
+    return bool(cfg.get("allow_send_attachments"))
+
+
+def can_receive_attachments(cfg: dict[str, Any]) -> bool:
+    """True if this machine is allowed to DOWNLOAD attachments (default False)."""
+    return bool(cfg.get("allow_receive_attachments"))
+
+
+def require_send_attachments(cfg: dict[str, Any]) -> None:
+    """Raise ConfigError unless sending attachments is enabled on this machine."""
+    if not can_send_attachments(cfg):
+        raise ConfigError(
+            "Sending attachments is disabled on this machine. Enable it with:\n"
+            "  discordinator config set-attachments send on\n"
+            "or set DISCORDINATOR_ALLOW_SEND=1 for one session."
+        )
+
+
+def require_receive_attachments(cfg: dict[str, Any]) -> None:
+    """Raise ConfigError unless downloading attachments is enabled on this machine."""
+    if not can_receive_attachments(cfg):
+        raise ConfigError(
+            "Receiving (downloading) attachments is disabled on this machine. Enable it with:\n"
+            "  discordinator config set-attachments receive on\n"
+            "or set DISCORDINATOR_ALLOW_RECEIVE=1 for one session."
+        )
 
 
 def resolve_channel(cfg: dict[str, Any], channel: Optional[str]) -> str:
