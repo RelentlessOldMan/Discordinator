@@ -43,6 +43,7 @@ from typing import Any, Optional
 
 from . import config
 from .discord_client import (
+    MAX_FILES_PER_MESSAGE,
     MAX_MESSAGE_LEN,
     DiscordClient,
     DiscordError,
@@ -159,17 +160,35 @@ def bump_turn(channel_id: str, me: str) -> int:
 
 
 def send_chat(client: DiscordClient, channel_id: str, me: str, status: str, text: str,
-              to: Optional[str] = None) -> list[dict[str, Any]]:
+              to: Optional[str] = None,
+              files: Optional[list[Any]] = None) -> list[dict[str, Any]]:
     """Post a chat message, splitting long text so EVERY piece carries the header
     (earlier pieces as ``say`` continuations, the final piece with ``status``).
     ``to`` addresses the turn to one peer; every piece keeps the address so a
-    multi-part turn stays targeted."""
+    multi-part turn stays targeted.
+
+    ``files`` (optional) attaches one or more files to the turn. They ride the
+    FINAL, status-bearing message (so a multi-part turn's attachments arrive with
+    its conclusion, and the receiver sees them on the same turn). Capped at
+    ``MAX_FILES_PER_MESSAGE`` per turn so every chat message keeps its header —
+    use a relay ``send`` for larger batches. Attachments are orthogonal to the
+    wire header, so floor/turn/addressing are unaffected."""
+    if files and len(files) > MAX_FILES_PER_MESSAGE:
+        raise ValueError(
+            f"a chat turn can carry at most {MAX_FILES_PER_MESSAGE} files "
+            f"(got {len(files)}); use a relay send for larger batches."
+        )
     reserve = len(header(me, "impasse", to))  # longest status word, incl. address
     pieces = chunk_content(text, MAX_MESSAGE_LEN - reserve) or [""]
     sent: list[dict[str, Any]] = []
     for i, piece in enumerate(pieces):
-        st = status if i == len(pieces) - 1 else "say"
-        sent.append(client.post(channel_id, f"{header(me, st, to)}{piece}"))
+        last = i == len(pieces) - 1
+        st = status if last else "say"
+        content = f"{header(me, st, to)}{piece}"
+        if files and last:
+            sent.extend(client.send_files(channel_id, content, list(files), label=None))
+        else:
+            sent.append(client.post(channel_id, content))
     return sent
 
 
@@ -178,7 +197,8 @@ def _lean(collected: list[dict[str, Any]]) -> list[dict[str, Any]]:
     field is the single source for the words; here we keep only metadata."""
     return [
         {"id": c["id"], "from": c["from"], "to": c.get("to"),
-         "status": c["status"], "timestamp": c["timestamp"]}
+         "status": c["status"], "timestamp": c["timestamp"],
+         "attachments": c.get("attachments", [])}
         for c in collected
     ]
 
@@ -313,28 +333,31 @@ def await_turn(
                 text = m["content"]
                 if text.lstrip().startswith(NUDGE_MARK):
                     continue  # system "waiting" reminder — not a turn
+                atts = m.get("attachments", [])
                 if m.get("bot"):
                     # A participant replied OUT-OF-BAND via send_message (not
                     # chat_say). Surface it as a `plain` turn so a plain reply
                     # can never strand the awaiter (the stuck-chat footgun).
                     entry = [{"id": m["id"], "from": "participant", "to": None,
-                              "status": "plain", "timestamp": m["timestamp"]}]
+                              "status": "plain", "timestamp": m["timestamp"],
+                              "attachments": atts}]
                     return _finish(channel_id, me, _result(
                         me, channel_id, sender="participant", status="plain",
                         text=text, messages=entry, ended=False,
-                        stop_reason=None, your_turn=True))
+                        stop_reason=None, your_turn=True, attachments=atts))
                 # A real human (non-bot author) typed in the channel.
                 human_entry = [{"id": m["id"], "from": "human", "to": None,
-                                "status": None, "timestamp": m["timestamp"]}]
+                                "status": None, "timestamp": m["timestamp"],
+                                "attachments": atts}]
                 if is_human_stop(text):
                     return _finish(channel_id, me, _result(
                         me, channel_id, sender="human", status="stop",
                         text=text, messages=human_entry, ended=True,
-                        stop_reason="human", your_turn=False))
+                        stop_reason="human", your_turn=False, attachments=atts))
                 return _finish(channel_id, me, _result(
                     me, channel_id, sender="human", status="interjection",
                     text=text, messages=human_entry, ended=False,
-                    stop_reason=None, your_turn=True))
+                    stop_reason=None, your_turn=True, attachments=atts))
 
             sender = parsed["participant"]
             if sender == me:
@@ -349,6 +372,7 @@ def await_turn(
             buf.append({
                 "id": m["id"], "from": sender, "to": to, "status": status,
                 "timestamp": m["timestamp"],
+                "attachments": m.get("attachments", []),
                 "body": parsed["body"],  # local only; stripped from output
             })
             if status == "say":
@@ -356,13 +380,14 @@ def await_turn(
 
             pieces = pending_by_sender.pop(sender)
             text = "\n".join(x["body"] for x in pieces)
+            atts = [a for x in pieces for a in x.get("attachments", [])]
 
             if status in TERMINAL_STATUSES:  # ends the chat for everyone
                 stop_reason = "agreed" if status == "end" else "impasse"
                 return _finish(channel_id, me, _result(
                     me, channel_id, sender=sender, status=status, text=text,
                     messages=_lean(pieces), ended=True, stop_reason=stop_reason,
-                    your_turn=False, addressed_to=to))
+                    your_turn=False, addressed_to=to, attachments=atts))
 
             # A yielded turn (over/wrap). Does the floor actually come to me?
             if want is not None and sender.lower() != want:
@@ -373,7 +398,7 @@ def await_turn(
             result = _result(
                 me, channel_id, sender=sender, status=status, text=text,
                 messages=_lean(pieces), ended=False, stop_reason=None,
-                your_turn=True, addressed_to=to)
+                your_turn=True, addressed_to=to, attachments=atts)
             result.update(_floor_context(client, channel_id, me))
             return _finish(channel_id, me, result)
 
@@ -523,7 +548,8 @@ def compute_state(
 
 def _result(me: str, channel_id: str, *, sender, status, text, messages,
             ended: bool, stop_reason, your_turn: bool, timed_out: bool = False,
-            addressed_to: Optional[str] = None) -> dict[str, Any]:
+            addressed_to: Optional[str] = None,
+            attachments: Optional[list[Any]] = None) -> dict[str, Any]:
     turns, cap = get_meta(channel_id, me)
     return {
         "from": sender,
@@ -531,6 +557,7 @@ def _result(me: str, channel_id: str, *, sender, status, text, messages,
         "status": status,
         "text": text,
         "messages": messages,
+        "attachments": attachments or [],
         "your_turn": your_turn,
         "ended": ended,
         "stop_reason": stop_reason,

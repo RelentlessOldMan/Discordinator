@@ -42,6 +42,20 @@ def local_dir() -> Path:
     return config.config_path().parent / "local"
 
 
+def _image_dimensions(path: Path) -> Optional[tuple[int, int]]:
+    """(width, height) for an image file via Pillow, or None if Pillow isn't
+    installed or the file can't be read as an image. Discord fills these in
+    server-side; local mode has no server, so this is best-effort parity and
+    Pillow stays an OPTIONAL dependency."""
+    try:
+        from PIL import Image  # optional; not a hard dependency
+
+        with Image.open(path) as im:
+            return int(im.width), int(im.height)
+    except Exception:
+        return None
+
+
 def sanitize_room(name: str) -> str:
     """Map a room name to a safe filename stem (alnum/dash/underscore)."""
     safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in str(name))
@@ -180,16 +194,19 @@ class LocalClient:
             src = Path(src)
             dest = fdir / src.name
             shutil.copyfile(src, dest)
-            attachments.append(
-                attachment_info(
-                    {
-                        "url": str(dest),
-                        "filename": src.name,
-                        "content_type": guess_content_type(src.name),
-                        "size": dest.stat().st_size,
-                    }
-                )
+            info = attachment_info(
+                {
+                    "url": str(dest),
+                    "filename": src.name,
+                    "content_type": guess_content_type(src.name),
+                    "size": dest.stat().st_size,
+                }
             )
+            if info["is_image"]:
+                dims = _image_dimensions(dest)
+                if dims:
+                    info["width"], info["height"] = dims
+            attachments.append(info)
         return attachments
 
     def _append(

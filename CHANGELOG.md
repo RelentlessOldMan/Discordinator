@@ -8,6 +8,13 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.18] - 2026-10-01
+Chat-turn attachments + local image dimensions
+- chat_say(files=...) attaches files/images to a live chat turn (gated by send opt-in); they ride the turn's final message so floor/turn/addressing are untouched; ≤10 files/turn
+- chat_await surfaces them in a new `attachments` field (and per-message in `messages`); human/out-of-band turns carry attachments too
+- local transport fills in image width/height via Pillow when available (parity with Discord's server-side dims; Pillow stays optional)
+- verified live on Discord (chat header + multipart in one message) and locally; chat.py 98% branch coverage, 92% overall
+
 ## [1.0.17] - 2026-10-01
 Attachments: send/receive files and images (opt-in, off by default)
 - send --file/--image + MCP send_file: multipart upload, images auto-embed inline; ≤10 files/msg (larger lists auto-batched), ~10MB/file, oversize/missing rejected up front
