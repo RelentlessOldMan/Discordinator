@@ -209,6 +209,43 @@ def test_discord_download_to_dir_uses_url_name() -> None:
         client.close()
 
 
+def test_discord_download_no_token_leak() -> None:
+    print("DiscordClient.download_attachment: the bot token is not sent to the CDN:")
+    seen: dict = {}
+
+    def handler(req):
+        seen["auth"] = req.headers.get("authorization", "")
+        return httpx.Response(200, content=b"x")
+
+    client = _mock_client(handler)
+    try:
+        client.download_attachment("https://cdn.x/a/f.png", _TMP / "noleak.png")
+        check("test-token" not in seen["auth"], "the bot token is blanked on the CDN GET")
+    finally:
+        client.close()
+
+
+def test_discord_download_dir_collision() -> None:
+    print("DiscordClient.download_attachment: same-named downloads don't overwrite:")
+    state = {"n": 0}
+
+    def handler(req):
+        state["n"] += 1
+        return httpx.Response(200, content=f"body{state['n']}".encode())
+
+    client = _mock_client(handler)
+    try:
+        d = _TMP / "coll"
+        d.mkdir(parents=True, exist_ok=True)
+        p1 = client.download_attachment("https://cdn.x/a/report.pdf?ex=1", d)
+        p2 = client.download_attachment("https://cdn.x/b/report.pdf?ex=2", d)
+        check(p1 != p2, "a second same-named download gets a distinct path")
+        check(p1.read_bytes() == b"body1" and p2.read_bytes() == b"body2",
+              "neither download clobbered the other")
+    finally:
+        client.close()
+
+
 def test_discord_download_error_maps() -> None:
     print("DiscordClient.download_attachment: HTTP error -> DiscordError:")
     _orig = dc.time.sleep
@@ -274,6 +311,8 @@ def main() -> int:
     test_gate_require_raises()
     test_discord_download_to_file()
     test_discord_download_to_dir_uses_url_name()
+    test_discord_download_no_token_leak()
+    test_discord_download_dir_collision()
     test_discord_download_error_maps()
     test_local_download_copies_file()
     test_local_download_missing_source()

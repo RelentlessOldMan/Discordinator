@@ -164,7 +164,12 @@ class DiscordClient:
         first). ``label`` is prefixed to the content, as with
         :meth:`send_message`, so relay self-filtering still works. Returns the
         created message object(s).
+
+        Note: each batch reads its files fully into memory (bounded by the
+        ≤10 files × ``MAX_UPLOAD_BYTES`` size check above).
         """
+        if not file_paths:
+            raise ValueError("send_files requires at least one file.")
         paths = [Path(p) for p in file_paths]
         for p in paths:
             if not p.is_file():
@@ -235,10 +240,12 @@ class DiscordClient:
         the signed urls expire, so download from a FRESH read rather than a
         stashed url.
         """
-        resp = self._request("GET", url)
+        # Blank the bot token for the CDN host — the signed url needs no auth, and
+        # there's no reason to hand our token to a different origin.
+        resp = self._request("GET", url, headers={"Authorization": ""})
         dest = Path(dest)
         if dest.is_dir():
-            dest = dest / _filename_from_url(url)
+            dest = _unique_in_dir(dest, _filename_from_url(url))
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(resp.content)
         return dest
@@ -310,6 +317,22 @@ def _filename_from_url(url: str) -> str:
     path = urlparse(url).path
     name = unquote(path.rsplit("/", 1)[-1]) if path else ""
     return name or "attachment"
+
+
+def _unique_in_dir(directory: Path, name: str) -> Path:
+    """A path in ``directory`` for ``name`` that doesn't collide with an existing
+    file — appends ``-1``, ``-2``, … so saving several attachments that share a
+    name (or re-downloading) never silently overwrites another file's bytes."""
+    dest = directory / name
+    if not dest.exists():
+        return dest
+    stem, suffix = Path(name).stem, Path(name).suffix
+    i = 1
+    while True:
+        candidate = directory / f"{stem}-{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+        i += 1
 
 
 def simplify_message(msg: dict[str, Any]) -> dict[str, Any]:
