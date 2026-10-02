@@ -31,6 +31,7 @@ from typing import Any, Optional, Union
 from . import config
 from .discord_client import (
     MAX_MESSAGE_LEN,
+    _unique_in_dir,
     attachment_info,
     chunk_content,
     guess_content_type,
@@ -192,7 +193,7 @@ class LocalClient:
         attachments: list[dict[str, Any]] = []
         for src in source_files:
             src = Path(src)
-            dest = fdir / src.name
+            dest = _unique_in_dir(fdir, src.name)  # don't let same-named files collide
             shutil.copyfile(src, dest)
             info = attachment_info(
                 {
@@ -281,6 +282,8 @@ class LocalClient:
         transport-blind; local mode has no CDN, size cap, or 10-file limit, so
         all files ride one message. Missing sources raise ``FileNotFoundError``
         before anything is written. Returns the created record."""
+        if not file_paths:
+            raise ValueError("send_files requires at least one file.")
         for p in file_paths:
             if not Path(p).is_file():
                 raise FileNotFoundError(f"File not found: {p}")
@@ -330,7 +333,7 @@ class LocalClient:
             raise FileNotFoundError(f"Local attachment not found: {url}")
         dest = Path(dest)
         if dest.is_dir():
-            dest = dest / src.name
+            dest = _unique_in_dir(dest, src.name)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
         return dest

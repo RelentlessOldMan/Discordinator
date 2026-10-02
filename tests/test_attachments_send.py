@@ -209,6 +209,41 @@ def test_local_send_missing_file() -> None:
         check(True, "missing local source -> FileNotFoundError")
 
 
+def test_local_send_duplicate_names() -> None:
+    print("LocalClient.send_files: same-named files from different dirs don't collide:")
+    da, db = _TMP / "da", _TMP / "db"
+    da.mkdir(parents=True, exist_ok=True); db.mkdir(parents=True, exist_ok=True)
+    (da / "log.txt").write_bytes(b"AAA")
+    (db / "log.txt").write_bytes(b"BBB")
+    client = LocalClient(label="A")
+    sent = client.send_files("room-dup", "", [da / "log.txt", db / "log.txt"])
+    atts = simplify_message(sent[0])["attachments"]
+    check(len(atts) == 2, "both same-named files are stored")
+    check(atts[0]["filename"] == "log.txt" and atts[1]["filename"] == "log.txt",
+          "both keep their original filename (Discord-parity)")
+    urls = {a["url"] for a in atts}
+    check(len(urls) == 2, "they are stored at DISTINCT paths (no overwrite)")
+    bodies = {Path(a["url"]).read_bytes() for a in atts}
+    check(bodies == {b"AAA", b"BBB"}, "neither file's bytes were clobbered")
+
+
+def test_send_empty_list_errors() -> None:
+    print("send_files with no files is a clear error, not a silent no-op:")
+    d = _mock_client(lambda req: httpx.Response(200, json={"id": "1"}))
+    try:
+        d.send_files("chan", "hi", [])
+        raise AssertionError("expected ValueError for empty file list (Discord)")
+    except ValueError:
+        check(True, "DiscordClient.send_files([]) -> ValueError")
+    finally:
+        d.close()
+    try:
+        LocalClient(label="A").send_files("room", "hi", [])
+        raise AssertionError("expected ValueError for empty file list (local)")
+    except ValueError:
+        check(True, "LocalClient.send_files([]) -> ValueError")
+
+
 def test_surface_parity() -> None:
     print("both transports expose send_files (surface parity):")
     check(callable(getattr(DiscordClient, "send_files", None)), "DiscordClient.send_files exists")
@@ -227,6 +262,8 @@ def main() -> int:
         test_local_send_roundtrip()
         test_local_send_then_download()
         test_local_send_missing_file()
+        test_local_send_duplicate_names()
+        test_send_empty_list_errors()
         test_surface_parity()
     finally:
         dc.time.sleep = _orig_sleep

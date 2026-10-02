@@ -8,6 +8,14 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.19] - 2026-10-01
+Attachment hardening (review follow-up) + CLI/MCP glue tests
+- fix: same-named files in one message no longer collide — local store and the download dest de-duplicate (`name`, `name-1`, …) instead of silently overwriting (Discord already keyed by index)
+- fix: the bot token is no longer sent to the Discord CDN host on attachment downloads
+- fix: send_files([]) with no files is now a clear error instead of a silent success
+- tests: new test_cli_attachments.py (14) + test_mcp_attachments.py (11) exercising the opt-in gates, send --file / read --download, send_file/download_attachment/chat_say(files) and config set-attachments; plus collision / empty-list / no-token-leak edge tests
+- all 12 suites pass; chat.py 98% branch, core transports 88-93%
+
 ## [1.0.18] - 2026-10-01
 Chat-turn attachments + local image dimensions
 - chat_say(files=...) attaches files/images to a live chat turn (gated by send opt-in); they ride the turn's final message so floor/turn/addressing are untouched; ≤10 files/turn
