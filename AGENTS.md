@@ -54,6 +54,20 @@ Skip steps 2–3 (bot/token/channels). Relay defaults to room `relay`, chat to r
 `chat`; pass any `channel="..."` to use another room. Then jump to step 5. The
 rest of this doc's tool usage is identical on both transports.
 
+**Relay and chat can use DIFFERENT transports.** `relay` and `chat` normally
+share `transport`, but each has an optional override — `relay_transport` /
+`chat_transport` (env: `DISCORDINATOR_RELAY_TRANSPORT` /
+`DISCORDINATOR_CHAT_TRANSPORT`), falling back to `transport` when unset. So one
+session can relay over Discord to reach another machine while chatting locally
+with a sibling session on the same box:
+```powershell
+discordinator config set-chat-transport local    # relay stays Discord (base)
+# or in a per-project .mcp.json:  "DISCORDINATOR_CHAT_TRANSPORT": "local"
+```
+A token is required only for whichever mode runs on Discord. `download_attachment`
+picks its backend from the url shape (Discord CDN link vs. local file path), so
+it works regardless of which mode delivered the attachment.
+
 **Watching/steering a local chat** (there's no Discord UI): a human can
 `discordinator watch <room> --follow --state` to see it live (chat turns parsed,
 plus floor/waiting; `watch --all` interleaves every room), `discordinator

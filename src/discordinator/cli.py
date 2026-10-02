@@ -104,7 +104,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         return _err("nothing to send (empty message).")
     tag = args.label if args.label is not None else cfg.get("machine_label")
 
-    with make_client(cfg) as client:
+    with make_client(cfg, "relay") as client:
         if files:
             sent = client.send_files(channel_id, content, files, label=tag)
         else:
@@ -127,7 +127,7 @@ def cmd_read(args: argparse.Namespace) -> int:
         config.require_receive_attachments(cfg)  # gate: raises if disabled
 
     saved: list[str] = []
-    with make_client(cfg) as client:
+    with make_client(cfg, "relay") as client:
         raw = client.read_messages(
             channel_id, limit=args.limit, after=args.after, before=args.before
         )
@@ -196,7 +196,7 @@ def cmd_relay(args: argparse.Namespace) -> int:
     if args.reset:
         config.clear_cursor(channel_id)
 
-    with make_client(cfg) as client:
+    with make_client(cfg, "relay") as client:
         if not args.watch:
             messages = _relay_poll(client, channel_id, own_label, args.include_self, args.limit)
             if do_ack:
@@ -323,7 +323,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return _watch_all(cfg, args, color)
 
     # Default to the chat room (the interesting one); any name/id also works.
-    room = config.resolve_channel(cfg, args.room) if args.room else config.resolve_chat_channel(cfg, None)
+    room = config.resolve_channel(cfg, args.room, mode="chat") if args.room else config.resolve_chat_channel(cfg, None)
 
     def show_state(client: Any) -> None:
         if args.state:
@@ -331,7 +331,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
             if footer:
                 print(_dim(f"[{footer}]", color))
 
-    with make_client(cfg) as client:
+    with make_client(cfg, "chat") as client:
         raw = client.read_messages(room, limit=args.limit)
         msgs = [simplify_message(m) for m in raw]
         msgs.reverse()
@@ -370,7 +370,7 @@ def _watch_all(cfg: dict[str, Any], args: argparse.Namespace, color: bool) -> in
     """Interleave every local room into one merged, time-ordered stream. Cross-
     room ordering works because ids are time-based, so sorting by id ≈ wall
     clock. Local-only (needs the room list on disk)."""
-    if not config.is_local(cfg):
+    if not config.is_local(cfg, "chat"):
         return _err("watch --all is only supported on the local transport "
                     "(in Discord mode, watch a specific channel).")
 
@@ -393,7 +393,7 @@ def _watch_all(cfg: dict[str, Any], args: argparse.Namespace, color: bool) -> in
         out.sort(key=lambda e: e[0])
         return out
 
-    with make_client(cfg) as client:
+    with make_client(cfg, "chat") as client:
         cursors: dict[str, str] = {}
         print("─ #(all local rooms) " + "─" * 24)
         entries = collect(client, cursors, initial=True)
@@ -434,8 +434,8 @@ def cmd_tui(args: argparse.Namespace) -> int:
     return 0
 
 
-def _require_local(cfg: dict[str, Any], action: str) -> Optional[int]:
-    if not config.is_local(cfg):
+def _require_local(cfg: dict[str, Any], action: str, mode: str = "chat") -> Optional[int]:
+    if not config.is_local(cfg, mode):
         return _err(
             f"{action} only applies to the local transport. In Discord mode, "
             "just type in the channel yourself."
@@ -452,7 +452,7 @@ def cmd_interject(args: argparse.Namespace) -> int:
     text = _read_stdin_if_needed(args.text)
     if not text:
         return _err("nothing to interject (empty message).")
-    with make_client(cfg) as client:
+    with make_client(cfg, "chat") as client:
         client.post_human(room, text)
     print(f"interjected as human in #{room}. A waiting session will see it on its next chat_await.")
     return 0
@@ -464,7 +464,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     if guard is not None:
         return guard
     room = config.resolve_chat_channel(cfg, args.channel)
-    with make_client(cfg) as client:
+    with make_client(cfg, "chat") as client:
         client.post_human(room, "[[STOP]]")
     print(f"sent stop to #{room}. Any session waiting there will end the chat.")
     return 0
@@ -478,7 +478,7 @@ def cmd_purge(args: argparse.Namespace) -> int:
     if args.older_than:
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=_parse_duration(args.older_than))
 
-    with make_client(cfg) as client:
+    with make_client(cfg, "relay") as client:
         my_id = client.whoami().get("id")
 
         # Page back through history up to --limit messages.
@@ -545,9 +545,9 @@ def cmd_channels(args: argparse.Namespace) -> int:
     default = cfg.get("default_channel")
 
     if args.remote:
-        if config.is_local(cfg):
+        if config.is_local(cfg, "relay"):
             # Local transport: list the room files that exist on disk.
-            with make_client(cfg) as client:
+            with make_client(cfg, "relay") as client:
                 remote = client.list_guild_channels()
             if not remote:
                 print("(no local rooms yet — they're created on first message)")
@@ -556,7 +556,7 @@ def cmd_channels(args: argparse.Namespace) -> int:
             return 0
         if not args.guild:
             return _err("--remote requires --guild <guild_id>.")
-        with make_client(cfg) as client:
+        with make_client(cfg, "relay") as client:
             remote = client.list_guild_channels(args.guild)
         text_channels = [c for c in remote if c.get("type") in (0, 5)]
         for c in sorted(text_channels, key=lambda c: c.get("position", 0)):
@@ -592,7 +592,10 @@ def cmd_version(args: argparse.Namespace) -> int:
     try:
         cfg = config.load()
         print(f"transport:   {config.transport(cfg)}")
-        if config.is_local(cfg):
+        relay_t, chat_t = config.transport(cfg, "relay"), config.transport(cfg, "chat")
+        if relay_t != chat_t:
+            print(f"  relay: {relay_t}   chat: {chat_t}")
+        if config.is_local(cfg, "relay") or config.is_local(cfg, "chat"):
             print(f"local dir:   {local_dir()}")
     except config.ConfigError:
         pass
@@ -666,6 +669,19 @@ def cmd_config(args: argparse.Namespace) -> int:
         else:
             print("transport set to 'discord' — uses the Discord REST API "
                   "(needs a bot token; works across machines).")
+    elif action == "set-relay-transport":
+        val = args.mode.strip().lower()
+        cfg["relay_transport"] = val
+        config.save(cfg)
+        print(f"relay transport set to '{val}' (send/read/relay tools); "
+              "chat is unaffected. Clears to the base transport if you set it back to match.")
+    elif action == "set-chat-transport":
+        val = args.mode.strip().lower()
+        cfg["chat_transport"] = val
+        config.save(cfg)
+        print(f"chat transport set to '{val}' (live chat_* tools); "
+              "relay is unaffected. This is how one session relays over Discord "
+              "while chatting locally with a sibling session.")
     elif action == "set-label":
         cfg["machine_label"] = args.label
         config.save(cfg)
@@ -803,6 +819,10 @@ def build_parser() -> argparse.ArgumentParser:
     x = csub.add_parser("set-chat-channel", help="set the default channel for live chat_* tools (a shared room)")
     x.add_argument("name")
     x = csub.add_parser("set-transport", help="switch transport: 'discord' (default, cross-machine) or 'local' (no Discord, same machine)")
+    x.add_argument("mode", choices=["discord", "local"])
+    x = csub.add_parser("set-relay-transport", help="transport for relay tools (send/read/relay) only; overrides set-transport for relay")
+    x.add_argument("mode", choices=["discord", "local"])
+    x = csub.add_parser("set-chat-transport", help="transport for live chat_* tools only; overrides set-transport for chat (e.g. relay=discord, chat=local)")
     x.add_argument("mode", choices=["discord", "local"])
     x = csub.add_parser("set-label", help="set this machine's message label")
     x.add_argument("label")

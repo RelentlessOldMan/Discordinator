@@ -54,6 +54,26 @@ Precedence is the usual **env var → config → default (`discord`)**. In `loca
 mode, channels are just room names (any string; no ids needed) — relay defaults
 to a room called `relay`, chat to `chat`, so it works out of the box.
 
+#### Mixing transports: relay and chat can differ
+
+By default `relay` and `chat` share the one `transport`. You can override each
+independently — so a single session can **relay over Discord** (to reach another
+machine) while **chatting locally** with a sibling session on the same box:
+
+```powershell
+discordinator config set-chat-transport local      # chat_* go local…
+#  (relay stays on the base transport — Discord)
+# or per-session via env (great for a per-project .mcp.json):
+#   DISCORDINATOR_CHAT_TRANSPORT=local
+#   DISCORDINATOR_RELAY_TRANSPORT=discord
+```
+
+Each mode's transport is `relay_transport` / `chat_transport`, falling back to
+`transport` when unset. A Discord bot token is only needed for whichever mode
+actually uses Discord. Attachment downloads pick their backend from the url
+itself (a Discord CDN link vs. a local file path), so they work no matter which
+mode produced the attachment.
+
 ### Watching & steering local chats
 
 Discord gives you a window into the conversation (and a box to type into). Local
