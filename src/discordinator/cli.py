@@ -574,14 +574,14 @@ def cmd_channels(args: argparse.Namespace) -> int:
 
 def cmd_whoami(args: argparse.Namespace) -> int:
     cfg = config.load()
-    with make_client(cfg) as client:
+    with make_client(cfg, "relay") as client:
         me = client.whoami()
     if args.json:
         print(json.dumps(me, indent=2))
     else:
         name = me.get("global_name") or me.get("username")
-        if config.is_local(cfg):
-            print(f"Local transport — identity '{name}' (no Discord token in use)")
+        if config.is_local(cfg, "relay"):
+            print(f"Local relay transport — identity '{name}' (no Discord token in use)")
         else:
             print(f"Authenticated as {name} (id {me.get('id')})")
     return 0
@@ -591,11 +591,15 @@ def cmd_version(args: argparse.Namespace) -> int:
     print(f"discordinator {__version__}")
     try:
         cfg = config.load()
-        print(f"transport:   {config.transport(cfg)}")
-        relay_t, chat_t = config.transport(cfg, "relay"), config.transport(cfg, "chat")
-        if relay_t != chat_t:
-            print(f"  relay: {relay_t}   chat: {chat_t}")
-        if config.is_local(cfg, "relay") or config.is_local(cfg, "chat"):
+        any_local = False
+        for m in ("relay", "chat"):
+            try:
+                t = config.transport(cfg, m)
+                any_local = any_local or (t == "local")
+            except config.ConfigError:
+                t = "(unset)"
+            print(f"{m} transport: {t}")
+        if any_local:
             print(f"local dir:   {local_dir()}")
     except config.ConfigError:
         pass
@@ -659,29 +663,18 @@ def cmd_config(args: argparse.Namespace) -> int:
         cfg["chat_channel"] = args.name
         config.save(cfg)
         print(f"chat channel set to '{args.name}' (live chat_* default; relay unaffected)")
-    elif action == "set-transport":
-        val = args.mode.strip().lower()
-        cfg["transport"] = val
-        config.save(cfg)
-        if val == "local":
-            print("transport set to 'local' — no Discord token needed; messages "
-                  f"are stored on disk under {local_dir()} (same-machine only).")
-        else:
-            print("transport set to 'discord' — uses the Discord REST API "
-                  "(needs a bot token; works across machines).")
     elif action == "set-relay-transport":
         val = args.mode.strip().lower()
         cfg["relay_transport"] = val
         config.save(cfg)
-        print(f"relay transport set to '{val}' (send/read/relay tools); "
-              "chat is unaffected. Clears to the base transport if you set it back to match.")
+        print(f"relay transport set to '{val}' (send/read/relay tools); chat is unaffected.")
     elif action == "set-chat-transport":
         val = args.mode.strip().lower()
         cfg["chat_transport"] = val
         config.save(cfg)
-        print(f"chat transport set to '{val}' (live chat_* tools); "
-              "relay is unaffected. This is how one session relays over Discord "
-              "while chatting locally with a sibling session.")
+        print(f"chat transport set to '{val}' (live chat_* tools); relay is unaffected. "
+              "This is how one session relays over Discord while chatting locally "
+              "with a sibling session.")
     elif action == "set-label":
         cfg["machine_label"] = args.label
         config.save(cfg)
@@ -818,11 +811,9 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("name")
     x = csub.add_parser("set-chat-channel", help="set the default channel for live chat_* tools (a shared room)")
     x.add_argument("name")
-    x = csub.add_parser("set-transport", help="switch transport: 'discord' (default, cross-machine) or 'local' (no Discord, same machine)")
+    x = csub.add_parser("set-relay-transport", help="transport for relay tools (send/read/relay): 'discord' or 'local'. Required — no default.")
     x.add_argument("mode", choices=["discord", "local"])
-    x = csub.add_parser("set-relay-transport", help="transport for relay tools (send/read/relay) only; overrides set-transport for relay")
-    x.add_argument("mode", choices=["discord", "local"])
-    x = csub.add_parser("set-chat-transport", help="transport for live chat_* tools only; overrides set-transport for chat (e.g. relay=discord, chat=local)")
+    x = csub.add_parser("set-chat-transport", help="transport for live chat_* tools: 'discord' or 'local'. Required — no default. (e.g. relay=discord, chat=local)")
     x.add_argument("mode", choices=["discord", "local"])
     x = csub.add_parser("set-label", help="set this machine's message label")
     x.add_argument("label")

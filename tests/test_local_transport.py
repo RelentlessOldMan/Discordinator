@@ -17,7 +17,8 @@ from pathlib import Path
 # Isolate config/state/local dirs into a throwaway tree and force local mode.
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-localtest-"))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
-os.environ["DISCORDINATOR_TRANSPORT"] = "local"
+os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
+os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
 os.environ.pop("DISCORD_BOT_TOKEN", None)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))

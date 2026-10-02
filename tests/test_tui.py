@@ -15,7 +15,8 @@ from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-tuitest-"))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
-os.environ["DISCORDINATOR_TRANSPORT"] = "local"
+os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
+os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
 os.environ.pop("DISCORD_BOT_TOKEN", None)
 os.environ.pop("DISCORDINATOR_LABEL", None)
 

@@ -106,15 +106,22 @@ def test_simplify_message() -> None:
 
 
 def test_transport_normalization() -> None:
-    print("config.transport / is_local normalization:")
+    print("config.transport / is_local per-mode normalization:")
     for val in ("local", "LOCAL", " local ", "file", "offline"):
-        check(config.transport({"transport": val}) == "local",
+        check(config.transport({"relay_transport": val}, "relay") == "local",
               f"'{val}' normalizes to local")
-    for val in ("discord", "DISCORD", "", "garbage", None):
-        check(config.transport({"transport": val}) == "discord",
-              f"{val!r} normalizes to discord (safe default)")
-    check(config.is_local({"transport": "local"}) is True, "is_local True for local")
-    check(config.is_local({}) is False, "is_local False by default (discord)")
+    for val in ("discord", "DISCORD", "garbage"):
+        check(config.transport({"chat_transport": val}, "chat") == "discord",
+              f"{val!r} normalizes to discord (any non-local, non-empty value)")
+    check(config.is_local({"relay_transport": "local"}, "relay") is True, "is_local True for local")
+    # Unset / empty is NOT a silent default — it's an explicit error.
+    for empty in ({}, {"relay_transport": ""}, {"relay_transport": None}):
+        try:
+            config.transport(empty, "relay")
+            raise AssertionError(f"{empty!r} should raise, not default")
+        except config.ConfigError:
+            pass
+    check(True, "an unset/empty transport raises ConfigError (no silent default)")
 
 
 def test_sanitize_room() -> None:

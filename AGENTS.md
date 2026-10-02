@@ -36,37 +36,33 @@ The bot/token is **per owner**, not shared with strangers:
 
 ## Setup on a new machine (in order)
 
-### 0. Choose a transport
-Discordinator runs over one of two transports:
-- **`discord`** (default) — the Discord REST API. Works across machines. Needs a
-  bot token + channels (steps 2–3 below).
+### 0. Choose a transport per mode
+Discordinator has two transports, and **`relay` and `chat` each pick one
+explicitly** — there is no shared base and no default, so an unconfigured mode
+errors (with the exact fix) rather than guessing:
+- **`discord`** — the Discord REST API. Works across machines. Needs a bot token
+  + channels (steps 2–3 below).
 - **`local`** — **no Discord at all.** Messages live in JSONL files under
   `~/.discordinator/local/`. Two sessions on the **same machine** relay/chat with
   **no token, no network, no channel setup**. Great for a locked-down work laptop
   or offline dev; it cannot reach another machine.
 
-For local mode, do step 1, then just:
+Set each mode (env: `DISCORDINATOR_RELAY_TRANSPORT` / `DISCORDINATOR_CHAT_TRANSPORT`):
 ```powershell
-discordinator config set-transport local   # (or set DISCORDINATOR_TRANSPORT=local per project)
-discordinator config set-label <SESSION_LABEL>   # distinct per session for relay self-filtering
+discordinator config set-relay-transport discord   # send/read/relay
+discordinator config set-chat-transport  local     # live chat_*
+discordinator config set-label <SESSION_LABEL>      # distinct per session for relay self-filtering
 ```
-Skip steps 2–3 (bot/token/channels). Relay defaults to room `relay`, chat to room
-`chat`; pass any `channel="..."` to use another room. Then jump to step 5. The
-rest of this doc's tool usage is identical on both transports.
+For a mode on `local`, skip steps 2–3 for it (no bot/token/channels): relay
+defaults to room `relay`, chat to room `chat`; pass any `channel="..."` for
+another room. The rest of this doc's tool usage is identical on both transports.
 
-**Relay and chat can use DIFFERENT transports.** `relay` and `chat` normally
-share `transport`, but each has an optional override — `relay_transport` /
-`chat_transport` (env: `DISCORDINATOR_RELAY_TRANSPORT` /
-`DISCORDINATOR_CHAT_TRANSPORT`), falling back to `transport` when unset. So one
-session can relay over Discord to reach another machine while chatting locally
-with a sibling session on the same box:
-```powershell
-discordinator config set-chat-transport local    # relay stays Discord (base)
-# or in a per-project .mcp.json:  "DISCORDINATOR_CHAT_TRANSPORT": "local"
-```
-A token is required only for whichever mode runs on Discord. `download_attachment`
-picks its backend from the url shape (Discord CDN link vs. local file path), so
-it works regardless of which mode delivered the attachment.
+**The two modes are independent**, so one session can relay over Discord to
+reach another machine while chatting locally with a sibling session on the same
+box — exactly the config above. A token is required only for whichever mode runs
+on Discord. `download_attachment` picks its backend from the url shape (Discord
+CDN link vs. local file path), so it works regardless of which mode delivered
+the attachment.
 
 **Watching/steering a local chat** (there's no Discord UI): a human can
 `discordinator watch <room> --follow --state` to see it live (chat turns parsed,
