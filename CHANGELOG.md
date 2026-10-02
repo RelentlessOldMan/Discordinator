@@ -8,6 +8,14 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.20] - 2026-10-02
+Per-mode transport: relay and chat can use different backends
+- one session can now relay over Discord (to reach another machine) while chatting LOCALLY with a sibling session on the same box — previously transport was a single global switch for the whole process
+- config relay_transport / chat_transport override the base transport per mode (env: DISCORDINATOR_RELAY_TRANSPORT / DISCORDINATOR_CHAT_TRANSPORT), each falling back to transport when unset; a token is only needed for whichever mode runs on Discord
+- make_client(cfg, mode) builds the right backend per tool; relay tools pass "relay", chat tools "chat"; download_attachment picks its backend from the url shape (CDN link vs local path) so it works regardless of which mode delivered the file
+- new CLI: config set-relay-transport / set-chat-transport; version prints the split when the two differ
+- fully backward compatible (set only transport → both modes follow it); new test_split_transport.py (32) + test_cli_split_transport.py (12); client_factory 100%, config 91% branch; all 14 suites pass
+
 ## [1.0.19] - 2026-10-01
 Attachment hardening (review follow-up) + CLI/MCP glue tests
 - fix: same-named files in one message no longer collide — local store and the download dest de-duplicate (`name`, `name-1`, …) instead of silently overwriting (Discord already keyed by index)

@@ -43,6 +43,11 @@ class ConfigError(Exception):
 DEFAULTS: dict[str, Any] = {
     "token": None,
     "transport": "discord",  # "discord" (REST) or "local" (no-Discord, files)
+    # Optional per-mode overrides of `transport` (unset = use `transport`). Let
+    # one session mix backends, e.g. relay over Discord while chatting locally.
+    # Also settable via DISCORDINATOR_RELAY_TRANSPORT / DISCORDINATOR_CHAT_TRANSPORT.
+    "relay_transport": None,  # transport for relay tools (send/read/get_new_messages)
+    "chat_transport": None,   # transport for live chat_* tools
     "default_channel": None,
     "chat_channel": None,   # default channel for CHAT tools (a shared room)
     "channels": {},         # friendly name -> channel id (string)
@@ -63,15 +68,29 @@ def _truthy(val: str) -> bool:
     return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
-def transport(cfg: dict[str, Any]) -> str:
-    """Normalize the configured transport to ``"discord"`` or ``"local"``."""
-    val = str(cfg.get("transport") or "discord").strip().lower()
+def transport(cfg: dict[str, Any], mode: Optional[str] = None) -> str:
+    """Normalize the transport to ``"discord"`` or ``"local"`` for a given MODE.
+
+    ``mode="relay"`` uses ``relay_transport``; ``mode="chat"`` uses
+    ``chat_transport``; each falls back to the base ``transport`` when its
+    override is unset. ``mode=None`` returns the base ``transport``. This lets a
+    single process run, e.g., relay over Discord (to reach another machine)
+    while chatting locally with a sibling session on the same box.
+    """
+    base = cfg.get("transport")
+    if mode == "relay":
+        val = cfg.get("relay_transport") or base
+    elif mode == "chat":
+        val = cfg.get("chat_transport") or base
+    else:
+        val = base
+    val = str(val or "discord").strip().lower()
     return "local" if val in ("local", "file", "offline") else "discord"
 
 
-def is_local(cfg: dict[str, Any]) -> bool:
-    """True when running the no-Discord local filesystem transport."""
-    return transport(cfg) == "local"
+def is_local(cfg: dict[str, Any], mode: Optional[str] = None) -> bool:
+    """True when the given mode runs the no-Discord local filesystem transport."""
+    return transport(cfg, mode) == "local"
 
 
 def config_path() -> Path:
@@ -136,6 +155,12 @@ def load() -> dict[str, Any]:
     env_transport = os.environ.get("DISCORDINATOR_TRANSPORT")
     if env_transport:
         data["transport"] = env_transport
+    env_relay_transport = os.environ.get("DISCORDINATOR_RELAY_TRANSPORT")
+    if env_relay_transport:
+        data["relay_transport"] = env_relay_transport
+    env_chat_transport = os.environ.get("DISCORDINATOR_CHAT_TRANSPORT")
+    if env_chat_transport:
+        data["chat_transport"] = env_chat_transport
     env_label = os.environ.get("DISCORDINATOR_LABEL")
     if env_label:
         data["machine_label"] = env_label
@@ -206,16 +231,18 @@ def require_receive_attachments(cfg: dict[str, Any]) -> None:
         )
 
 
-def resolve_channel(cfg: dict[str, Any], channel: Optional[str]) -> str:
+def resolve_channel(cfg: dict[str, Any], channel: Optional[str], mode: str = "relay") -> str:
     """Resolve a channel name/id to a channel id string.
 
     Precedence: explicit ``channel`` arg (a config name or a raw numeric id),
-    otherwise the configured ``default_channel``. In **local** transport, any
+    otherwise the configured ``default_channel``. Whether a name is treated as
+    an arbitrary local room depends on the ``mode``'s transport (relay vs chat),
+    so the two modes can run different backends. In **local** transport, any
     string is a valid room name (stored as a JSONL file), and the default relay
     room falls back to ``"relay"`` so local mode needs zero channel setup.
     """
     channels = cfg.get("channels") or {}
-    local = is_local(cfg)
+    local = is_local(cfg, mode)
     name = channel if channel is not None else cfg.get("default_channel")
 
     if name is None:
@@ -253,10 +280,10 @@ def resolve_chat_channel(cfg: dict[str, Any], channel: Optional[str]) -> str:
     ``discordinator config set-chat-channel``.
     """
     if channel is not None:
-        return resolve_channel(cfg, channel)
+        return resolve_channel(cfg, channel, mode="chat")
     fallback = cfg.get("chat_channel") or cfg.get("default_channel")
     if fallback is None:
-        if is_local(cfg):
+        if is_local(cfg, "chat"):
             fallback = "chat"  # built-in default local chat room, distinct from relay
         else:
             raise ConfigError(
@@ -264,7 +291,7 @@ def resolve_chat_channel(cfg: dict[str, Any], channel: Optional[str]) -> str:
                 "or set a shared room with: discordinator config set-chat-channel <name-or-id> "
                 "(or export DISCORDINATOR_CHAT_CHANNEL)."
             )
-    return resolve_channel(cfg, fallback)
+    return resolve_channel(cfg, fallback, mode="chat")
 
 
 # -- relay cursor state ----------------------------------------------------

@@ -24,7 +24,7 @@ from typing import Any, Optional
 from mcp.server.mcpserver import MCPServer
 
 from . import chat, config, use_system_certs
-from .client_factory import Client, make_client
+from .client_factory import Client, make_client, make_client_for_url
 from .discord_client import DiscordError, simplify_message
 
 # Keep the HTTP client quiet: it logs an INFO line per request to stderr, which
@@ -35,8 +35,10 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 mcp = MCPServer("discordinator")
 
 
-def _client() -> Client:
-    return make_client(config.load())
+def _client(mode: Optional[str] = None) -> Client:
+    """Client for ``mode`` ("relay"/"chat"/None). Relay and chat may run on
+    different transports, so each tool builds its client with its own mode."""
+    return make_client(config.load(), mode)
 
 
 def _try_ack(client: Client, channel_id: str, messages: list[dict[str, Any]]) -> None:
@@ -69,7 +71,7 @@ def send_message(
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
     tag = label if label is not None else cfg.get("machine_label")
-    with _client() as client:
+    with _client("relay") as client:
         sent = client.send_message(channel_id, text, label=tag)
     return f"Sent {len(sent)} message(s) to channel {channel_id}."
 
@@ -104,7 +106,7 @@ def read_messages(
     channel_id = config.resolve_channel(cfg, channel)
     if ack is None:
         ack = bool(cfg.get("ack_on_read"))
-    with _client() as client:
+    with _client("relay") as client:
         raw = client.read_messages(channel_id, limit=limit, after=after, before=before)
         messages = [simplify_message(m) for m in raw]
         if ack:
@@ -144,7 +146,7 @@ def send_file(
     channel_id = config.resolve_channel(cfg, channel)
     tag = label if label is not None else cfg.get("machine_label")
     file_list = [paths] if isinstance(paths, str) else list(paths)
-    with _client() as client:
+    with _client("relay") as client:
         sent = client.send_files(channel_id, text, file_list, label=tag)
     return f"Sent {len(sent)} message(s) with {len(file_list)} file(s) to channel {channel_id}."
 
@@ -175,7 +177,10 @@ def download_attachment(url: str, dest: Optional[str] = None) -> dict[str, Any]:
     cfg = config.load()
     config.require_receive_attachments(cfg)  # raises if this machine hasn't opted in
     target = dest if dest is not None else "."
-    with _client() as client:
+    # The url shape decides the backend (http -> Discord CDN, path -> local
+    # disk), so this works whether the url came from a relay or a chat turn even
+    # when those two modes run on different transports.
+    with make_client_for_url(url, cfg) as client:
         saved = client.download_attachment(url, target)
     return {"saved": str(saved), "filename": saved.name}
 
@@ -215,7 +220,7 @@ def get_new_messages(
     cursor = config.get_cursor(channel_id)
 
     capped = max(1, min(int(limit), 100))
-    with _client() as client:
+    with _client("relay") as client:
         if cursor:
             raw = client.read_messages(channel_id, limit=100, after=cursor)
         else:
@@ -265,7 +270,7 @@ def purge_messages(
     channel_id = config.resolve_channel(cfg, channel)
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
 
-    with _client() as client:
+    with _client("relay") as client:
         my_id = client.whoami().get("id")
         collected: list[dict[str, Any]] = []
         before: Optional[str] = None
@@ -355,7 +360,7 @@ def chat_begin(chatter: str, channel: Optional[str] = None, turn_cap: int = 20) 
     me = chat.sanitize_handle(chatter)
     cfg = config.load()
     channel_id = config.resolve_chat_channel(cfg, channel)
-    with _client() as client:
+    with _client("chat") as client:
         st = chat.compute_state(client, channel_id, me)
         if st.get("your_turn") and st.get("_pending_predecessor"):
             # A turn is already owed to me (e.g. I ended/dropped and the other
@@ -426,7 +431,7 @@ def chat_say(
         config.require_send_attachments(cfg)  # raises if this machine hasn't opted in
         file_list = [files] if isinstance(files, str) else list(files)
     channel_id = config.resolve_chat_channel(cfg, channel)
-    with _client() as client:
+    with _client("chat") as client:
         sent = chat.send_chat(client, channel_id, me, status, text, to=target, files=file_list)
         # `say`/`ask` don't complete a turn, so they don't count against the cap.
         took_turn = status not in chat.NON_TURN_STATUSES
@@ -510,7 +515,7 @@ def chat_await(
     me = chat.sanitize_handle(chatter)
     cfg = config.load()
     channel_id = config.resolve_chat_channel(cfg, channel)
-    with _client() as client:
+    with _client("chat") as client:
         return chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll,
                                nudge_after=nudge_after, from_whom=from_whom)
 
@@ -548,7 +553,7 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
     """
     cfg = config.load()
     channel_id = config.resolve_chat_channel(cfg, channel)
-    with _client() as client:
+    with _client("chat") as client:
         st = chat.compute_state(client, channel_id, chatter)
     public = {k: v for k, v in st.items() if not k.startswith("_")}
     public["channel"] = channel_id
