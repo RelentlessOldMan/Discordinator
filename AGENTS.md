@@ -74,8 +74,11 @@ python -m pip install -e .
 2. Invite it to your server (OAuth2 → URL Generator → scope `bot` → permissions:
    View Channels, Send Messages, Read Message History), or use:
    `https://discord.com/api/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=68672`
-3. No privileged intents needed — reading history over REST only needs the
-   channel permissions above.
+3. **Enable the Message Content Intent** (Bot → Privileged Gateway Intents →
+   MESSAGE CONTENT INTENT → on). It's required: without it, reads of messages the
+   bot didn't author come back with empty content and no attachments — over REST
+   too. The bot sees its own messages regardless, so a send→read test misleadingly
+   passes. Instant toggle for a bot in under 100 servers; no re-invite needed.
 
 ### 3. Store token + label + channels
 Store config in the **home-dir config file** (`~/.discordinator/config.json`),
@@ -308,10 +311,31 @@ only filters out the *bot's own machine label* — a plain human message has no
 such prefix, so it passes through. Human messages also come from the person's
 Discord account, not the bot.
 
+**Requires the Message Content Intent.** To read the *content and attachments* of
+messages the bot didn't send (i.e. any human or other-bot message), the app must
+have the privileged **Message Content Intent** enabled (Developer Portal → Bot →
+Privileged Gateway Intents → MESSAGE CONTENT INTENT). This applies to REST reads,
+not just the gateway. Without it, a human message reads back with empty content
+and an empty attachment list even though its id/author/timestamp are visible —
+and because the bot always sees its *own* messages in full, a send→read self-test
+will pass and hide the problem. Instant toggle for a bot in under 100 servers.
+
 ## Attachments
-Discordinator sends **text only** — it never uploads files. When reading, if a
-message happens to carry an attachment, its URL is shown for reference; nothing
-is downloaded.
+Discordinator can send and receive files/images, but **both directions are
+opt-in and OFF by default** (so a locked-down machine never moves files unless
+told to). Enable per machine with `config set-attachments send on` /
+`... receive on` (or `DISCORDINATOR_ALLOW_SEND` / `DISCORDINATOR_ALLOW_RECEIVE=1`).
+- **Send** (`send --file/--image`, MCP `send_file`, `chat_say(files=...)`): needs
+  the send opt-in AND the bot's **Attach Files** permission (`permissions=101440`).
+  Images auto-embed; ≤10 files/message, ~10MB/file.
+- **Receive** (`read --download`, MCP `download_attachment`): needs the receive
+  opt-in. Reads surface each attachment as `{url, filename, content_type, size,
+  width, height, is_image}`; pass the `url` to `download_attachment` to fetch the
+  bytes. Discord CDN urls are signed and **expire**, so download from a FRESH
+  read, not a stashed url.
+- **Reading a human's attachment requires the Message Content Intent** (see
+  below) — without it the attachment list reads empty even though the message is
+  visible.
 
 ## Message size
 Discord's limit is **2000 characters per message** for bots. Longer text is
