@@ -2,9 +2,18 @@
 
 We deliberately avoid a gateway (websocket) connection: sending and reading
 channel messages are simple REST calls, which keeps one-shot CLI/MCP
-invocations fast. Reading historical message content over REST does NOT require
-the privileged Message Content Intent — the bot only needs View Channel and
-Read Message History permissions in the target channel.
+invocations fast.
+
+IMPORTANT — the Message Content Intent is REQUIRED to read other users'
+messages. The privileged "Message Content Intent" (Developer Portal → your app
+→ Bot → Privileged Gateway Intents) gates ``content``, ``attachments``,
+``embeds`` and ``mentions`` on messages the bot did NOT author — over REST too,
+not just the gateway. Without it, reads of a human's (or another bot's) message
+come back with empty content and an empty attachments list, even though the
+message id/author/timestamp are visible. A bot always sees its OWN messages in
+full regardless, which is why a send->read round-trip (our tests) passes while a
+human-posted attachment silently reads as empty. Besides the intent, the bot
+needs View Channel and Read Message History in the target channel.
 """
 
 from __future__ import annotations

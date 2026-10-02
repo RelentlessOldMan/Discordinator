@@ -117,11 +117,18 @@ primitives as `watch` + `interject`, just a single-screen front-end. Local only.
    - Open the generated URL and add the bot to your server. (Already invited?
      Re-open the URL with the new permission integer to update the bot's role,
      or toggle the permission on its role in Server Settings → Roles.)
+4. **Enable the Message Content Intent** (required). In the app → **Bot** →
+   **Privileged Gateway Intents**, turn on **MESSAGE CONTENT INTENT** and save.
+   Without it the bot can see *that* a message exists but reads back **empty
+   content and no attachments** for messages it didn't send itself — over REST
+   too, not just the gateway. (A bot always sees its own messages in full, so a
+   send→read test passes while a human-posted file silently reads as empty —
+   exactly the trap to avoid.) For a bot in under 100 servers the toggle is
+   instant; no verification needed, and no re-invite or restart required.
 
-That's it — no privileged intents are needed. Reading history over REST works
-with just the channel permissions above. Read-acks degrade gracefully: if the bot
-lacks Add Reactions, reads still work, they just skip the ✅. Deleting the bot's
-*own* messages (`purge`, the default) needs no extra permission; only `--all` does.
+Read-acks degrade gracefully: if the bot lacks Add Reactions, reads still work,
+they just skip the ✅. Deleting the bot's *own* messages (`purge`, the default)
+needs no extra permission; only `--all` does.
 
 ### Getting channel ids
 
