@@ -42,12 +42,15 @@ class ConfigError(Exception):
 
 DEFAULTS: dict[str, Any] = {
     "token": None,
-    "transport": "discord",  # "discord" (REST) or "local" (no-Discord, files)
-    # Optional per-mode overrides of `transport` (unset = use `transport`). Let
-    # one session mix backends, e.g. relay over Discord while chatting locally.
-    # Also settable via DISCORDINATOR_RELAY_TRANSPORT / DISCORDINATOR_CHAT_TRANSPORT.
-    "relay_transport": None,  # transport for relay tools (send/read/get_new_messages)
-    "chat_transport": None,   # transport for live chat_* tools
+    # Transport is set EXPLICITLY per mode — there is no shared base and no
+    # fallback. `relay_transport` backs the relay tools (send/read/get_new_messages);
+    # `chat_transport` backs the live chat_* tools. Each is "discord" (REST) or
+    # "local" (no-Discord, JSONL files), also settable via
+    # DISCORDINATOR_RELAY_TRANSPORT / DISCORDINATOR_CHAT_TRANSPORT. An unset mode
+    # is an error (fail fast), not a guess. They default to None so a fresh config
+    # must declare them before that mode is used.
+    "relay_transport": None,
+    "chat_transport": None,
     "default_channel": None,
     "chat_channel": None,   # default channel for CHAT tools (a shared room)
     "channels": {},         # friendly name -> channel id (string)
@@ -68,28 +71,38 @@ def _truthy(val: str) -> bool:
     return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
-def transport(cfg: dict[str, Any], mode: Optional[str] = None) -> str:
-    """Normalize the transport to ``"discord"`` or ``"local"`` for a given MODE.
+_TRANSPORT_KEYS = {"relay": "relay_transport", "chat": "chat_transport"}
 
-    ``mode="relay"`` uses ``relay_transport``; ``mode="chat"`` uses
-    ``chat_transport``; each falls back to the base ``transport`` when its
-    override is unset. ``mode=None`` returns the base ``transport``. This lets a
-    single process run, e.g., relay over Discord (to reach another machine)
-    while chatting locally with a sibling session on the same box.
+
+def transport(cfg: dict[str, Any], mode: str) -> str:
+    """Resolve the transport (``"discord"`` or ``"local"``) for ``mode``.
+
+    ``mode`` is ``"relay"`` or ``"chat"``. Each mode's transport is set
+    EXPLICITLY (``relay_transport`` / ``chat_transport``, or the matching
+    ``DISCORDINATOR_*_TRANSPORT`` env var) — there is no shared base and no
+    fallback, so a single process can run relay over Discord while chatting
+    locally. An unset mode raises :class:`ConfigError` (fail fast with a fix)
+    rather than guessing a default.
     """
-    base = cfg.get("transport")
-    if mode == "relay":
-        val = cfg.get("relay_transport") or base
-    elif mode == "chat":
-        val = cfg.get("chat_transport") or base
-    else:
-        val = base
-    val = str(val or "discord").strip().lower()
+    try:
+        key = _TRANSPORT_KEYS[mode]
+    except KeyError:
+        raise ValueError(f"transport mode must be 'relay' or 'chat', got {mode!r}")
+    val = cfg.get(key)
+    if not val:
+        env = "DISCORDINATOR_RELAY_TRANSPORT" if mode == "relay" else "DISCORDINATOR_CHAT_TRANSPORT"
+        raise ConfigError(
+            f"No {key} configured. Each transport is set explicitly — there is no "
+            f"default. Set it with:\n"
+            f"  discordinator config set-{mode}-transport <discord|local>\n"
+            f"or export {env}=<discord|local>."
+        )
+    val = str(val).strip().lower()
     return "local" if val in ("local", "file", "offline") else "discord"
 
 
-def is_local(cfg: dict[str, Any], mode: Optional[str] = None) -> bool:
-    """True when the given mode runs the no-Discord local filesystem transport."""
+def is_local(cfg: dict[str, Any], mode: str) -> bool:
+    """True when ``mode`` runs the no-Discord local filesystem transport."""
     return transport(cfg, mode) == "local"
 
 
@@ -152,9 +165,6 @@ def load() -> dict[str, Any]:
     env_token = os.environ.get("DISCORD_BOT_TOKEN")
     if env_token:
         data["token"] = env_token
-    env_transport = os.environ.get("DISCORDINATOR_TRANSPORT")
-    if env_transport:
-        data["transport"] = env_transport
     env_relay_transport = os.environ.get("DISCORDINATOR_RELAY_TRANSPORT")
     if env_relay_transport:
         data["relay_transport"] = env_relay_transport

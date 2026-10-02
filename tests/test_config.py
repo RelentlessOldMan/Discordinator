@@ -27,8 +27,9 @@ _passed = 0
 # Env vars config.load() consults — cleared before each load-based test so a
 # stray value in the real environment can't make a test pass or fail spuriously.
 _ENV_KEYS = (
-    "DISCORD_BOT_TOKEN", "DISCORDINATOR_TRANSPORT", "DISCORDINATOR_LABEL",
-    "DISCORDINATOR_RELAY_CHANNEL", "DISCORDINATOR_CHAT_CHANNEL", "DISCORDINATOR_ACK",
+    "DISCORD_BOT_TOKEN", "DISCORDINATOR_RELAY_TRANSPORT", "DISCORDINATOR_CHAT_TRANSPORT",
+    "DISCORDINATOR_LABEL", "DISCORDINATOR_RELAY_CHANNEL", "DISCORDINATOR_CHAT_CHANNEL",
+    "DISCORDINATOR_ACK",
 )
 
 
@@ -57,7 +58,7 @@ def _rm_config() -> None:
 
 def test_resolve_channel() -> None:
     print("resolve_channel (arg > default; name/id/room):")
-    cfg = {"transport": "discord", "channels": {"relay": "111", "proj": "222"},
+    cfg = {"relay_transport": "discord", "channels": {"relay": "111", "proj": "222"},
            "default_channel": "relay"}
     check(config.resolve_channel(cfg, "proj") == "222", "explicit name -> its id")
     check(config.resolve_channel(cfg, None) == "111", "no arg -> default_channel's id")
@@ -69,7 +70,7 @@ def test_resolve_channel() -> None:
     except ConfigError as e:
         check("Unknown channel" in str(e), "unknown name (discord) -> helpful ConfigError")
 
-    nodef = {"transport": "discord", "channels": {}}
+    nodef = {"relay_transport": "discord", "channels": {}}
     try:
         config.resolve_channel(nodef, None)
         raise AssertionError("expected ConfigError when no channel and no default")
@@ -79,29 +80,29 @@ def test_resolve_channel() -> None:
 
 def test_resolve_channel_local() -> None:
     print("resolve_channel (local: any string is a room):")
-    cfg = {"transport": "local", "channels": {}}
+    cfg = {"relay_transport": "local", "channels": {}}
     check(config.resolve_channel(cfg, "brainstorm") == "brainstorm",
           "arbitrary room name is accepted verbatim in local mode")
     check(config.resolve_channel(cfg, None) == "relay",
           "local default relay room is 'relay' (zero-config)")
-    named = {"transport": "local", "channels": {"a": "aaa"}}
+    named = {"relay_transport": "local", "channels": {"a": "aaa"}}
     check(config.resolve_channel(named, "a") == "aaa",
           "a configured name still resolves in local mode")
 
 
 def test_resolve_chat_channel() -> None:
     print("resolve_chat_channel (own default, separate from relay):")
-    cfg = {"transport": "discord", "channels": {"c": "333"}, "chat_channel": "c",
+    cfg = {"chat_transport": "discord", "channels": {"c": "333"}, "chat_channel": "c",
            "default_channel": "relay"}
     check(config.resolve_chat_channel(cfg, None) == "333",
           "chat uses chat_channel, not default_channel")
-    fallback = {"transport": "discord", "channels": {"d": "444"}, "default_channel": "d"}
+    fallback = {"chat_transport": "discord", "channels": {"d": "444"}, "default_channel": "d"}
     check(config.resolve_chat_channel(fallback, None) == "444",
           "chat falls back to default_channel when no chat_channel set")
-    check(config.resolve_chat_channel({"transport": "local"}, None) == "chat",
+    check(config.resolve_chat_channel({"chat_transport": "local"}, None) == "chat",
           "local chat default room is 'chat' (distinct from relay)")
     try:
-        config.resolve_chat_channel({"transport": "discord", "channels": {}}, None)
+        config.resolve_chat_channel({"chat_transport": "discord", "channels": {}}, None)
         raise AssertionError("expected ConfigError with no chat channel (discord)")
     except ConfigError:
         check(True, "no chat channel configured (discord) -> ConfigError")
@@ -110,15 +111,15 @@ def test_resolve_chat_channel() -> None:
 def test_load_env_precedence() -> None:
     print("load() env overrides win over the file:")
     _clear_env()
-    _write_config({"token": "file-token", "transport": "discord",
+    _write_config({"token": "file-token", "relay_transport": "discord",
                    "machine_label": "file-label", "ack_on_read": True})
     os.environ["DISCORD_BOT_TOKEN"] = "env-token"
-    os.environ["DISCORDINATOR_TRANSPORT"] = "local"
+    os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
     os.environ["DISCORDINATOR_LABEL"] = "env-label"
     os.environ["DISCORDINATOR_ACK"] = "false"
     cfg = config.load()
     check(cfg["token"] == "env-token", "DISCORD_BOT_TOKEN overrides file token")
-    check(config.is_local(cfg), "DISCORDINATOR_TRANSPORT overrides file transport")
+    check(config.is_local(cfg, "relay"), "DISCORDINATOR_RELAY_TRANSPORT overrides file relay transport")
     check(cfg["machine_label"] == "env-label", "DISCORDINATOR_LABEL overrides file label")
     check(cfg["ack_on_read"] is False, "DISCORDINATOR_ACK='false' parses to False")
     _clear_env()
@@ -147,8 +148,9 @@ def test_load_malformed() -> None:
     # A missing file is fine: pure defaults, no crash.
     _rm_config()
     cfg = config.load()
-    check(cfg["transport"] == "discord" and cfg["channels"] == {},
-          "missing config file -> safe defaults (discord, no channels)")
+    check(cfg.get("relay_transport") is None and cfg.get("chat_transport") is None
+          and cfg["channels"] == {},
+          "missing config file -> defaults have NO transport set (must be explicit) and no channels")
 
 
 def test_dotenv_parsing() -> None:
@@ -191,16 +193,21 @@ def test_client_factory() -> None:
     from discordinator.discord_client import DiscordClient
     from discordinator.local_client import LocalClient
     _clear_env()
-    lc = make_client({"transport": "local", "machine_label": "m"})
+    lc = make_client({"relay_transport": "local", "machine_label": "m"}, "relay")
     check(isinstance(lc, LocalClient), "local transport builds a LocalClient (no token needed)")
-    dcl = make_client({"transport": "discord", "token": "a-token"})
+    dcl = make_client({"relay_transport": "discord", "token": "a-token"}, "relay")
     check(isinstance(dcl, DiscordClient), "discord transport + token builds a DiscordClient")
     dcl.close()
     try:
-        make_client({"transport": "discord", "token": None})
+        make_client({"relay_transport": "discord", "token": None}, "relay")
         raise AssertionError("expected ConfigError building a Discord client with no token")
     except ConfigError:
         check(True, "discord transport without a token -> ConfigError (fails fast)")
+    try:
+        make_client({"chat_transport": "local"}, "relay")
+        raise AssertionError("expected ConfigError when the requested mode is unset")
+    except ConfigError:
+        check(True, "requesting a mode whose transport is unset -> ConfigError")
 
 
 def main() -> int:

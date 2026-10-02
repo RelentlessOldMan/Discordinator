@@ -16,7 +16,8 @@ from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-mcp-att-"))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
-os.environ["DISCORDINATOR_TRANSPORT"] = "local"
+os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
+os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
 for _k in ("DISCORDINATOR_ALLOW_SEND", "DISCORDINATOR_ALLOW_RECEIVE"):
     os.environ.pop(_k, None)
 

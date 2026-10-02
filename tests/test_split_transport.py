@@ -1,11 +1,12 @@
-"""Tests for per-mode transport: relay and chat can use DIFFERENT backends.
+"""Tests for per-mode transport: relay and chat are configured independently.
 
-The motivating case: a work session does RELAY over Discord (to reach another
-machine) while CHATTING locally with a sibling session on the same box. Before
-this, transport was a single global switch for the whole process. These tests
-pin the mode-aware resolution (relay_transport / chat_transport overriding the
-base transport), the env overrides, the client factory's per-mode + by-url
-selection, and that channel resolution respects the per-mode transport.
+Each mode's transport (relay_transport / chat_transport) is set EXPLICITLY —
+there is no shared base transport and no fallback, so an unset mode fails fast
+with a clear message instead of guessing. The motivating case: a work session
+relays over Discord (to reach another machine) while chatting locally with a
+sibling session on the same box. These tests pin the explicit resolution, the
+unset-is-an-error contract, the env overrides, the client factory's per-mode +
+by-url selection, and mode-aware channel resolution.
 
 Run:  python tests/test_split_transport.py
 """
@@ -53,59 +54,72 @@ def _close(c) -> None:
         pass
 
 
-def test_mode_falls_back_to_base() -> None:
-    print("with no per-mode override, both modes follow the base transport:")
-    cfg = {"transport": "discord"}
-    check(config.transport(cfg) == "discord", "base transport is discord")
-    check(config.transport(cfg, "relay") == "discord", "relay falls back to base (discord)")
-    check(config.transport(cfg, "chat") == "discord", "chat falls back to base (discord)")
-    local = {"transport": "local"}
-    check(config.transport(local, "relay") == "local", "relay follows base local")
-    check(config.transport(local, "chat") == "local", "chat follows base local")
+def test_unset_mode_is_an_error() -> None:
+    print("an unset mode raises a clear ConfigError — no default, no fallback:")
+    for mode in ("relay", "chat"):
+        try:
+            config.transport({}, mode)
+            raise AssertionError(f"{mode} with nothing configured should raise")
+        except config.ConfigError as exc:
+            check(f"set-{mode}-transport" in str(exc), f"{mode} unset -> ConfigError naming the exact fix")
+    # Setting ONE mode does not satisfy the other (no cross-fallback).
+    half = {"relay_transport": "discord"}
+    check(config.transport(half, "relay") == "discord", "the set mode resolves")
+    try:
+        config.transport(half, "chat")
+        raise AssertionError("chat should still raise with only relay set")
+    except config.ConfigError:
+        check(True, "the other mode still errors (relay does NOT fall through to chat)")
+    # A bogus mode is a programming error, not a config error.
+    try:
+        config.transport({"relay_transport": "discord"}, "nope")
+        raise AssertionError("bogus mode should ValueError")
+    except ValueError:
+        check(True, "an invalid mode -> ValueError")
 
 
-def test_per_mode_override() -> None:
-    print("relay_transport / chat_transport override the base per mode:")
-    cfg = {"transport": "discord", "chat_transport": "local"}
-    check(config.transport(cfg, "relay") == "discord", "relay stays discord")
-    check(config.transport(cfg, "chat") == "local", "chat overridden to local")
+def test_explicit_per_mode() -> None:
+    print("each mode takes its own explicit transport (any crossed combo works):")
+    cfg = {"relay_transport": "discord", "chat_transport": "local"}
+    check(config.transport(cfg, "relay") == "discord", "relay explicitly discord")
+    check(config.transport(cfg, "chat") == "local", "chat explicitly local")
     check(config.is_local(cfg, "chat") is True, "is_local(chat) True")
     check(config.is_local(cfg, "relay") is False, "is_local(relay) False")
-    # reverse: base local, relay overridden to discord
-    rev = {"transport": "local", "relay_transport": "discord"}
-    check(config.transport(rev, "relay") == "discord", "relay overridden to discord")
-    check(config.transport(rev, "chat") == "local", "chat follows base local")
-    # synonyms still normalize through the override
-    syn = {"transport": "discord", "chat_transport": "offline"}
-    check(config.transport(syn, "chat") == "local", "chat_transport synonym 'offline' -> local")
+    rev = {"relay_transport": "local", "chat_transport": "discord"}
+    check(config.transport(rev, "relay") == "local", "relay explicitly local")
+    check(config.transport(rev, "chat") == "discord", "chat explicitly discord")
+    syn = {"relay_transport": "offline", "chat_transport": "file"}
+    check(config.transport(syn, "relay") == "local" and config.transport(syn, "chat") == "local",
+          "synonyms (offline/file) normalize to local")
 
 
 def test_make_client_per_mode() -> None:
     print("make_client builds the right backend for each mode, from ONE config:")
-    cfg = {"transport": "discord", "chat_transport": "local", "token": "tok", "machine_label": "work"}
+    cfg = {"relay_transport": "discord", "chat_transport": "local", "token": "tok", "machine_label": "work"}
     relay = make_client(cfg, "relay")
-    chat = make_client(cfg, "chat")
+    chat_c = make_client(cfg, "chat")
     check(isinstance(relay, DiscordClient), "relay mode -> DiscordClient")
-    check(isinstance(chat, LocalClient), "chat mode -> LocalClient (needs no token)")
+    check(isinstance(chat_c, LocalClient), "chat mode -> LocalClient (needs no token)")
     _close(relay)
-    _close(chat)
-    # reverse combo
-    rev = {"transport": "local", "relay_transport": "discord", "token": "tok", "machine_label": "w"}
+    _close(chat_c)
+    rev = {"relay_transport": "local", "chat_transport": "discord", "token": "tok", "machine_label": "w"}
     r2 = make_client(rev, "relay")
     c2 = make_client(rev, "chat")
-    check(isinstance(r2, DiscordClient), "relay override -> DiscordClient")
-    check(isinstance(c2, LocalClient), "chat follows base local -> LocalClient")
+    check(isinstance(r2, LocalClient), "relay explicitly local -> LocalClient")
+    check(isinstance(c2, DiscordClient), "chat explicitly discord -> DiscordClient")
     _close(r2)
     _close(c2)
-    # no mode -> base transport (backward compatible)
-    base = make_client({"transport": "local", "machine_label": "m"})
-    check(isinstance(base, LocalClient), "no mode -> base transport (local)")
-    _close(base)
+    # No mode (or an unset one) refuses to guess.
+    try:
+        make_client({"relay_transport": "local"})  # mode omitted
+        raise AssertionError("make_client without a mode should refuse")
+    except (ValueError, config.ConfigError):
+        check(True, "make_client without a mode refuses (no base transport to guess)")
 
 
 def test_make_client_for_url() -> None:
     print("download picks the backend by url shape (http -> Discord, path -> local):")
-    cfg = {"transport": "discord", "token": "tok", "machine_label": "m"}
+    cfg = {"token": "tok", "machine_label": "m"}
     c1 = make_client_for_url("https://cdn.discordapp.com/a/b.png?ex=1", cfg)
     check(isinstance(c1, DiscordClient), "https url -> DiscordClient")
     _close(c1)
@@ -119,7 +133,7 @@ def test_make_client_for_url() -> None:
 
 def test_resolve_channel_respects_mode() -> None:
     print("channel resolution uses the per-mode transport (local allows free room names):")
-    cfg = {"transport": "discord", "chat_transport": "local",
+    cfg = {"relay_transport": "discord", "chat_transport": "local",
            "channels": {"relaych": "111"}, "default_channel": "relaych"}
     check(config.resolve_channel(cfg, None) == "111", "relay default -> its channel id")
     check(config.resolve_chat_channel(cfg, "brainstorm") == "brainstorm",
@@ -129,11 +143,9 @@ def test_resolve_channel_respects_mode() -> None:
         raise AssertionError("relay should reject an unknown channel name")
     except config.ConfigError:
         check(True, "relay (discord) still rejects an unknown channel name")
-    # With NO default/chat channel, chat (local) uses the built-in 'chat' room,
-    # while relay (discord) still errors for lack of a configured default.
-    bare = {"transport": "discord", "chat_transport": "local"}
+    bare = {"relay_transport": "discord", "chat_transport": "local"}
     check(config.resolve_chat_channel(bare, None) == "chat",
-          "chat (local) default room is the built-in 'chat' with zero config")
+          "chat (local) default room is the built-in 'chat' with zero channel config")
     try:
         config.resolve_channel(bare, None)
         raise AssertionError("relay should require a default channel in discord mode")
@@ -142,16 +154,28 @@ def test_resolve_channel_respects_mode() -> None:
 
 
 def test_env_overrides() -> None:
-    print("DISCORDINATOR_RELAY_TRANSPORT / CHAT_TRANSPORT override the file per mode:")
-    (_TMP / "config.json").write_text('{"transport": "discord", "token": "t"}', encoding="utf-8")
+    print("per-mode env vars set each transport; the removed base env is ignored:")
+    (_TMP / "config.json").write_text('{"relay_transport": "discord", "token": "t"}', encoding="utf-8")
     os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
     try:
         cfg = config.load()
-        check(config.transport(cfg, "chat") == "local", "chat env override wins")
-        check(config.transport(cfg, "relay") == "discord", "relay untouched by chat env")
-        check(config.transport(cfg) == "discord", "base transport unchanged")
+        check(config.transport(cfg, "chat") == "local", "DISCORDINATOR_CHAT_TRANSPORT sets chat")
+        check(config.transport(cfg, "relay") == "discord", "relay still from the file")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_TRANSPORT", None)
+    # The old base env no longer does anything: with only relay in the file and a
+    # base env set, chat remains unset (an error), not silently 'local'.
+    os.environ["DISCORDINATOR_TRANSPORT"] = "local"
+    try:
+        cfg2 = config.load()
+        check(config.transport(cfg2, "relay") == "discord", "relay unaffected by removed base env")
+        try:
+            config.transport(cfg2, "chat")
+            raise AssertionError("chat should still be unset (base env is ignored)")
+        except config.ConfigError:
+            check(True, "DISCORDINATOR_TRANSPORT is ignored — no base transport anymore")
+    finally:
+        os.environ.pop("DISCORDINATOR_TRANSPORT", None)
 
 
 def _write_config(d: dict) -> None:
@@ -162,10 +186,8 @@ def _write_config(d: dict) -> None:
 
 
 def test_mcp_chat_uses_chat_transport() -> None:
-    print("MCP chat tools run on chat_transport even when relay/base is Discord:")
-    # Base + relay = discord (a bogus token, never used); chat = local. If chat_say
-    # touched the relay/base transport it would need the network — it must not.
-    _write_config({"transport": "discord", "token": "bogus", "chat_transport": "local",
+    print("MCP chat tools run on chat_transport even when relay is Discord:")
+    _write_config({"relay_transport": "discord", "token": "bogus", "chat_transport": "local",
                    "machine_label": "work"})
     res = mcp.chat_say(text="hello over local", chatter="A", status="over", channel="wirechat")
     check(res["sent_messages"] >= 1, "chat_say succeeded with no Discord network (local chat)")
@@ -175,9 +197,8 @@ def test_mcp_chat_uses_chat_transport() -> None:
 
 
 def test_mcp_relay_uses_relay_transport() -> None:
-    print("MCP relay tools run on relay_transport even when chat/base is Discord:")
-    # Base + chat = discord (bogus token); relay = local. send_message must go local.
-    _write_config({"transport": "discord", "token": "bogus", "relay_transport": "local",
+    print("MCP relay tools run on relay_transport even when chat is Discord:")
+    _write_config({"relay_transport": "local", "token": "bogus", "chat_transport": "discord",
                    "machine_label": "work"})
     out = mcp.send_message(text="relayed locally", channel="wirerelay")
     check("channel wirerelay" in out, "send_message reported the local room")
@@ -187,8 +208,8 @@ def test_mcp_relay_uses_relay_transport() -> None:
 
 
 def main() -> int:
-    test_mode_falls_back_to_base()
-    test_per_mode_override()
+    test_unset_mode_is_an_error()
+    test_explicit_per_mode()
     test_make_client_per_mode()
     test_make_client_for_url()
     test_resolve_channel_respects_mode()

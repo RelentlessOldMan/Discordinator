@@ -8,6 +8,14 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.21] - 2026-10-02
+Transport is now explicit per mode — no base, no fallback (BREAKING)
+- removed the single `transport` config key, the `DISCORDINATOR_TRANSPORT` env var, and the `config set-transport` command: there is no longer a shared base that silently sets both modes
+- `relay_transport` and `chat_transport` must each be set explicitly (config or DISCORDINATOR_RELAY_TRANSPORT / DISCORDINATOR_CHAT_TRANSPORT); an unset mode raises a ConfigError naming the exact `config set-<mode>-transport` fix instead of defaulting
+- MIGRATION: a config that only had `transport: X` must now set `relay_transport: X` and `chat_transport: X`. `version` prints each mode's transport (or "(unset)")
+- rationale: three transport keys with a hidden fallback was muddy, and a key that sets both modes at once was surprising; now each mode is exactly what the config says
+- tests updated across the suite (local-mode tests set both per-mode env vars); test_split_transport (unset=error, explicit combos) + test_cli_split_transport (set-transport gone, unset errors) rewritten; all 14 suites pass; client_factory 100%, config 91% branch
+
 ## [1.0.20] - 2026-10-02
 Per-mode transport: relay and chat can use different backends
 - one session can now relay over Discord (to reach another machine) while chatting LOCALLY with a sibling session on the same box — previously transport was a single global switch for the whole process

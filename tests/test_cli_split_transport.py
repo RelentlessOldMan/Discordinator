@@ -1,10 +1,11 @@
-"""CLI glue for per-mode transport: relay and chat can use different backends.
+"""CLI glue for per-mode transport (explicit, no base, no fallback).
 
-Drives `cli.main([...])` to cover the new wiring the unit tests skip: the
-`config set-relay-transport` / `set-chat-transport` persistence, the per-mode
-`version` display, and that a relay CLI command runs on the relay transport
-while a chat CLI command runs on the chat transport (both exercised over local,
-so no network/token is needed even with a Discord base). Isolated temp config.
+Drives `cli.main([...])` to cover the wiring unit tests skip: that each mode's
+transport must be set explicitly (an unset mode errors), that
+`config set-relay-transport` / `set-chat-transport` persist independently, that
+the old `set-transport` command is gone, the per-mode `version` output, and that
+a relay CLI command runs on the relay transport while a chat CLI command runs on
+the chat transport (both over local, so no network/token). Isolated temp config.
 
 Run:  python tests/test_cli_split_transport.py
 """
@@ -38,26 +39,42 @@ def check(cond: bool, msg: str) -> None:
     print(f"  ok: {msg}")
 
 
-def test_set_transport_subcommands_persist() -> None:
-    print("config set-relay-transport / set-chat-transport persist independently:")
-    check(cli.main(["config", "set-token", "bogus"]) == 0, "set-token ok (base stays discord)")
+def test_unset_mode_errors() -> None:
+    print("a relay command refuses until relay_transport is set (no default):")
+    check(cli.main(["config", "set-token", "bogus"]) == 0, "set-token ok")
+    rc = cli.main(["send", "hi", "--channel", "x"])  # relay_transport still unset
+    check(rc == 1, "send exits 1 when relay_transport is unset (fails fast, no guess)")
+
+
+def test_set_subcommands_persist_independently() -> None:
+    print("set-relay-transport / set-chat-transport persist independently:")
     check(cli.main(["config", "set-relay-transport", "local"]) == 0, "set-relay-transport local ok")
+    check(cli.main(["config", "set-chat-transport", "discord"]) == 0, "set-chat-transport discord ok")
     cfg = config.load()
-    check(config.transport(cfg, "relay") == "local", "relay transport persisted as local")
-    check(config.transport(cfg, "chat") == "discord", "chat still falls back to base discord")
-    check(config.transport(cfg) == "discord", "base transport untouched")
+    check(config.transport(cfg, "relay") == "local", "relay persisted as local")
+    check(config.transport(cfg, "chat") == "discord", "chat persisted as discord (independent)")
+    check("transport" not in cfg or cfg.get("transport") is None,
+          "no base 'transport' key is written")
 
 
-def test_version_shows_per_mode() -> None:
-    print("version runs and shows the split when relay/chat transports differ:")
-    # relay=local (from the previous test), chat=discord -> they differ.
+def test_set_transport_is_gone() -> None:
+    print("the old sets-both 'set-transport' command no longer exists:")
+    try:
+        cli.main(["config", "set-transport", "local"])
+        raise AssertionError("set-transport should no longer be a valid subcommand")
+    except SystemExit as exc:
+        check(exc.code == 2, "config set-transport -> argparse error (removed)")
+
+
+def test_version_shows_each_mode() -> None:
+    print("version runs and reports each mode's transport (relay=local, chat=discord):")
     check(cli.main(["version"]) == 0, "version exits 0 with a mixed transport config")
 
 
 def test_relay_cli_uses_relay_transport() -> None:
     print("a relay CLI command runs on the relay transport (local), no network:")
     rc = cli.main(["send", "yo relay", "--channel", "rlyroom", "--label", "T"])
-    check(rc == 0, "send succeeded over the local relay transport (base is discord)")
+    check(rc == 0, "send succeeded over the local relay transport")
     msgs = LocalClient("probe").read_messages("rlyroom", limit=5)
     check(any("yo relay" in (m.get("content") or "") for m in msgs),
           "the relay message landed in the LOCAL room")
@@ -71,14 +88,13 @@ def test_chat_cli_uses_chat_transport() -> None:
     msgs = LocalClient("probe").read_messages("chatroom", limit=5)
     check(any("hiya chat" in (m.get("content") or "") for m in msgs),
           "the human interjection landed in the LOCAL chat room")
-    cfg = config.load()
-    check(config.transport(cfg, "chat") == "local" and config.transport(cfg, "relay") == "local",
-          "both per-mode transports now persisted as local")
 
 
 def main() -> int:
-    test_set_transport_subcommands_persist()
-    test_version_shows_per_mode()
+    test_unset_mode_errors()
+    test_set_subcommands_persist_independently()
+    test_set_transport_is_gone()
+    test_version_shows_each_mode()
     test_relay_cli_uses_relay_transport()
     test_chat_cli_uses_chat_transport()
     print(f"\nALL {_passed} CLI-SPLIT-TRANSPORT CHECKS PASSED")

@@ -323,7 +323,7 @@ def list_channels() -> dict[str, Any]:
 @mcp.tool()
 def whoami() -> dict[str, Any]:
     """Return the bot's own identity (verifies the token is valid)."""
-    with _client() as client:
+    with _client("relay") as client:
         me = client.whoami()
     return {
         "id": me.get("id"),

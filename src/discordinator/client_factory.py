@@ -26,9 +26,11 @@ Client = Union[DiscordClient, LocalClient]
 def make_client(cfg: Optional[dict[str, Any]] = None, mode: Optional[str] = None) -> Client:
     """Build the client for ``mode``'s transport. Loads config if not given.
 
-    ``mode`` is ``"relay"``, ``"chat"``, or ``None`` (the base transport, used by
-    transport-agnostic commands like ``whoami``). A Discord token is required
-    only when the resolved transport is Discord.
+    ``mode`` must be ``"relay"`` or ``"chat"`` — each is configured explicitly
+    and independently (there is no base transport). Passing no mode, or a mode
+    whose transport is unset, raises (``ValueError`` / ``ConfigError``) rather
+    than guessing. A Discord token is required only when ``mode``'s transport is
+    Discord.
     """
     cfg = cfg if cfg is not None else config.load()
     if config.is_local(cfg, mode):
