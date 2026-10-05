@@ -8,6 +8,13 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.23] - 2026-10-05
+Local retention: local rooms keep 7 days by default
+- local-room messages older than local_retention_days (default 7) are dropped, with their stored attachments, the next time the room is written to — sessions never need to clean up; 0 = keep forever
+- set with config set-local-retention <days> or DISCORDINATOR_LOCAL_RETENTION_DAYS; invalid values raise a ConfigError naming the fix; version shows it when a mode is local
+- pruning reads only the first line in the common case and rewrites only once the oldest record is 10% past the window, so a busy room rewrites ~once per tenth of the window, not per message; best-effort on I/O errors
+- new test_local_retention.py (25 checks); all 15 suites pass
+
 ## [1.0.22] - 2026-10-05
 Local viewers: blank line between messages
 - watch (single room, --all, --follow) and the TUI now put a blank line before each timestamped message for readability; multi-line messages stay grouped
