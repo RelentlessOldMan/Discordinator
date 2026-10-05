@@ -8,6 +8,10 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.22] - 2026-10-05
+Local viewers: blank line between messages
+- watch (single room, --all, --follow) and the TUI now put a blank line before each timestamped message for readability; multi-line messages stay grouped
+
 ## [1.0.21] - 2026-10-02
 Transport is now explicit per mode — no base, no fallback (BREAKING)
 - removed the single `transport` config key, the `DISCORDINATOR_TRANSPORT` env var, and the `config set-transport` command: there is no longer a shared base that silently sets both modes
