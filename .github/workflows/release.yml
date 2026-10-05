@@ -1,0 +1,47 @@
+# Publish a GitHub Release whenever a version tag is pushed.
+# release.py bumps __version__, prepends the CHANGELOG entry, tags vX.Y.Z and
+# pushes — that tag push triggers this, using the CHANGELOG section as notes.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches __version__
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver=$(tr -d '\r' < src/discordinator/__init__.py | sed -n 's/^__version__ = "\(.*\)"/\1/p')
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag v$tag does not match __version__ $ver"
+            exit 1
+          fi
+
+      - name: Extract CHANGELOG notes
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v h="## [$ver]" '
+            { sub(/\r$/, "") }
+            index($0, h) == 1 { on = 1; next }
+            on && index($0, "## [") == 1 { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "No CHANGELOG entry for $ver." > notes.md
+          fi
+          cat notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="$GITHUB_REF_NAME: $(head -n1 notes.md)"
+          gh release create "$GITHUB_REF_NAME" --title "$title" --notes-file notes.md --verify-tag
