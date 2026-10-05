@@ -8,6 +8,7 @@ via the ``DISCORD_BOT_TOKEN`` env var, which takes precedence over the file.
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -63,6 +64,10 @@ DEFAULTS: dict[str, Any] = {
     # being allowed to send.
     "allow_send_attachments": False,
     "allow_receive_attachments": False,
+    # Local transport only: messages older than this many days are dropped from
+    # a room when it is next written to (with their stored attachments). Local
+    # rooms exist for sessions chatting now, not as an archive. 0 = keep forever.
+    "local_retention_days": 7,
 }
 
 
@@ -189,8 +194,29 @@ def load() -> dict[str, Any]:
     env_receive = os.environ.get("DISCORDINATOR_ALLOW_RECEIVE")
     if env_receive is not None:
         data["allow_receive_attachments"] = _truthy(env_receive)
+    env_retention = os.environ.get("DISCORDINATOR_LOCAL_RETENTION_DAYS")
+    if env_retention:
+        data["local_retention_days"] = env_retention
 
     return data
+
+
+def local_retention_days(cfg: dict[str, Any]) -> float:
+    """Validated local-room retention window in days (0 = keep forever)."""
+    raw = cfg.get("local_retention_days", DEFAULTS["local_retention_days"])
+    try:
+        days = float(raw if raw is not None else 0)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"local_retention_days must be a number of days (0 = keep forever), got {raw!r}. "
+            "Fix with: discordinator config set-local-retention <days>"
+        ) from None
+    if days < 0 or not math.isfinite(days):
+        raise ConfigError(
+            f"local_retention_days must be >= 0 (0 = keep forever), got {raw!r}. "
+            "Fix with: discordinator config set-local-retention <days>"
+        )
+    return days
 
 
 def save(data: dict[str, Any]) -> Path:

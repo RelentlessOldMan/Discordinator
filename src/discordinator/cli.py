@@ -430,7 +430,8 @@ def cmd_tui(args: argparse.Namespace) -> int:
             "the TUI needs the optional 'textual' dependency. Install it with:\n"
             "  pip install -e .[tui]   (or: pip install textual)"
         )
-    run_tui(room=room, poll=args.interval, limit=args.limit, label=cfg.get("machine_label"))
+    run_tui(room=room, poll=args.interval, limit=args.limit, label=cfg.get("machine_label"),
+            retention_days=config.local_retention_days(cfg))
     return 0
 
 
@@ -587,6 +588,12 @@ def cmd_whoami(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fmt_days(days: float) -> str:
+    if days <= 0:
+        return "forever (retention off)"
+    return f"{days:g} day{'' if days == 1 else 's'}"
+
+
 def cmd_version(args: argparse.Namespace) -> int:
     print(f"discordinator {__version__}")
     try:
@@ -601,6 +608,8 @@ def cmd_version(args: argparse.Namespace) -> int:
             print(f"{m} transport: {t}")
         if any_local:
             print(f"local dir:   {local_dir()}")
+            days = config.local_retention_days(cfg)
+            print(f"local keep:  {_fmt_days(days)}")
     except config.ConfigError:
         pass
     print(f"config file: {config.config_path()}")
@@ -691,6 +700,12 @@ def cmd_config(args: argparse.Namespace) -> int:
         config.save(cfg)
         verb = "upload files out" if args.direction == "send" else "download attachments in"
         print(f"{key} set to {on} (this machine {'may now' if on else 'will NOT'} {verb})")
+    elif action == "set-local-retention":
+        days = config.local_retention_days({"local_retention_days": args.days})  # validates
+        cfg["local_retention_days"] = int(days) if days.is_integer() else days
+        config.save(cfg)
+        print(f"local_retention_days set to {cfg['local_retention_days']} "
+              f"(local rooms keep {_fmt_days(days)}; older messages are dropped on the next write)")
     elif action == "path":
         print(config.config_path())
     elif action == "show":
@@ -822,6 +837,8 @@ def build_parser() -> argparse.ArgumentParser:
     x = csub.add_parser("set-attachments", help="opt in to sending/receiving files (off by default, per machine)")
     x.add_argument("direction", choices=["send", "receive"], help="send = upload local files out; receive = download attachments in")
     x.add_argument("state", choices=["on", "off"])
+    x = csub.add_parser("set-local-retention", help="local transport: days to keep messages in a room (default 7; 0 = forever)")
+    x.add_argument("days")
     csub.add_parser("show", help="print config (token redacted)")
     csub.add_parser("path", help="print the config file path")
     cfgp.set_defaults(func=cmd_config)

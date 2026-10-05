@@ -24,7 +24,7 @@ import json
 import os
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -41,6 +41,15 @@ from .discord_client import (
 def local_dir() -> Path:
     """Directory holding the per-room JSONL files (beside the config file)."""
     return config.config_path().parent / "local"
+
+
+def _record_time(rec: Any) -> Optional[datetime]:
+    """A record's UTC timestamp, or None if missing/unparseable (never pruned)."""
+    try:
+        ts = datetime.fromisoformat(str(rec["timestamp"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
 def _image_dimensions(path: Path) -> Optional[tuple[int, int]]:
@@ -113,9 +122,13 @@ class _AppendLock:
 class LocalClient:
     """Filesystem-backed transport with the DiscordClient method surface."""
 
-    def __init__(self, label: Optional[str] = None):
+    def __init__(self, label: Optional[str] = None, retention_days: Optional[float] = None):
         self._label = label or "local"
         self._dir = local_dir()
+        # Messages older than this are pruned on write; 0 = keep forever.
+        self._retention_days = float(
+            config.DEFAULTS["local_retention_days"] if retention_days is None else retention_days
+        )
 
     # -- context-manager parity with DiscordClient -------------------------
     def close(self) -> None:  # nothing to close
@@ -210,6 +223,54 @@ class LocalClient:
             attachments.append(info)
         return attachments
 
+    def _prune_locked(self, channel_id: str) -> int:
+        """Drop records older than the retention window (caller holds the room
+        lock). Returns how many were removed.
+
+        Cheap in the common case: only the FIRST line is read, and the room is
+        rewritten only once its oldest record is past the window plus 10% slack —
+        so a steady stream rewrites the file roughly once per tenth of the
+        window, not on every append. Best-effort: any I/O hiccup (e.g. a reader
+        holding the file open on Windows) just leaves pruning for the next write.
+        """
+        if self._retention_days <= 0:
+            return 0
+        path = self._room_path(channel_id)
+        now = datetime.now(timezone.utc)
+        window = timedelta(days=self._retention_days)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                first = fh.readline()
+            oldest = _record_time(json.loads(first))
+        except (OSError, ValueError, TypeError, AttributeError):
+            return 0
+        if oldest is None or oldest > now - window * 1.1:
+            return 0
+        cutoff = now - window
+        kept: list[dict[str, Any]] = []
+        dropped: list[dict[str, Any]] = []
+        for r in self._read_all(channel_id):
+            ts = _record_time(r)
+            (dropped if ts is not None and ts < cutoff else kept).append(r)
+        if not dropped:
+            return 0
+        tmp = str(path) + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                for r in kept:
+                    fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return 0
+        for r in dropped:  # their stored attachment copies go too
+            if r.get("attachments"):
+                shutil.rmtree(self._files_dir(str(r["id"])), ignore_errors=True)
+        return len(dropped)
+
     def _append(
         self,
         channel_id: str,
@@ -223,6 +284,7 @@ class LocalClient:
         path = self._room_path(channel_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         with _AppendLock(path):
+            self._prune_locked(channel_id)
             new_id = max(self._max_id(channel_id) + 1, time.time_ns())  # monotonic
             attachments = self._store_files(str(new_id), source_files) if source_files else []
             rec = {

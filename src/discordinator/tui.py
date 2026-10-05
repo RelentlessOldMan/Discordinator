@@ -41,12 +41,13 @@ class ChatTUI(App):
 
     BINDINGS = [("ctrl+c", "quit", "Quit")]
 
-    def __init__(self, room: str, poll: float, limit: int, label: Optional[str]):
+    def __init__(self, room: str, poll: float, limit: int, label: Optional[str],
+                 retention_days: Optional[float] = None):
         super().__init__()
         self.room = room
         self._poll = poll
         self._limit = limit
-        self._client = LocalClient(label=label)
+        self._client = LocalClient(label=label, retention_days=retention_days)
         self._cursor: str = "0"
         self._colors: dict[str, str] = {}
 
@@ -175,5 +176,6 @@ class ChatTUI(App):
         self._tick()
 
 
-def run_tui(room: str, poll: float, limit: int, label: Optional[str]) -> None:
-    ChatTUI(room=room, poll=poll, limit=limit, label=label).run()
+def run_tui(room: str, poll: float, limit: int, label: Optional[str],
+            retention_days: Optional[float] = None) -> None:
+    ChatTUI(room=room, poll=poll, limit=limit, label=label, retention_days=retention_days).run()

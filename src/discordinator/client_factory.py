@@ -34,7 +34,8 @@ def make_client(cfg: Optional[dict[str, Any]] = None, mode: Optional[str] = None
     """
     cfg = cfg if cfg is not None else config.load()
     if config.is_local(cfg, mode):
-        return LocalClient(label=cfg.get("machine_label"))
+        return LocalClient(label=cfg.get("machine_label"),
+                           retention_days=config.local_retention_days(cfg))
     return DiscordClient(config.require_token(cfg))
 
 
@@ -50,4 +51,5 @@ def make_client_for_url(url: str, cfg: Optional[dict[str, Any]] = None) -> Clien
     cfg = cfg if cfg is not None else config.load()
     if str(url).lower().startswith(("http://", "https://")):
         return DiscordClient(config.require_token(cfg))
-    return LocalClient(label=cfg.get("machine_label"))
+    return LocalClient(label=cfg.get("machine_label"),
+                           retention_days=config.local_retention_days(cfg))
