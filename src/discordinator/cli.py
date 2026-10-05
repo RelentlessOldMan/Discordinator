@@ -267,7 +267,7 @@ def _fmt_watch(m: dict[str, Any], color: bool, room: Optional[str] = None) -> st
         content = m["content"]
         if content.lstrip().startswith("⏳"):  # system waiting-nudge line
             base = f"{tag}{ts}  {content}"
-            return f"\033[2m{base}\033[0m" if color else base
+            return "\n" + (f"\033[2m{base}\033[0m" if color else base)
         label = "human" if not m.get("bot") else (m.get("author") or "?")
         c, r = _color_for(label, color)
         head = f"{tag}{ts}  {c}{label:<16}{r} {'':<7}"
@@ -277,7 +277,7 @@ def _fmt_watch(m: dict[str, Any], color: bool, room: Optional[str] = None) -> st
     out = f"{head} {lines[0]}"
     for extra in lines[1:]:
         out += f"\n{indent}{extra}"
-    return out
+    return "\n" + out  # blank line before each timestamped message
 
 
 def _state_footer(client: Any, room: str) -> Optional[str]:

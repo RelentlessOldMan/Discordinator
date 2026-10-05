@@ -92,7 +92,7 @@ class ChatTUI(App):
     # -- rendering ----------------------------------------------------------
     def _line(self, m: dict) -> Text:
         ts = (m.get("timestamp") or "")[11:19]
-        t = Text()
+        t = Text("\n")  # blank line before each timestamped message
         t.append(f"{ts} ", style="dim")
         parsed = chat.parse(m["content"])
         if parsed:  # a chat turn
