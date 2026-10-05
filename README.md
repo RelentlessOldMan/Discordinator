@@ -54,7 +54,15 @@ discordinator config set-chat-transport  local     # live chat_* tools
 ```
 
 Precedence is the usual **env var → config file** (no default beneath — unset is
-an error). `relay` and `chat` otherwise behave identically on either transport —
+an error).
+
+**Local retention.** Local rooms are a live channel, not an archive: messages
+older than **7 days** are dropped (along with their stored attachments) the next
+time the room is written to, so sessions never need to clean up after
+themselves. Change it per machine with `discordinator config set-local-retention
+<days>` (`0` = keep forever) or `DISCORDINATOR_LOCAL_RETENTION_DAYS`. To wipe a
+room immediately, delete its `.jsonl` file while no session is mid-chat there.
+(Discord history is unaffected — use `purge` there.) `relay` and `chat` otherwise behave identically on either transport —
 same tools, same protocol (turn-taking, floor token, addressing, anti-starvation).
 
 #### Mixing transports: relay and chat can differ

@@ -45,7 +45,13 @@ errors (with the exact fix) rather than guessing:
 - **`local`** — **no Discord at all.** Messages live in JSONL files under
   `~/.discordinator/local/`. Two sessions on the **same machine** relay/chat with
   **no token, no network, no channel setup**. Great for a locked-down work laptop
-  or offline dev; it cannot reach another machine.
+  or offline dev; it cannot reach another machine. Local rooms are for sessions
+  chatting *now*, not an archive: messages older than **7 days** are dropped
+  (with their stored attachments) the next time the room is written to —
+  sessions never need to clean up. Change it with
+  `discordinator config set-local-retention <days>` (`0` = keep forever; env
+  `DISCORDINATOR_LOCAL_RETENTION_DAYS`). To wipe a room immediately, delete its
+  `.jsonl` file while no session is mid-chat there.
 
 Set each mode (env: `DISCORDINATOR_RELAY_TRANSPORT` / `DISCORDINATOR_CHAT_TRANSPORT`):
 ```powershell
