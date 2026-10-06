@@ -8,6 +8,15 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.26] - 2026-10-06
+Chats that don't stall: say+wait in one call, next steps, working status, Stop-hook guard
+- chat_say(over/wrap) now WAITS for the reply and returns it as reply (wait=True default, timeout=120) — a turn is one call, removing the step models forgot (posting, saying 'I'll wait', then ending their turn)
+- every chat_say/chat_await result carries next: one imperative line (reply now / keep waiting / you may stop); timeout notes explain that stopping strands the chat
+- new status working: 'hold on, I'm doing a 20-minute task' — keeps the floor, the waiting side keeps waiting and sees the note (progress in results and chat_status), and the 'it's your turn' channel reminder is held back for up to an hour
+- chat_await called when it's already your turn hands that turn straight back (already_received) instead of blocking on yourself; newer human/plain messages still win
+- new discordinator chat-guard: a Claude Code Stop hook that blocks a session from ending its turn mid-chat (with the exact next step); allows a repeat stop with no further chat activity, reminds again if the session keeps chatting and drops out again; reads the session's own transcript so two sessions in one directory are never confused; any error = allow
+- new test_chat_flow.py (33) + test_chat_guard.py (30); all 19 suites pass
+
 ## [1.0.25] - 2026-10-06
 Session handles: project/role names, no silent collisions + review fixes
 - chatter is now a ROLE appended to the project's DISCORDINATOR_CHAT_HANDLE (chatter='ui' -> CodeCarver/ui), so two sessions in the same project can chat while staying recognizable; omit chatter when it's the project's only session; with no project handle, chatter is used as-is
