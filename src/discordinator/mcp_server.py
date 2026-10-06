@@ -419,9 +419,10 @@ def chat_say(
     `reply.timed_out`, the other side is still busy: call chat_await to keep
     waiting (for as long as it takes) — never end your turn mid-chat.
 
-    status values:
-      - "say"     more of my turn is coming — do NOT yield (send more, then a
-                  terminal status).
+    status values — almost always use "over" (the default):
+      - "say"     ONLY to split one long turn: more of THIS turn follows right
+                  now in your next chat_say. It keeps the floor, so the others
+                  stay waiting until you send "over". Never end on "say".
       - "working" "hold on, I'm going to go do something" — keeps the floor and
                   tells the others you're busy (they keep waiting, and see your
                   note). Then DO the work and post the results with "over". Use

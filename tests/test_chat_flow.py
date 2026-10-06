@@ -168,6 +168,57 @@ def test_already_received_turn_handed_back() -> None:
     check(r4["timed_out"], "after replying, the guard no longer fires (normal wait)")
 
 
+def test_say_then_await_is_caught() -> None:
+    print("ended its turn on 'say' then called chat_await -> told to finish, no deadlock:")
+    c = LocalClient()
+    room = "saystall"
+    chat.reset(room, "B", _latest(c, room), 20)
+    chat.send_chat(c, room, "A", "over", "your turn B")
+    chat.await_turn(c, room, "B", timeout=2, poll=0.05, nudge_after=0)
+    chat.send_chat(c, room, "B", "say", "here's my answer")  # the mistake: say, not over
+    t0 = time.monotonic()
+    r = chat.await_turn(c, room, "B", timeout=5, poll=0.05, nudge_after=0)
+    check(time.monotonic() - t0 < 2, "returned immediately instead of deadlocking")
+    check(r.get("unfinished_turn") and r["your_turn"] and "status='over'" in r["note"],
+          "note explains 'say' kept the floor and to send 'over'")
+    check("Finish YOUR turn" in chat.next_step(r), "next: finish the turn")
+    chat.send_chat(c, room, "B", "working", "running tests first")
+    r2 = chat.await_turn(c, room, "B", timeout=5, poll=0.05, nudge_after=0)
+    check(r2.get("unfinished_turn") and "Do the work" in r2["note"], "'working' then await -> go do the work")
+    chat.send_chat(c, room, "B", "over", "done: all green")
+    chat.reset(room, "B", _latest(c, room), 20)
+    r3 = chat.await_turn(c, room, "B", timeout=0.2, poll=0.05, nudge_after=0)
+    check(r3["timed_out"] and not r3.get("unfinished_turn"), "after 'over', waiting is normal again")
+
+
+def test_newer_message_beats_unfinished_check() -> None:
+    print("if the other side already replied anyway, that reply is delivered:")
+    c = LocalClient()
+    room = "sayreply"
+    chat.reset(room, "B", _latest(c, room), 20)
+    chat.send_chat(c, room, "B", "say", "thinking out loud")
+    chat.reset(room, "B", _latest(c, room), 20)
+    chat.send_chat(c, room, "A", "over", "I'll jump in anyway")
+    r = chat.await_turn(c, room, "B", timeout=2, poll=0.05, nudge_after=0)
+    check(r["from"] == "A" and not r.get("unfinished_turn"), "A's newer turn delivered first")
+
+
+def test_nudge_names_stalled_say() -> None:
+    print("the waiting side's reminder names a stalled 'say':")
+    c = LocalClient()
+    room = "saynudge"
+    chat.send_chat(c, room, "A", "over", "go B")
+    chat.reset(room, "A", _latest(c, room), 20)
+    chat.send_chat(c, room, "B", "say", "partial answer")
+    r = chat.await_turn(c, room, "A", timeout=0.2, poll=0.05, nudge_after=0.01)
+    check(r["nudged"] is True, "reminder posted (a stalled 'say' isn't 'working')")
+    posted = [simplify_message(m)["content"] for m in c.read_messages(room, limit=5)]
+    nudge = next(x for x in posted if x.startswith(chat.NUDGE_MARK))
+    check("[B] sent status 'say'" in nudge and 'status="over"' in nudge,
+          f"reminder says what B did wrong: {nudge[2:60]!a}")
+    check("B is mid-turn" in r["note"], "A's note shows B is mid-turn")
+
+
 def test_mcp_await_has_next() -> None:
     print("chat_await results carry `next` too:")
     out = mcp.chat_await(chatter="Q", channel="nextroom", timeout=0.2, nudge_after=0)
@@ -185,6 +236,9 @@ def main() -> int:
     test_stale_working_still_flagged()
     test_nudge_still_fires_without_working()
     test_already_received_turn_handed_back()
+    test_say_then_await_is_caught()
+    test_newer_message_beats_unfinished_check()
+    test_nudge_names_stalled_say()
     test_mcp_await_has_next()
     print(f"\nALL {_passed} CHAT-FLOW CHECKS PASSED")
     return 0
