@@ -8,6 +8,15 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.25] - 2026-10-06
+Session handles: project/role names, no silent collisions + review fixes
+- chatter is now a ROLE appended to the project's DISCORDINATOR_CHAT_HANDLE (chatter='ui' -> CodeCarver/ui), so two sessions in the same project can chat while staying recognizable; omit chatter when it's the project's only session; with no project handle, chatter is used as-is
+- collision guard: each MCP session claims its handle in ~/.discordinator/handles.json; if another LIVE session on this machine holds it you get <handle>-2 and chat_begin returns a note — sessions can never silently share a name and ignore each other. Claims are released at exit; dead (pid gone) or day-old claims are reclaimed. Liveness is queried via the Win32 API, never os.kill (which terminates on Windows)
+- across machines, give the project a distinct handle per machine in .mcp.json (e.g. CodeCarverWork)
+- FIX (v1.0.24 regression): a 2-party reply taking 30+ minutes dropped the other party from the state, leaving no floor holder — the speaker an unaddressed owed turn replied to is now always kept
+- FIX: retention no longer switches off for a room whose first record is undated/damaged (falls back to a full scan); FIX: addressing and from_whom use the same case-insensitive matching as everything else
+- new test_handles.py (28, incl. real-process liveness) + 11 review checks; all 17 suites pass; handles.py 91%, chat.py 99%, local_client.py 94%
+
 ## [1.0.24] - 2026-10-06
 Chat identity: one name per project, state scoped to the current chat
 - chat state (chat_status, watch --state, TUI) now covers only the CURRENT chat — after the last end/impasse or human stop — and drops participants silent 30+ minutes (both ends of an owed turn are kept), so stale handles from earlier chats no longer linger in the rotation
