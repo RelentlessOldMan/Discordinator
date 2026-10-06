@@ -83,7 +83,7 @@ Discord gives you a window into the conversation (and a box to type into). Local
 mode replaces that with three CLI commands:
 
 ```powershell
-discordinator watch chat --follow --state   # live view; --state shows floor/waiting/hands
+discordinator watch chat --follow --state   # live view; --state shows floor/others/hands
 discordinator interject "focus on correctness first"   # post a HUMAN turn the agents pick up
 discordinator stop                          # end the chat (a human stop the awaiter obeys)
 ```
@@ -96,7 +96,7 @@ confused chat back on track or halt a runaway loop**. The one thing no viewer ca
 do — on any transport — is wake a session that has stopped running; there the
 viewer's `--state` still tells you exactly *which* session to go poke.
 
-**Full-screen TUI.** For a nicer experience — a live transcript, a floor/waiting
+**Full-screen TUI.** For a nicer experience — a live transcript, a floor/others
 sidebar, and an input box that doesn't fight the scrolling output — there's a
 Textual app:
 
@@ -306,7 +306,7 @@ block — the server reads the same config file.
 | `purge_messages(channel?, older_than_days?, only_mine?, scan_limit?, dry_run?)` | Delete old messages. Safe defaults (dry-run, only the bot's own, 7-day floor). |
 | `list_channels()` | Show configured channel names + default. |
 | `whoami()` | Verify the token / show the bot identity. |
-| `chat_begin` / `chat_say` / `chat_await` / `chat_status` | **Chat mode** — a separate turn-based agent↔agent protocol with per-participant `chatter` ids, explicit turn `status` (over/wrap/end/impasse), a blocking wait, human `stop`, and `chat_status` for stall recovery. Scales past two: address a turn with `to=` (a derived **floor token** wakes only the addressee), raise a hand with `status="ask"`, plus built-in anti-starvation (`suggest_next` + a nudge). A turn can carry attachments: `chat_say(..., files=[...])` (gated by the send opt-in) rides them on the turn's final message, and `chat_await` returns them in `attachments`. See [`AGENTS.md`](AGENTS.md#chat-mode-agent--agent) and the [protocol notes](docs/chat-protocol-notes.md). |
+| `chat_begin` / `chat_say` / `chat_await` / `chat_status` | **Chat mode** — a separate turn-based agent↔agent protocol with per-participant `chatter` ids (a fixed per-project handle via `DISCORDINATOR_CHAT_HANDLE`; case-insensitive), explicit turn `status` (over/wrap/end/impasse), a blocking wait, human `stop`, and `chat_status` for stall recovery. Scales past two: address a turn with `to=` (a derived **floor token** wakes only the addressee), raise a hand with `status="ask"`, plus built-in anti-starvation (`suggest_next` + a nudge). A turn can carry attachments: `chat_say(..., files=[...])` (gated by the send opt-in) rides them on the turn's final message, and `chat_await` returns them in `attachments`. See [`AGENTS.md`](AGENTS.md#chat-mode-agent--agent) and the [protocol notes](docs/chat-protocol-notes.md). |
 
 **See it in action** — real, unedited sessions annotated with each side's
 session-level thinking: [`docs/example-chat.md`](docs/example-chat.md) (two
