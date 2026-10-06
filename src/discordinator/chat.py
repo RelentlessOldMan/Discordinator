@@ -125,7 +125,7 @@ def _targets(to: Optional[str], me: str) -> bool:
     a broadcast, or names ``me`` (case-insensitive)."""
     if _is_broadcast(to):
         return True
-    return str(to).strip().lower() == str(me).strip().lower()
+    return same_handle(to, me)
 
 
 def is_human_stop(text: str) -> bool:
@@ -332,7 +332,7 @@ def await_turn(
     # Per-sender say-continuation buffers so interleaved multiparty turns don't
     # bleed into each other's text.
     pending_by_sender: dict[str, list[dict[str, Any]]] = {}
-    want = None if from_whom is None else str(from_whom).strip().lower()
+    want = from_whom
 
     # Track cumulative wait across repeated calls (for the nudge).
     since, nudged = _get_wait(channel_id, me)
@@ -414,7 +414,7 @@ def await_turn(
                     your_turn=False, addressed_to=to, attachments=atts))
 
             # A yielded turn (over/wrap). Does the floor actually come to me?
-            if want is not None and sender.lower() != want:
+            if want is not None and not same_handle(sender, want):
                 continue  # waiting specifically for a different peer
             if not _targets(to, me):
                 continue  # addressed to another peer — keep holding the wait
@@ -498,6 +498,7 @@ def compute_state(
     last_turn_i = -1
     last_turn_index_by: dict[str, int] = {}   # participant -> index of their last completed turn
     last_significant: dict[str, dict[str, Any]] = {}  # ignoring pure `say`
+    turn_authors: list[str] = []  # author of each completed turn, in order
     for i in range(start, len(msgs)):
         m, p = msgs[i], parsed_list[i]
         if not p:
@@ -517,6 +518,7 @@ def compute_state(
             continue
         last_significant[who] = {"status": p["status"], "i": i}
         if p["status"] in real:
+            turn_authors.append(who)
             last_turn_index_by[who] = i
             last_turn = {"from": who, "to": to, "status": p["status"],
                          "id": m["id"], "ts": m["timestamp"]}
@@ -542,11 +544,17 @@ def compute_state(
         )
 
     # Drop participants who have gone quiet: not seen within STALE_AFTER of the
-    # room's latest chat message. The caller and both ends of the owed turn are
-    # always kept — they are live parts of the conversation by definition.
+    # room's latest chat message. Always kept: the caller, both ends of the owed
+    # turn, and — when that turn is unaddressed — the speaker it replied to: in
+    # a 2-party chat it's owed to them, however long the reply took.
     keep = {me_norm}
     if pending:
         keep |= {pending["from"], pending["to"]}
+        if _is_broadcast(pending["to"]):
+            replied_to = next((w for w in reversed(turn_authors[:-1])
+                               if w != pending["from"]), None)
+            if replied_to:
+                keep.add(replied_to)
     if latest_ts is not None:
         horizon = latest_ts - STALE_AFTER
         participants = [

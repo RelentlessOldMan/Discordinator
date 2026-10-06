@@ -143,10 +143,11 @@ instead of landing on a per-project relay channel:
     }
 }}}
 ```
-`DISCORDINATOR_CHAT_HANDLE` is the project's **fixed name in live chats**: `chat_*`
-calls may omit `chatter` and get it automatically, so a project never shows up
-under several names (`CodeCarver` one day, `carver` the next). Set it per project,
-never in the shared home config.
+`DISCORDINATOR_CHAT_HANDLE` is the project's **fixed name in live chats**, so a
+project never shows up under several names (`CodeCarver` one day, `carver` the
+next). Set it per project, never in the shared home config. On a second machine,
+give the same project a distinct handle in that machine's `.mcp.json` (e.g.
+`CodeCarverWork`) so the two machines' sessions can chat with each other.
 Relay tools (`send_message`, `get_new_messages`, `read_messages`) default to
 `DISCORDINATOR_RELAY_CHANNEL`; chat tools (`chat_*`) default to `DISCORDINATOR_CHAT_CHANNEL`
 — two separate defaults so the async mailbox and the live chat never collide on one
@@ -186,10 +187,18 @@ Confirm inside Claude Code with `/mcp`.
 A separate, turn-based protocol — distinct tools so it's never conflated with the
 relay above. Every call is made as a `chatter` handle (yours), because both sides
 may be on the SAME machine and must stay distinguishable; each handle has its own
-read cursor. **Omit `chatter`** to use the project's fixed
-`DISCORDINATOR_CHAT_HANDLE` (recommended). Pass one explicitly only when no handle
-is configured, or when two sessions of the *same* project chat with each other
-(they'd otherwise share a handle and ignore each other's turns). Handles are
+read cursor. **Your handle is the project's `DISCORDINATOR_CHAT_HANDLE`**, and
+`chatter` is an optional **role** appended to it:
+- only session of the project in the chat → omit `chatter` → `CodeCarver`
+- two sessions of the same project → each passes its own role, e.g.
+  `chatter="ui"` / `chatter="api"` → `CodeCarver/ui`, `CodeCarver/api`
+- pass the same `chatter` on every `chat_*` call of that session
+- no project handle configured → `chatter` is used as-is (required)
+
+Safety net: each session claims its handle machine-wide. If another **live**
+session on this machine already holds it, you get `CodeCarver-2` and `chat_begin`
+returns a `note` saying so — two sessions can never silently share a name and
+ignore each other's turns. Claims free up when a session exits. Handles are
 case-insensitive (`Convex` = `convex`).
 
 **Who counts as a participant.** Chat state (`chat_status`, the `watch --state` /
@@ -210,8 +219,9 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
 > sides land in the same room with nothing to negotiate. Only pass `channel`
 > explicitly to override for a one-off.
 
-- `chat_begin(chatter?, channel?, turn_cap=20)` — both sides call first, with
-  DISTINCT handles (each project's configured handle, or e.g. "A"/"B"). Seeds read position to now, resets turn count.
+- `chat_begin(chatter?, channel?, turn_cap=20)` — both sides call first; each
+  resolves to a DISTINCT handle (project handle, `project/role`, or e.g. "A"/"B"
+  when no project handle is set). The result's `chatter` is your handle. Seeds read position to now, resets turn count.
 - `chat_say(text, chatter?, status="over", channel?, to?)` — send with an explicit
   status: `say` (more coming), `ask` (raise a hand — request the floor without
   taking the turn), `over` (your turn), `wrap` (propose ending — agree?), `end`

@@ -23,7 +23,7 @@ from typing import Any, Optional
 
 from mcp.server.mcpserver import MCPServer
 
-from . import chat, config, use_system_certs
+from . import chat, config, handles, use_system_certs
 from .client_factory import Client, make_client, make_client_for_url
 from .discord_client import DiscordError, simplify_message
 
@@ -341,16 +341,10 @@ def whoami() -> dict[str, Any]:
 
 
 def _chatter(chatter: Optional[str], cfg: dict[str, Any]) -> str:
-    """The caller's handle: an explicit `chatter`, else this project's fixed
-    `chat_handle` (DISCORDINATOR_CHAT_HANDLE in its .mcp.json). A fixed handle
-    keeps one project from showing up under several names."""
-    handle = chatter if chatter not in (None, "") else cfg.get("chat_handle")
-    if not handle:
-        raise config.ConfigError(
-            "No chat handle: pass chatter=\"...\", or (recommended) give this project "
-            "a fixed handle by setting DISCORDINATOR_CHAT_HANDLE in its .mcp.json env."
-        )
-    return chat.sanitize_handle(handle)
+    """This session's handle (see handles.resolve): the project's fixed handle,
+    optionally with a role (`CodeCarver/ui`), made unique among live sessions on
+    this machine."""
+    return handles.resolve(chatter, cfg)[0]
 
 
 @mcp.tool()
@@ -363,10 +357,14 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
     calls `chat_await`. Do NOT have both call `chat_await` first — that deadlocks.
 
     Args:
-        chatter: your participant handle. OMIT it to use this project's fixed
-            handle (DISCORDINATOR_CHAT_HANDLE) — recommended, so the same project
-            always appears under one name. Pass one only if no handle is
-            configured, or to run two sessions of one project in the same chat.
+        chatter: optional ROLE for this session. Your handle is the project's
+            fixed handle (DISCORDINATOR_CHAT_HANDLE, e.g. "CodeCarver"); a
+            chatter is appended to it ("ui" -> "CodeCarver/ui"). Omit it when
+            this is the only session of the project in the chat; pass a short
+            role when two sessions of the same project need to talk (each a
+            different role). If another live session on this machine already
+            has your handle you get a "-2" suffix and a `note` saying so. With
+            no project handle configured, chatter is used as-is.
         channel: chat channel name/id. Omit to use the dedicated chat channel
             (chat_channel / DISCORDINATOR_CHAT_CHANNEL — a shared room like
             claudes-chatroom); both sides then meet there with no negotiation.
@@ -374,7 +372,7 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         turn_cap: soft cap on your turns before you're nudged to wrap up.
     """
     cfg = config.load()
-    me = _chatter(chatter, cfg)
+    me, note = handles.resolve(chatter, cfg)
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client("chat") as client:
         st = chat.compute_state(client, channel_id, me)
@@ -388,13 +386,16 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
             cursor = latest[0]["id"] if latest else "0"
     chat.reset(channel_id, me, cursor, turn_cap)
     owed = bool(st.get("your_turn"))
-    return {
+    out = {
         "channel": channel_id, "chatter": me, "turn_cap": turn_cap,
         "recovered_pending_turn": owed,
         "state": {k: v for k, v in st.items() if not k.startswith("_")},
         "next": ("A turn is owed to you — call chat_await now to receive it."
                  if owed else "initiator: chat_say(...); other: chat_await(...)"),
     }
+    if note:
+        out["note"] = note
+    return out
 
 
 @mcp.tool()
@@ -406,8 +407,8 @@ def chat_say(
     to: Optional[str] = None,
     files: Any = None,
 ) -> dict[str, Any]:
-    """Send a chat message as `chatter` with an explicit turn status. Omit
-    `chatter` to use this project's fixed handle (DISCORDINATOR_CHAT_HANDLE).
+    """Send a chat message as `chatter` with an explicit turn status. Pass the
+    same `chatter` (role) you gave chat_begin, or omit it if you omitted it there.
 
     status values:
       - "say"     more of my turn is coming — do NOT yield (send more, then a
@@ -490,8 +491,8 @@ def chat_await(
 ) -> dict[str, Any]:
     """Block until a turn comes to YOU, a human interjects, or `timeout` seconds
     pass. This is how you wait for a reply — just call it and it spins
-    server-side; you don't poll yourself. Omit `chatter` to use this project's
-    fixed handle (DISCORDINATOR_CHAT_HANDLE).
+    server-side; you don't poll yourself. Pass the same `chatter` (role) you gave
+    chat_begin, or omit it if you omitted it there.
 
     Floor rules: a turn "comes to you" when another participant `over`/`wrap`s
     and addresses you (or broadcasts), OR anyone ends the chat. A turn addressed
@@ -573,7 +574,8 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
     """
     cfg = config.load()
     channel_id = config.resolve_chat_channel(cfg, channel)
-    me = chatter if chatter not in (None, "") else cfg.get("chat_handle")
+    me = (handles.resolve(chatter, cfg)[0]
+          if chatter not in (None, "") or cfg.get("chat_handle") else None)
     with _client("chat") as client:
         st = chat.compute_state(client, channel_id, me)
     public = {k: v for k, v in st.items() if not k.startswith("_")}

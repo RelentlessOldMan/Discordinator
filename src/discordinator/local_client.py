@@ -241,15 +241,27 @@ class LocalClient:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 first = fh.readline()
-            oldest = _record_time(json.loads(first))
-        except (OSError, ValueError, TypeError, AttributeError):
+        except OSError:
             return 0
-        if oldest is None or oldest > now - window * 1.1:
+        try:
+            oldest = _record_time(json.loads(first))
+        except ValueError:
+            oldest = None
+        records: Optional[list[dict[str, Any]]] = None
+        if oldest is None:
+            # Unusable head record (no/odd timestamp, damaged line): find the
+            # oldest dated record the slow way so one bad line can't switch
+            # retention off for the room forever.
+            records = self._read_all(channel_id)
+            oldest = min((t for t in map(_record_time, records) if t is not None), default=None)
+            if oldest is None:
+                return 0
+        if oldest > now - window * 1.1:
             return 0
         cutoff = now - window
         kept: list[dict[str, Any]] = []
         dropped: list[dict[str, Any]] = []
-        for r in self._read_all(channel_id):
+        for r in records if records is not None else self._read_all(channel_id):
             ts = _record_time(r)
             (dropped if ts is not None and ts < cutoff else kept).append(r)
         if not dropped:
