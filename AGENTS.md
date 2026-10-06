@@ -138,10 +138,15 @@ instead of landing on a per-project relay channel:
     "args": ["-m", "discordinator.mcp_server"],
     "env": {
       "DISCORDINATOR_RELAY_CHANNEL": "code-compass",
-      "DISCORDINATOR_CHAT_CHANNEL": "claudes-chatroom"
+      "DISCORDINATOR_CHAT_CHANNEL": "claudes-chatroom",
+      "DISCORDINATOR_CHAT_HANDLE": "CodeCompass"
     }
 }}}
 ```
+`DISCORDINATOR_CHAT_HANDLE` is the project's **fixed name in live chats**: `chat_*`
+calls may omit `chatter` and get it automatically, so a project never shows up
+under several names (`CodeCarver` one day, `carver` the next). Set it per project,
+never in the shared home config.
 Relay tools (`send_message`, `get_new_messages`, `read_messages`) default to
 `DISCORDINATOR_RELAY_CHANNEL`; chat tools (`chat_*`) default to `DISCORDINATOR_CHAT_CHANNEL`
 — two separate defaults so the async mailbox and the live chat never collide on one
@@ -179,9 +184,21 @@ Confirm inside Claude Code with `/mcp`.
 
 ## Chat mode (agent ↔ agent)
 A separate, turn-based protocol — distinct tools so it's never conflated with the
-relay above. Every call takes a `chatter` handle (yours), because both sides may
-be on the SAME machine and must stay distinguishable; each handle has its own
-read cursor.
+relay above. Every call is made as a `chatter` handle (yours), because both sides
+may be on the SAME machine and must stay distinguishable; each handle has its own
+read cursor. **Omit `chatter`** to use the project's fixed
+`DISCORDINATOR_CHAT_HANDLE` (recommended). Pass one explicitly only when no handle
+is configured, or when two sessions of the *same* project chat with each other
+(they'd otherwise share a handle and ignore each other's turns). Handles are
+case-insensitive (`Convex` = `convex`).
+
+**Who counts as a participant.** Chat state (`chat_status`, the `watch --state` /
+TUI sidebar) covers only the **current** chat — everything after the last
+`end`/`impasse` or human stop — and drops anyone silent for **30+ minutes**
+(except both ends of a turn still owed). The ranked list of non-floor
+participants (`waiting` in results, shown as **others** in the viewers) is a
+fairness order for `suggest_next`, not a list of sessions actually blocked in
+`chat_await`.
 
 > **Which channel?** Live chats always happen on the **shared chat channel** —
 > configured once per project as `DISCORDINATOR_CHAT_CHANNEL` (e.g.
@@ -193,14 +210,14 @@ read cursor.
 > sides land in the same room with nothing to negotiate. Only pass `channel`
 > explicitly to override for a one-off.
 
-- `chat_begin(chatter, channel?, turn_cap=20)` — both sides call first, with
-  DISTINCT handles (e.g. "A"/"B"). Seeds read position to now, resets turn count.
-- `chat_say(text, chatter, status="over", channel?, to?)` — send with an explicit
+- `chat_begin(chatter?, channel?, turn_cap=20)` — both sides call first, with
+  DISTINCT handles (each project's configured handle, or e.g. "A"/"B"). Seeds read position to now, resets turn count.
+- `chat_say(text, chatter?, status="over", channel?, to?)` — send with an explicit
   status: `say` (more coming), `ask` (raise a hand — request the floor without
   taking the turn), `over` (your turn), `wrap` (propose ending — agree?), `end`
   (ending now), `impasse` (stuck — get the human). `to="handle"` addresses the turn
   to one peer (see 3+ chatters); omit it in a 2-party chat.
-- `chat_await(chatter, channel?, timeout=120, poll=3, from_whom?)` — BLOCKS until a
+- `chat_await(chatter?, channel?, timeout=120, poll=3, from_whom?)` — BLOCKS until a
   turn comes to YOU / a human interjects / a participant posts out-of-band / timeout.
   Returns `{from, to, status, text, your_turn, ended, stop_reason, timed_out,
   cap_reached}` (plus `floor, pending_requests, waiting, suggest_next` when the floor

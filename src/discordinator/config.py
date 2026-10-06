@@ -54,6 +54,10 @@ DEFAULTS: dict[str, Any] = {
     "chat_transport": None,
     "default_channel": None,
     "chat_channel": None,   # default channel for CHAT tools (a shared room)
+    # This project's fixed chat handle (set per project via DISCORDINATOR_CHAT_HANDLE
+    # in .mcp.json), used when a chat_* call omits `chatter` — so one project
+    # never shows up under several names.
+    "chat_handle": None,
     "channels": {},         # friendly name -> channel id (string)
     "machine_label": None,  # optional tag prefixed to outgoing messages
     "ack_on_read": True,    # auto-react ✅ to the newest message on every read
@@ -185,6 +189,9 @@ def load() -> dict[str, Any]:
     env_chat = os.environ.get("DISCORDINATOR_CHAT_CHANNEL")
     if env_chat:
         data["chat_channel"] = env_chat
+    env_handle = os.environ.get("DISCORDINATOR_CHAT_HANDLE")
+    if env_handle:
+        data["chat_handle"] = env_handle
     env_ack = os.environ.get("DISCORDINATOR_ACK")
     if env_ack is not None:
         data["ack_on_read"] = _truthy(env_ack)

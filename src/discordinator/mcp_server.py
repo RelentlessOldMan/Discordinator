@@ -340,8 +340,21 @@ def whoami() -> dict[str, Any]:
 # ==========================================================================
 
 
+def _chatter(chatter: Optional[str], cfg: dict[str, Any]) -> str:
+    """The caller's handle: an explicit `chatter`, else this project's fixed
+    `chat_handle` (DISCORDINATOR_CHAT_HANDLE in its .mcp.json). A fixed handle
+    keeps one project from showing up under several names."""
+    handle = chatter if chatter not in (None, "") else cfg.get("chat_handle")
+    if not handle:
+        raise config.ConfigError(
+            "No chat handle: pass chatter=\"...\", or (recommended) give this project "
+            "a fixed handle by setting DISCORDINATOR_CHAT_HANDLE in its .mcp.json env."
+        )
+    return chat.sanitize_handle(handle)
+
+
 @mcp.tool()
-def chat_begin(chatter: str, channel: Optional[str] = None, turn_cap: int = 20) -> dict[str, Any]:
+def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, turn_cap: int = 20) -> dict[str, Any]:
     """Start or join a turn-based chat as participant `chatter`.
 
     Seeds your read position to *now* (prior history is ignored) and resets your
@@ -350,15 +363,18 @@ def chat_begin(chatter: str, channel: Optional[str] = None, turn_cap: int = 20) 
     calls `chat_await`. Do NOT have both call `chat_await` first — that deadlocks.
 
     Args:
-        chatter: your participant handle (short; used to tag and self-filter).
+        chatter: your participant handle. OMIT it to use this project's fixed
+            handle (DISCORDINATOR_CHAT_HANDLE) — recommended, so the same project
+            always appears under one name. Pass one only if no handle is
+            configured, or to run two sessions of one project in the same chat.
         channel: chat channel name/id. Omit to use the dedicated chat channel
             (chat_channel / DISCORDINATOR_CHAT_CHANNEL — a shared room like
             claudes-chatroom); both sides then meet there with no negotiation.
             Never defaults to a per-project relay channel unless one isn't set.
         turn_cap: soft cap on your turns before you're nudged to wrap up.
     """
-    me = chat.sanitize_handle(chatter)
     cfg = config.load()
+    me = _chatter(chatter, cfg)
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client("chat") as client:
         st = chat.compute_state(client, channel_id, me)
@@ -384,13 +400,14 @@ def chat_begin(chatter: str, channel: Optional[str] = None, turn_cap: int = 20) 
 @mcp.tool()
 def chat_say(
     text: str,
-    chatter: str,
+    chatter: Optional[str] = None,
     status: str = "over",
     channel: Optional[str] = None,
     to: Optional[str] = None,
     files: Any = None,
 ) -> dict[str, Any]:
-    """Send a chat message as `chatter` with an explicit turn status.
+    """Send a chat message as `chatter` with an explicit turn status. Omit
+    `chatter` to use this project's fixed handle (DISCORDINATOR_CHAT_HANDLE).
 
     status values:
       - "say"     more of my turn is coming — do NOT yield (send more, then a
@@ -421,11 +438,11 @@ def chat_say(
     `config set-attachments send on` / DISCORDINATOR_ALLOW_SEND=1) and, on
     Discord, the bot's Attach Files permission. At most 10 files per turn.
     """
-    me = chat.sanitize_handle(chatter)
+    cfg = config.load()
+    me = _chatter(chatter, cfg)
     if status not in chat.STATUSES:
         raise ValueError(f"status must be one of {chat.STATUSES}, got {status!r}")
     target = chat.sanitize_handle(to) if to else None
-    cfg = config.load()
     file_list = None
     if files:
         config.require_send_attachments(cfg)  # raises if this machine hasn't opted in
@@ -464,7 +481,7 @@ def chat_say(
 
 @mcp.tool()
 def chat_await(
-    chatter: str,
+    chatter: Optional[str] = None,
     channel: Optional[str] = None,
     timeout: float = 120.0,
     poll: float = 3.0,
@@ -473,7 +490,8 @@ def chat_await(
 ) -> dict[str, Any]:
     """Block until a turn comes to YOU, a human interjects, or `timeout` seconds
     pass. This is how you wait for a reply — just call it and it spins
-    server-side; you don't poll yourself.
+    server-side; you don't poll yourself. Omit `chatter` to use this project's
+    fixed handle (DISCORDINATOR_CHAT_HANDLE).
 
     Floor rules: a turn "comes to you" when another participant `over`/`wrap`s
     and addresses you (or broadcasts), OR anyone ends the chat. A turn addressed
@@ -512,8 +530,8 @@ def chat_await(
     A human typing anything in the channel is surfaced (from="human"); if it
     looks like a stop command ("stop"/"halt"/"[[STOP]]") the chat ends.
     """
-    me = chat.sanitize_handle(chatter)
     cfg = config.load()
+    me = _chatter(chatter, cfg)
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client("chat") as client:
         return chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll,
@@ -529,19 +547,21 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
 
     Returns:
       - session_active / ended
-      - participants: handles seen in recent history
+      - participants: handles in the CURRENT chat (since the last end/stop),
+        case-insensitive, minus anyone silent for 30+ minutes
       - multiparty: True if >2 participants
       - last_turn: {from, to, status, id, ts} — the most recent completed turn
       - pending_turn: the last `over`/`wrap` turn awaiting an answer, or null
       - floor: who may speak next (the pending turn's addressee; in a 2-party
         chat the other party; null = open floor / nobody owes a turn)
       - floor_requests: [{from}] outstanding hand-raises (`ask`), oldest first
-      - waiting: participants ranked most-starved first (longest since they last
-        took a turn)
+      - waiting: everyone except the floor holder, ranked most-starved first
+        (longest since they last took a turn). A fairness ORDER, not a list of
+        sessions actually blocked in chat_await.
       - suggest_next: the fair next addressee in a multiparty room (an
         outstanding request, else the most-starved non-speaker), or null
-      - your_turn (only if `chatter` given): True if the pending turn is owed to
-        you — it's addressed to you (or broadcast) and isn't your own.
+      - your_turn (if `chatter` is given or this project has a fixed handle):
+        True if the pending turn is owed to you — it's addressed to you (or broadcast) and isn't your own.
 
     If your_turn is True: call `chat_begin` (it repositions you to receive the
     pending turn) then `chat_await`, or `chat_say` if already in the session.
@@ -553,8 +573,9 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
     """
     cfg = config.load()
     channel_id = config.resolve_chat_channel(cfg, channel)
+    me = chatter if chatter not in (None, "") else cfg.get("chat_handle")
     with _client("chat") as client:
-        st = chat.compute_state(client, channel_id, chatter)
+        st = chat.compute_state(client, channel_id, me)
     public = {k: v for k, v in st.items() if not k.startswith("_")}
     public["channel"] = channel_id
     return public

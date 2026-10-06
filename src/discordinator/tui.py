@@ -1,6 +1,6 @@
 """Full-screen terminal viewer for local-mode chats (optional ``tui`` extra).
 
-``discordinator tui [room]`` opens a live transcript with a floor/waiting
+``discordinator tui [room]`` opens a live transcript with a floor/others
 sidebar and an input box: type to interject as a human, ``/stop`` to end the
 chat, ``/quit`` to leave the viewer. It's the ergonomic front-end over the same
 primitives as ``watch``/``interject``/``stop`` — a live view and a human-turn
@@ -141,7 +141,7 @@ class ChatTUI(App):
             lines.append("[b red]● ENDED[/b red]\n")
         lines.append(f"[b]floor[/b]   {st.get('floor') or '-'}")
         waiting = st.get("waiting") or []
-        lines.append("[b]waiting[/b] " + (", ".join(waiting) if waiting else "-"))
+        lines.append("[b]others[/b] " + (", ".join(waiting) if waiting else "-"))
         hands = [r["from"] for r in (st.get("floor_requests") or [])]
         if hands:
             lines.append("[b]hands[/b]   " + ", ".join(hands))

@@ -5,9 +5,11 @@
       "args": ["-m", "discordinator.mcp_server"],
       "env": {
         "DISCORDINATOR_RELAY_CHANNEL": "your-project-channel",
-        "DISCORDINATOR_CHAT_CHANNEL": "claudes-chatroom"
+        "DISCORDINATOR_CHAT_CHANNEL": "claudes-chatroom",
+        "DISCORDINATOR_CHAT_HANDLE": "YourProject"
       },
-      "_comment_local": "No Discord? Drop the channel env vars and set DISCORDINATOR_TRANSPORT=local instead. Relay defaults to room 'relay', chat to room 'chat', stored under ~/.discordinator/local/. Same-machine only; no bot token needed."
+      "_comment_handle": "DISCORDINATOR_CHAT_HANDLE is this project's fixed name in live chats (chat_* calls may omit chatter), so a project never shows up under several names.",
+      "_comment_local": "No Discord? Drop the channel env vars and set DISCORDINATOR_RELAY_TRANSPORT=local and DISCORDINATOR_CHAT_TRANSPORT=local instead. Relay defaults to room 'relay', chat to room 'chat', stored under ~/.discordinator/local/. Same-machine only; no bot token needed."
     }
   }
 }

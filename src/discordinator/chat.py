@@ -31,7 +31,7 @@ you, is a broadcast (unaddressed, or ``to`` in {all, everyone, *, any, anyone}),
 or is terminal (which ends the chat for everyone). Two-party chats simply omit
 ``to`` and behave exactly as before.
 
-Chat state lives under state.json ``["chat"][channel_id][handle]`` = {cursor, turns, cap},
+Chat state lives under state.json ``["chat"][channel_id][handle_key]`` = {cursor, turns, cap},
 separate from the relay cursor so the two never collide.
 """
 
@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import config
@@ -56,6 +57,11 @@ TERMINAL_STATUSES = ("end", "impasse")     # ends the chat for everyone
 YIELD_STATUSES = ("over", "wrap")          # completes a turn, passes the floor
 NON_TURN_STATUSES = ("say", "ask")         # do NOT complete a turn / take the floor
 DEFAULT_TURN_CAP = 20
+
+# A participant who hasn't posted (or been addressed) for this long before the
+# room's latest chat message has left the conversation: they drop out of the
+# participant list so stale handles don't linger in the rotation.
+STALE_AFTER = timedelta(minutes=30)
 
 # Addressing: an unaddressed turn, or one whose target is one of these, wakes
 # every waiting participant (open floor). Otherwise only the named peer wakes.
@@ -92,6 +98,24 @@ def parse(content: str) -> Optional[dict[str, Optional[str]]]:
             "status": m.group(3), "body": m.group(4)}
 
 
+def handle_key(handle: Optional[str]) -> str:
+    """Identity key for a handle: case-insensitive, so "Convex" and "convex" are
+    the same participant. Display keeps whatever spelling was first seen."""
+    return str(handle or "").strip().casefold()
+
+
+def same_handle(a: Optional[str], b: Optional[str]) -> bool:
+    return a is not None and b is not None and handle_key(a) == handle_key(b)
+
+
+def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
+    try:
+        t = datetime.fromisoformat(str(ts))
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
 def _is_broadcast(to: Optional[str]) -> bool:
     return to is None or str(to).strip().lower() in BROADCAST_ALIASES
 
@@ -120,12 +144,12 @@ def is_human_stop(text: str) -> bool:
 
 
 def _slot(state: dict[str, Any], channel_id: str, me: str) -> dict[str, Any]:
-    return state.setdefault("chat", {}).setdefault(channel_id, {}).setdefault(me, {})
+    return state.setdefault("chat", {}).setdefault(channel_id, {}).setdefault(handle_key(me), {})
 
 
 def reset(channel_id: str, me: str, cursor: str, cap: int) -> None:
     state = config.load_state()
-    state.setdefault("chat", {}).setdefault(channel_id, {})[me] = {
+    state.setdefault("chat", {}).setdefault(channel_id, {})[handle_key(me)] = {
         "cursor": cursor,
         "turns": 0,
         "cap": cap,
@@ -242,11 +266,11 @@ def _post_nudge(client: DiscordClient, channel_id: str, me: str, waited_s: float
         st = compute_state(client, channel_id, me)
         floor = st.get("floor")
         participants = st.get("participants", [])
-        others = [p for p in participants if p != me]
+        others = [p for p in participants if not same_handle(p, me)]
         mins = max(1, int(waited_s // 60))
         requests = [r["from"] for r in st.get("floor_requests", [])]
 
-        if me in requests and floor and floor != me:
+        if any(same_handle(r, me) for r in requests) and floor and not same_handle(floor, me):
             # I raised a hand and I'm not the one holding the floor — starvation.
             msg = (f"{NUDGE_MARK} [{me}] raised a hand ~{mins}m ago and is waiting to "
                    f"speak. [{floor}] holds the floor — please yield to [{me}] "
@@ -360,7 +384,7 @@ def await_turn(
                     stop_reason=None, your_turn=True, attachments=atts))
 
             sender = parsed["participant"]
-            if sender == me:
+            if same_handle(sender, me):
                 continue  # my own message
 
             status = parsed["status"]
@@ -443,37 +467,67 @@ def compute_state(
     msgs = list(reversed([simplify_message(m) for m in raw]))  # chronological
     parsed_list = [parse(m["content"]) for m in msgs]
 
-    me_norm = sanitize_handle(me) if me is not None else None
+    # Scope to the CURRENT chat. A terminal turn (end/impasse) or a human stop
+    # that is followed by more chat traffic closed the previous chat, so its
+    # handles and turns must not leak into this one. (A terminal that is still
+    # the latest chat message stays in scope, so `ended` can report it.)
+    start = 0
+    chat_after = False
+    for i in range(len(msgs) - 1, -1, -1):
+        p = parsed_list[i]
+        closes = (p is not None and p["status"] in TERMINAL_STATUSES) or (
+            p is None and not msgs[i].get("bot") and is_human_stop(msgs[i]["content"]))
+        if closes and chat_after:
+            start = i + 1
+            break
+        if p is not None:
+            chat_after = True
+
+    # Handles are case-insensitive identities; each is shown with the spelling
+    # first seen, so "Convex" and "convex" are one participant.
+    display: dict[str, str] = {}
+
+    def canon(h: str) -> str:
+        return display.setdefault(handle_key(h), h)
+
     real = YIELD_STATUSES + TERMINAL_STATUSES  # statuses that complete a turn
     participants: list[str] = []
+    last_seen: dict[str, Optional[datetime]] = {}  # participant -> last post/address time
+    latest_ts: Optional[datetime] = None
     last_turn: Optional[dict[str, Any]] = None
     last_turn_i = -1
     last_turn_index_by: dict[str, int] = {}   # participant -> index of their last completed turn
     last_significant: dict[str, dict[str, Any]] = {}  # ignoring pure `say`
-    for i, (m, p) in enumerate(zip(msgs, parsed_list)):
+    for i in range(start, len(msgs)):
+        m, p = msgs[i], parsed_list[i]
         if not p:
             continue
-        who = p["participant"]
-        if who not in participants:
-            participants.append(who)
+        ts = _parse_ts(m["timestamp"])
+        if ts is not None:
+            latest_ts = ts if latest_ts is None else max(latest_ts, ts)
+        who = canon(p["participant"])
+        to = p["to"] if _is_broadcast(p["to"]) else canon(p["to"])
+        names = [who] + ([to] if to and not _is_broadcast(to) else [])
         # An addressed peer is a known participant even before it has posted.
-        if p["to"] and not _is_broadcast(p["to"]) and p["to"] not in participants:
-            participants.append(p["to"])
+        for n in names:
+            if n not in participants:
+                participants.append(n)
+            last_seen[n] = ts
         if p["status"] == "say":
             continue
         last_significant[who] = {"status": p["status"], "i": i}
         if p["status"] in real:
             last_turn_index_by[who] = i
-            last_turn = {"from": who, "to": p["to"], "status": p["status"],
+            last_turn = {"from": who, "to": to, "status": p["status"],
                          "id": m["id"], "ts": m["timestamp"]}
             last_turn_i = i
 
     # The querying caller is a participant too (it may not have posted yet).
+    me_norm = canon(sanitize_handle(me)) if me is not None else None
     if me_norm and me_norm not in participants:
         participants.append(me_norm)
 
     ended = bool(last_turn and last_turn["status"] in TERMINAL_STATUSES)
-    multiparty = len(participants) > 2
 
     # The last yielded turn is owed until someone completes a turn after it —
     # and since last_turn IS the most recent completed turn, a yield there is
@@ -486,6 +540,20 @@ def compute_state(
             msgs[last_turn_i - 1]["id"] if last_turn_i > 0
             else str(int(last_turn["id"]) - 1)
         )
+
+    # Drop participants who have gone quiet: not seen within STALE_AFTER of the
+    # room's latest chat message. The caller and both ends of the owed turn are
+    # always kept — they are live parts of the conversation by definition.
+    keep = {me_norm}
+    if pending:
+        keep |= {pending["from"], pending["to"]}
+    if latest_ts is not None:
+        horizon = latest_ts - STALE_AFTER
+        participants = [
+            p for p in participants
+            if p in keep or last_seen.get(p) is None or last_seen[p] >= horizon
+        ]
+    multiparty = len(participants) > 2
 
     # Floor: who may speak next. An addressed pending names its target; an
     # unaddressed pending in a 2-party chat implies the other party; unaddressed
@@ -503,7 +571,7 @@ def compute_state(
     floor_requests = [
         {"from": p, "i": sig["i"]}
         for p, sig in last_significant.items()
-        if sig["status"] == "ask" and p != floor
+        if sig["status"] == "ask" and p != floor and p in participants
     ]
     floor_requests.sort(key=lambda r: r["i"])
     floor_requests = [{"from": r["from"]} for r in floor_requests]
@@ -541,7 +609,8 @@ def compute_state(
     }
     if me_norm is not None:
         state["your_turn"] = bool(
-            pending and pending["from"] != me_norm and _targets(pending.get("to"), me_norm)
+            pending and not same_handle(pending["from"], me_norm)
+            and _targets(pending.get("to"), me_norm)
         )
     return state
 

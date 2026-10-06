@@ -281,7 +281,7 @@ def _fmt_watch(m: dict[str, Any], color: bool, room: Optional[str] = None) -> st
 
 
 def _state_footer(client: Any, room: str) -> Optional[str]:
-    """One-line derived chat state (floor / waiting / hands / suggestion)."""
+    """One-line derived chat state (floor / others in rotation order / hands / suggestion)."""
     try:
         st = chat.compute_state(client, room, None)
     except Exception:
@@ -303,7 +303,7 @@ def _state_footer(client: Any, room: str) -> Optional[str]:
     bits = [f"floor: {st.get('floor') or '-'}"]
     waiting = st.get("waiting") or []
     if waiting:
-        bits.append("waiting: " + ", ".join(waiting))
+        bits.append("others: " + ", ".join(waiting))
     hands = [r["from"] for r in (st.get("floor_requests") or [])]
     if hands:
         bits.append("hands: " + ", ".join(hands))
@@ -773,7 +773,7 @@ def build_parser() -> argparse.ArgumentParser:
     wc.add_argument("-f", "--follow", action="store_true", help="keep streaming new messages")
     wc.add_argument("--interval", type=float, default=1.5, help="seconds between polls in --follow (default 1.5)")
     wc.add_argument("-n", "--limit", type=int, default=30, help="how many recent messages to show first (default 30)")
-    wc.add_argument("--state", action="store_true", help="also show derived chat state (floor/waiting/hands)")
+    wc.add_argument("--state", action="store_true", help="also show derived chat state (floor/others/hands)")
     wc.add_argument("--no-color", action="store_true", help="disable ANSI colors")
     wc.set_defaults(func=cmd_watch)
 
