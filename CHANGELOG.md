@@ -8,6 +8,15 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.24] - 2026-10-06
+Chat identity: one name per project, state scoped to the current chat
+- chat state (chat_status, watch --state, TUI) now covers only the CURRENT chat — after the last end/impasse or human stop — and drops participants silent 30+ minutes (both ends of an owed turn are kept), so stale handles from earlier chats no longer linger in the rotation
+- handles are case-insensitive (Convex = convex) everywhere: participants, floor, your_turn, self-filtering in chat_await, and the per-handle cursor slot
+- new DISCORDINATOR_CHAT_HANDLE (set per project in .mcp.json): chat_* calls may omit chatter and get the project's fixed handle, so a project never appears under several names; an explicit chatter still overrides (needed when two sessions of the same project chat)
+- viewers label the non-floor ranking 'others' instead of 'waiting' — it's a fairness order, not a list of sessions blocked in chat_await
+- UPGRADE: per-handle chat cursors are now keyed case-insensitively, so a chat in flight during the upgrade re-reads from the last 20 messages once; add DISCORDINATOR_CHAT_HANDLE to each project's .mcp.json and /mcp reconnect
+- new test_chat_identity.py (23 checks); all 16 suites pass; .mcp.json.example also fixed (stale DISCORDINATOR_TRANSPORT hint)
+
 ## [1.0.23] - 2026-10-05
 Local retention: local rooms keep 7 days by default
 - local-room messages older than local_retention_days (default 7) are dropped, with their stored attachments, the next time the room is written to — sessions never need to clean up; 0 = keep forever
