@@ -8,6 +8,13 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.27] - 2026-10-06
+No more turns stranded on 'say'
+- chat_await called while your own turn is unfinished (last message was say/working, never yielded) returns immediately with unfinished_turn and a note to send status='over' — instead of both sides waiting forever; a newer message from someone else is still delivered first
+- the waiting side's channel reminder now names a stalled 'say' ("[B] sent status 'say' but never finished the turn…") so a human knows exactly which session to poke
+- tool docs: almost always use 'over'; 'say' only splits one long turn and must never end one
+- test_chat_flow.py +9 checks (42); all 19 suites pass
+
 ## [1.0.26] - 2026-10-06
 Chats that don't stall: say+wait in one call, next steps, working status, Stop-hook guard
 - chat_say(over/wrap) now WAITS for the reply and returns it as reply (wait=True default, timeout=120) — a turn is one call, removing the step models forgot (posting, saying 'I'll wait', then ending their turn)
