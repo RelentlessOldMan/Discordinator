@@ -92,7 +92,7 @@ def test_chat_say_with_files_success() -> None:
     _allow("send", True)
     img = _TMP / "pic.png"
     img.write_bytes(b"\x89PNG\r\n")
-    res = mcp.chat_say(text="diagram", chatter="A", status="over", channel="mcpchat", to="B", files=[str(img)])
+    res = mcp.chat_say(text="diagram", chatter="A", status="over", channel="mcpchat", to="B", files=[str(img)], wait=False)
     check(res["sent_messages"] >= 1 and res["status"] == "over", "the turn is sent")
     # B receives the turn with the attachment.
     chat.reset("mcpchat", "B", "0", 20)

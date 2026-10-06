@@ -459,6 +459,15 @@ def cmd_interject(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chat_guard(args: argparse.Namespace) -> int:
+    """Claude Code Stop hook: block a stop that would strand a live chat."""
+    from . import guard
+    out = guard.main(sys.stdin.read())
+    if out:
+        print(out)
+    return 0
+
+
 def cmd_stop(args: argparse.Namespace) -> int:
     cfg = config.load()
     guard = _require_local(cfg, "stop")
@@ -785,6 +794,9 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("stop", help="end a local chat (writes a human stop the awaiting session obeys)")
     st.add_argument("-c", "--channel", help="room name/id (default: the chat room)")
     st.set_defaults(func=cmd_stop)
+
+    cg = sub.add_parser("chat-guard", help="Claude Code Stop hook: stop a session from dropping out of a live chat (reads the hook JSON on stdin)")
+    cg.set_defaults(func=cmd_chat_guard)
 
     tp = sub.add_parser("tui", help="full-screen local chat viewer + input box (needs: pip install -e .[tui])")
     tp.add_argument("room", nargs="?", help="room name/id (default: the chat room)")

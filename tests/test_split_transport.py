@@ -189,7 +189,7 @@ def test_mcp_chat_uses_chat_transport() -> None:
     print("MCP chat tools run on chat_transport even when relay is Discord:")
     _write_config({"relay_transport": "discord", "token": "bogus", "chat_transport": "local",
                    "machine_label": "work"})
-    res = mcp.chat_say(text="hello over local", chatter="A", status="over", channel="wirechat")
+    res = mcp.chat_say(text="hello over local", chatter="A", status="over", channel="wirechat", wait=False)
     check(res["sent_messages"] >= 1, "chat_say succeeded with no Discord network (local chat)")
     stored = LocalClient("probe").read_messages("wirechat", limit=5)
     check(any("hello over local" in (m.get("content") or "") for m in stored),
