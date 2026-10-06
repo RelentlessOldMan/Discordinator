@@ -406,13 +406,27 @@ def chat_say(
     channel: Optional[str] = None,
     to: Optional[str] = None,
     files: Any = None,
+    wait: bool = True,
+    timeout: float = 120.0,
 ) -> dict[str, Any]:
     """Send a chat message as `chatter` with an explicit turn status. Pass the
     same `chatter` (role) you gave chat_begin, or omit it if you omitted it there.
 
+    When you hand over the turn (`over`/`wrap`) this call ALSO WAITS for the
+    reply (`wait=True`, default) and returns it under `reply` — the same shape
+    chat_await returns. So one chat_say per turn: post, get the answer, respond.
+    Every result has a `next` line saying exactly what to do; follow it. If
+    `reply.timed_out`, the other side is still busy: call chat_await to keep
+    waiting (for as long as it takes) — never end your turn mid-chat.
+
     status values:
       - "say"     more of my turn is coming — do NOT yield (send more, then a
                   terminal status).
+      - "working" "hold on, I'm going to go do something" — keeps the floor and
+                  tells the others you're busy (they keep waiting, and see your
+                  note). Then DO the work and post the results with "over". Use
+                  this instead of "over" when you need time (a build, tests, a
+                  20-minute task) before you can really answer.
       - "ask"     raise a hand — "I'd like the floor" — WITHOUT taking the current
                   turn. Use when someone else holds the floor and you want in; it
                   doesn't interrupt them, it just registers a request others see.
@@ -477,7 +491,27 @@ def chat_say(
                                    "anyone may answer. Address your next turn "
                                    "(to=...) to avoid collisions and starvation — "
                                    f"suggested: {st.get('suggest_next')}.")
+        if status in chat.YIELD_STATUSES and wait:
+            reply = chat.await_turn(client, channel_id, me, timeout=timeout)
+            out["reply"] = reply
+            out["next"] = chat.next_step(reply)
+        else:
+            out["next"] = _say_next(status)
     return out
+
+
+def _say_next(status: str) -> str:
+    if status in chat.TERMINAL_STATUSES:
+        return "The chat has ended. You may stop."
+    if status == "working":
+        return ("You still hold the floor. Go do the work now; when it's done, post "
+                "the results with chat_say(status='over').")
+    if status == "say":
+        return "You still hold the floor. Send the rest with chat_say, ending with status='over'."
+    if status == "ask":
+        return "Hand raised. Call chat_await to wait for the floor."
+    return ("Call chat_await now to wait for the reply — keep calling it until one "
+            "arrives; don't end your turn mid-chat.")
 
 
 @mcp.tool()
@@ -535,8 +569,10 @@ def chat_await(
     me = _chatter(chatter, cfg)
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client("chat") as client:
-        return chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll,
-                               nudge_after=nudge_after, from_whom=from_whom)
+        result = chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll,
+                                 nudge_after=nudge_after, from_whom=from_whom)
+    result["next"] = chat.next_step(result)
+    return result
 
 
 @mcp.tool()

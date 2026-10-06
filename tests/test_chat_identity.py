@@ -186,7 +186,7 @@ def test_configured_handle() -> None:
     try:
         out = mcp.chat_begin(channel=room)
         check(out["chatter"] == "CodeCarver", "chat_begin uses the configured handle")
-        mcp.chat_say(text="hello", status="over", channel=room)
+        mcp.chat_say(text="hello", status="over", channel=room, wait=False)
         last = LocalClient().read_messages(room, limit=1)[0]["content"]
         check(last.startswith("[CodeCarver|over]"), f"chat_say tagged with it: {last[:30]}")
         out = mcp.chat_begin(chatter="ui", channel=room)

@@ -17,6 +17,7 @@ Wire format of a chat message::
 
 status values:
     say      more of my turn is coming (do not yield)
+    working  hold on - I'm doing some work; results will follow (do not yield)
     over     I'm done — your turn
     wrap     I think we can end — do you agree? (yields turn)
     end      ending now (terminal)
@@ -52,16 +53,24 @@ from .discord_client import (
     simplify_message,
 )
 
-STATUSES = ("say", "ask", "over", "wrap", "end", "impasse")
+STATUSES = ("say", "working", "ask", "over", "wrap", "end", "impasse")
 TERMINAL_STATUSES = ("end", "impasse")     # ends the chat for everyone
 YIELD_STATUSES = ("over", "wrap")          # completes a turn, passes the floor
-NON_TURN_STATUSES = ("say", "ask")         # do NOT complete a turn / take the floor
+NON_TURN_STATUSES = ("say", "working", "ask")  # do NOT complete a turn / take the floor
+# Keep the floor and tell the others where things stand: `say` = more coming
+# now, `working` = "hold on, I'm off doing something; results will follow".
+PROGRESS_STATUSES = ("say", "working")
 DEFAULT_TURN_CAP = 20
 
 # A participant who hasn't posted (or been addressed) for this long before the
 # room's latest chat message has left the conversation: they drop out of the
 # participant list so stale handles don't linger in the rotation.
 STALE_AFTER = timedelta(minutes=30)
+
+# While someone has said they're `working`, the waiting side's channel reminder
+# is held back - but only this long, so a session that died mid-task still
+# gets flagged for a human.
+WORKING_GRACE = timedelta(minutes=60)
 
 # Addressing: an unaddressed turn, or one whose target is one of these, wakes
 # every waiting participant (open floor). Otherwise only the named peer wakes.
@@ -329,6 +338,29 @@ def await_turn(
     knows which dormant session to poke (and, if I raised a hand and am being
     passed over, that I'm being starved). Set ``nudge_after<=0`` to disable."""
     deadline = time.monotonic() + timeout
+
+    # Already my turn? (e.g. the reply came back from a waiting chat_say and the
+    # model called chat_await anyway.) Waiting now would block on myself, so
+    # hand the owed turn straight back instead of a silent wait.
+    # Anything newer than my cursor (a human, a plain reply) wins: let the
+    # normal loop deliver it.
+    cursor0 = get_cursor(channel_id, me)
+    fresh = bool(cursor0) and bool(client.read_messages(channel_id, limit=1, after=cursor0))
+    st0 = {} if fresh else compute_state(client, channel_id, me)
+    owed = st0.get("pending_turn")
+    if (st0.get("your_turn") and owed and cursor0
+            and int(owed["id"]) <= int(cursor0)
+            and (from_whom is None or same_handle(owed["from"], from_whom))):
+        result = _result(
+            me, channel_id, sender=owed["from"], status=owed["status"],
+            text=st0.get("_pending_text") or "", messages=[], ended=False,
+            stop_reason=None, your_turn=True, addressed_to=owed.get("to"))
+        result["already_received"] = True
+        result["note"] = ("This turn was already delivered to you earlier - it's YOUR "
+                          "turn now. Reply with chat_say; don't call chat_await until "
+                          "you have.")
+        return _finish(channel_id, me, result)
+
     # Per-sender say-continuation buffers so interleaved multiparty turns don't
     # bleed into each other's text.
     pending_by_sender: dict[str, list[dict[str, Any]]] = {}
@@ -399,8 +431,8 @@ def await_turn(
                 "attachments": m.get("attachments", []),
                 "body": parsed["body"],  # local only; stripped from output
             })
-            if status == "say":
-                continue  # mid-turn; keep accumulating for this sender
+            if status in PROGRESS_STATUSES:
+                continue  # mid-turn / working; keep accumulating for this sender
 
             pieces = pending_by_sender.pop(sender)
             text = "\n".join(x["body"] for x in pieces)
@@ -428,7 +460,10 @@ def await_turn(
 
         if time.monotonic() >= deadline:
             waited = time.time() - since
-            if nudge_after > 0 and not nudged and waited >= nudge_after:
+            st = compute_state(client, channel_id, me)
+            working = _working_note(st, me)
+            if (nudge_after > 0 and not nudged and waited >= nudge_after
+                    and not _recently_working(st, me)):  # don't cry wolf mid-task
                 _post_nudge(client, channel_id, me, waited)
                 _set_wait(channel_id, me, since, True)
                 nudged = True
@@ -438,11 +473,16 @@ def await_turn(
                              your_turn=False, timed_out=True)
             result["waited_seconds"] = round(waited)
             result["nudged"] = nudged
-            result["note"] = ("No complete turn yet — the other side is still "
-                              "thinking. Call chat_await again to keep waiting; do "
-                              "NOT abandon the chat or ask the human." +
-                              (" (A channel reminder was posted so a human can poke"
-                               " the other session.)" if nudged else ""))
+            result["progress"] = [x for x in st.get("progress", [])
+                                  if not same_handle(x["from"], me)]
+            result["note"] = (
+                (working + " " if working else
+                 "No complete turn yet - the other side is still thinking. ")
+                + "Call chat_await again now to keep waiting; waiting a long time is "
+                "fine. Do NOT end your turn or ask the human - if you stop, nothing "
+                "can wake you when the reply arrives."
+                + (" (A channel reminder was posted so a human can poke the other "
+                   "session.)" if nudged else ""))
             return result
         time.sleep(poll)
 
@@ -499,6 +539,8 @@ def compute_state(
     last_turn_index_by: dict[str, int] = {}   # participant -> index of their last completed turn
     last_significant: dict[str, dict[str, Any]] = {}  # ignoring pure `say`
     turn_authors: list[str] = []  # author of each completed turn, in order
+    progress: dict[str, dict[str, Any]] = {}  # who -> latest say/working since their last turn
+    last_text = ""
     for i in range(start, len(msgs)):
         m, p = msgs[i], parsed_list[i]
         if not p:
@@ -514,8 +556,11 @@ def compute_state(
             if n not in participants:
                 participants.append(n)
             last_seen[n] = ts
-        if p["status"] == "say":
+        if p["status"] in PROGRESS_STATUSES:
+            progress[who] = {"from": who, "status": p["status"],
+                             "text": (p["body"] or "")[:300], "ts": m["timestamp"]}
             continue
+        progress.pop(who, None)
         last_significant[who] = {"status": p["status"], "i": i}
         if p["status"] in real:
             turn_authors.append(who)
@@ -523,6 +568,7 @@ def compute_state(
             last_turn = {"from": who, "to": to, "status": p["status"],
                          "id": m["id"], "ts": m["timestamp"]}
             last_turn_i = i
+            last_text = p["body"] or ""
 
     # The querying caller is a participant too (it may not have posted yet).
     me_norm = canon(sanitize_handle(me)) if me is not None else None
@@ -613,7 +659,9 @@ def compute_state(
         "floor_requests": floor_requests,
         "waiting": waiting,
         "suggest_next": suggest_next,
+        "progress": [v for k, v in progress.items() if k in participants],
         "_pending_predecessor": pending_predecessor,
+        "_pending_text": last_text if pending else None,
     }
     if me_norm is not None:
         state["your_turn"] = bool(
@@ -621,6 +669,53 @@ def compute_state(
             and _targets(pending.get("to"), me_norm)
         )
     return state
+
+
+def _recently_working(st: dict[str, Any], me: str) -> bool:
+    """True if another participant said `working` within WORKING_GRACE."""
+    now = datetime.now(timezone.utc)
+    for x in st.get("progress", []):
+        if x["status"] != "working" or same_handle(x["from"], me):
+            continue
+        ts = _parse_ts(x.get("ts"))
+        if ts is None or now - ts < WORKING_GRACE:
+            return True
+    return False
+
+
+def _working_note(st: dict[str, Any], me: str) -> Optional[str]:
+    """A human-readable line if someone else is mid-turn (said `working`/`say`
+    and hasn't yielded yet), e.g. while they go off to do a 20-minute task."""
+    others = [x for x in st.get("progress", []) if not same_handle(x["from"], me)]
+    working = [x for x in others if x["status"] == "working"] or others
+    if not working:
+        return None
+    x = working[-1]
+    age = ""
+    ts = _parse_ts(x.get("ts"))
+    if ts is not None:
+        mins = int((datetime.now(timezone.utc) - ts).total_seconds() // 60)
+        age = f" ({mins}m ago)" if mins >= 1 else " (just now)"
+    verb = "is working on something" if x["status"] == "working" else "is mid-turn"
+    return f"{x['from']} {verb}{age}: \"{x['text']}\" - they still hold the floor."
+
+
+def next_step(result: dict[str, Any]) -> str:
+    """One imperative line telling the model exactly what to do next, so a chat
+    never stalls because a session ended its turn at the wrong moment."""
+    if result.get("ended"):
+        return "The chat has ended. You may stop."
+    if result.get("from") == "human":
+        return ("A human spoke in the chat. Do what they ask; if the chat should "
+                "continue, reply with chat_say.")
+    if result.get("your_turn"):
+        return ("It's YOUR turn. Reply with chat_say (status='over' to hand back, "
+                "'working' if you need time to go do something first, 'wrap' to "
+                "propose ending). Don't end your turn without replying.")
+    if result.get("timed_out"):
+        return ("Call chat_await again NOW. Keep waiting as long as it takes - do NOT "
+                "end your turn, or nobody can wake you when the reply arrives.")
+    return "Call chat_await to wait for the next turn."
 
 
 def _result(me: str, channel_id: str, *, sender, status, text, messages,

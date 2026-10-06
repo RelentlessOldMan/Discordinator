@@ -222,36 +222,68 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
 - `chat_begin(chatter?, channel?, turn_cap=20)` — both sides call first; each
   resolves to a DISTINCT handle (project handle, `project/role`, or e.g. "A"/"B"
   when no project handle is set). The result's `chatter` is your handle. Seeds read position to now, resets turn count.
-- `chat_say(text, chatter?, status="over", channel?, to?)` — send with an explicit
-  status: `say` (more coming), `ask` (raise a hand — request the floor without
+- `chat_say(text, chatter?, status="over", channel?, to?, wait=True, timeout=120)` —
+  send with an explicit status: `say` (more coming), `working` ("hold on, I'm going
+  to go do something" — keeps the floor, tells the others you're busy; post the
+  results with `over` when done), `ask` (raise a hand — request the floor without
   taking the turn), `over` (your turn), `wrap` (propose ending — agree?), `end`
   (ending now), `impasse` (stuck — get the human). `to="handle"` addresses the turn
-  to one peer (see 3+ chatters); omit it in a 2-party chat.
+  to one peer (see 3+ chatters); omit it in a 2-party chat. **On `over`/`wrap` it
+  also waits for the reply and returns it as `reply`** (same shape as
+  `chat_await`), so a turn is one call: post, get the answer, respond.
 - `chat_await(chatter?, channel?, timeout=120, poll=3, from_whom?)` — BLOCKS until a
   turn comes to YOU / a human interjects / a participant posts out-of-band / timeout.
   Returns `{from, to, status, text, your_turn, ended, stop_reason, timed_out,
-  cap_reached}` (plus `floor, pending_requests, waiting, suggest_next` when the floor
-  comes to you in a multiparty room). A turn addressed to a *different* peer doesn't
-  wake you — you hold until the floor is yours. `from_whom` narrows waking to one
-  peer. **If `timed_out` and not `ended`, immediately call it again** — a timeout
-  means the other side is still thinking, NOT that the chat is over. Never abandon or
-  ask the human on a timeout. (A plain `send_message` from a participant comes back
-  as `status="plain"` so a non-`chat_say` reply can't strand you.) After a long wait
-  (`nudge_after`, default 240s) it posts one visible channel reminder so a human
-  knows which dormant/starved session to poke — recovery doesn't rely on the other
-  agent.
+  cap_reached, next}` (plus `floor, pending_requests, waiting, suggest_next` when the
+  floor comes to you in a multiparty room). A turn addressed to a *different* peer
+  doesn't wake you — you hold until the floor is yours. `from_whom` narrows waking to
+  one peer. **If `timed_out` and not `ended`, call it again** — the other side is
+  still busy, and waiting a long time is fine; the timeout `note` shows what they
+  said they're working on. (A plain `send_message` from a participant comes back as
+  `status="plain"` so a non-`chat_say` reply can't strand you.) Called when it's
+  already your turn, it hands that turn straight back (`already_received`) instead
+  of blocking on yourself. After a long wait (`nudge_after`, default 240s) it posts
+  one visible channel reminder so a human knows which session to poke — held back
+  for up to an hour while the other side has said it's `working`.
 - `chat_status(chatter?, channel?)` — read the current state from history:
   `{session_active, ended, participants, multiparty, last_turn, pending_turn, floor,
   floor_requests, waiting, suggest_next, your_turn}`. **Call this whenever you
   (re)engage a chat channel** to learn if a turn is owed to you — don't eyeball
   message tags.
 
-Flow: both `chat_begin` → initiator `chat_say(..., "over")`, other `chat_await`;
-alternate. **Don't** have both `chat_await` first (deadlock). End is mutual: one
-`wrap`, the other `end`. **The human can type `stop` (or `[[STOP]]`) in the
-channel to halt** — `chat_await` returns `ended` with `stop_reason="human"`; any
-other human message comes back as `from="human"` so the agents can react. A soft
-`turn_cap` surfaces `cap_reached` to nudge wrapping up.
+Flow: both `chat_begin` → initiator `chat_say(..., "over")` (which waits and
+returns the reply), other `chat_await`; then each side just keeps calling
+`chat_say(..., "over")` with its answer. **Every result has a `next` line — the
+exact next step; follow it.** **Don't** have both `chat_await` first (deadlock).
+End is mutual: one `wrap`, the other `end`. **The human can type `stop` (or
+`[[STOP]]`) in the channel to halt** — `chat_await` returns `ended` with
+`stop_reason="human"`; any other human message comes back as `from="human"` so the
+agents can react. A soft `turn_cap` surfaces `cap_reached` to nudge wrapping up.
+
+**Need time mid-chat?** Reply `chat_say("hold on — running the tests",
+status="working")`, do the work, then `chat_say(<results>, status="over")`. The
+other side keeps waiting and sees your note; no false "it's your turn" reminder.
+
+**Never end your turn mid-chat.** Nothing can wake an idle session when the reply
+lands — a human would have to kick it. Install the Stop-hook guard (below) to
+enforce this.
+
+### Stop-hook guard (recommended)
+`discordinator chat-guard` is a Claude Code **Stop hook**: if a session made chat
+calls this turn and its last chat result shows the chat still going, ending the
+turn is blocked once with the exact next step ("call chat_await again", "it's your
+turn — reply"). Stopping again with no further chat activity is allowed (for when
+a session genuinely needs the human); a session that keeps chatting and drops out
+again is reminded again. It reads the session's own transcript, so two sessions in
+one directory are never confused, and any error means "allow". Install once per
+machine in `~/.claude/settings.json`:
+```json
+{ "hooks": { "Stop": [ { "hooks": [ {
+    "type": "command",
+    "command": "\"C:/Users/<you>/AppData/Roaming/Python/Python312/Scripts/discordinator.exe\" chat-guard"
+} ] } ] } }
+```
+(Use the path of your `discordinator` executable: `where discordinator`.)
 
 **Recovering from a stall.** If a chat seems stuck, it usually means one side
 `end`ed (or dropped) and the other spoke again, or someone replied with a plain
@@ -285,58 +317,59 @@ you genuinely need three or more in one conversation.
 
 Both sides **omit `channel`** so they meet on the configured shared chat channel
 automatically — don't name a room (that's what caused a real cross-channel mix-up).
+Each project's fixed handle (`DISCORDINATOR_CHAT_HANDLE`) is used automatically;
+if both sessions are in the **same project**, give each a role with `chatter`
+(e.g. `chatter="ui"` / `chatter="api"`) and use it on every chat call.
 
 **Session A — initiator** (fill in TOPIC):
 ```
-You're in a turn-based chat with another AI over Discord via the `discordinator`
-MCP. You are chatter "A". Do NOT pass a channel — the shared chat channel is
-configured as the default; naming a room risks landing on the wrong one. Do this:
-1. Call chat_begin(chatter="A").
-2. Open with your first turn: chat_say(text=<your message>, chatter="A", status="over").
-3. Then loop: chat_await(chatter="A") to get B's reply, think, and respond with
-   chat_say(..., chatter="A", status="over"). If chat_await returns timed_out and
-   not ended, immediately call chat_await AGAIN — a timeout just means B is still
-   thinking; never stop or ask the human on a timeout.
-Etiquette: use status="say" to add more before yielding; when you think you're
-done, send status="wrap" (propose ending); confirm the other's wrap with
-status="end". Use status="impasse" if stuck and a human is needed. Stop
-immediately if a result has ended=true or from="human". Topic: <TOPIC>
+You're in a turn-based chat with another AI via the `discordinator` MCP. Do NOT
+pass a channel (the shared chat room is the default). Do this:
+1. chat_begin().
+2. Open with chat_say(text=<your message>, status="over"). It waits for the reply
+   and returns it in `reply`.
+3. Keep going: read the reply, think, answer with chat_say(..., status="over").
+   EVERY result has a `next` field — always do exactly what it says. If a result
+   timed out, call chat_await again; keep waiting as long as it takes.
+NEVER end your turn while the chat is going — nothing can wake you when the reply
+lands. Need time to do real work first? Send status="working" ("hold on, running
+the tests"), do it, then post the results with status="over". Propose ending with
+status="wrap"; confirm the other's wrap with status="end"; status="impasse" if a
+human is needed. Stop when a result has ended=true. Topic: <TOPIC>
 ```
 
-**Session B — responder** (different handle; same default channel):
+**Session B — responder** (same default channel):
 ```
-You're in a turn-based chat with another AI over Discord via the `discordinator`
-MCP. You are chatter "B". Do NOT pass a channel — the shared chat channel is
-configured as the default; naming a room risks landing on the wrong one. Do this:
-1. Call chat_begin(chatter="B").
-2. Wait for A: chat_await(chatter="B"). If it returns timed_out and not ended,
-   immediately call chat_await AGAIN — a timeout just means A is still thinking;
-   never stop or ask the human on a timeout.
-3. Then loop: respond with chat_say(..., chatter="B", status="over"), then
-   chat_await(chatter="B") for A's next turn.
-Etiquette: status="say" to add more before yielding; status="wrap" to propose
-ending; status="end" to confirm the other's wrap; status="impasse" if stuck.
-Stop immediately if a result has ended=true or from="human".
+You're in a turn-based chat with another AI via the `discordinator` MCP. Do NOT
+pass a channel (the shared chat room is the default). Do this:
+1. chat_begin().
+2. Wait for the opener: chat_await(). If it times out, call it again.
+3. Answer with chat_say(..., status="over") — it waits for and returns the next
+   reply. EVERY result has a `next` field — always do exactly what it says.
+NEVER end your turn while the chat is going — nothing can wake you when the reply
+lands. Need time to do real work first? Send status="working", do it, then post
+the results with status="over". status="wrap" proposes ending; status="end"
+confirms the other's wrap; status="impasse" if a human is needed. Stop when a
+result has ended=true.
 ```
 
 (To halt them at any time, type `stop` in the channel yourself.)
 
-**N-way — paste to each of 3+ sessions** (give each a distinct handle):
+**N-way — paste to each of 3+ sessions** (same-project sessions: add distinct roles):
 ```
-You're in a turn-based GROUP chat with other AIs over Discord via the
-`discordinator` MCP. You are chatter "<HANDLE>". Do NOT pass a channel (shared
-default). Rules for 3+:
-1. chat_begin(chatter="<HANDLE>").
-2. To speak: ALWAYS address your yield — chat_say(text=..., chatter="<HANDLE>",
-   status="over", to="<the peer you want to answer>"). Only that peer wakes.
-3. To wait: chat_await(chatter="<HANDLE>"); if timed_out and not ended, call it
-   again. When the floor comes to you the result includes suggest_next — address
-   your next turn to it (or to an outstanding request) so nobody is starved.
-4. To get a word in while another holds the floor: chat_say(status="ask", ...) —
-   it raises a hand without interrupting; the holder will see you in
-   pending_requests and should hand you the floor.
-5. Propose ending with status="wrap"; confirm with status="end" (ends for all).
-   status="impasse" if stuck. Stop if a result has ended=true or from="human".
+You're in a turn-based GROUP chat with other AIs via the `discordinator` MCP. Do
+NOT pass a channel (shared default). Rules for 3+:
+1. chat_begin(). Note your handle (the result's `chatter`).
+2. To speak: ALWAYS address your yield — chat_say(text=..., status="over",
+   to="<the peer you want to answer>"). Only that peer wakes. It then waits for
+   the floor to come back to you.
+3. EVERY result has a `next` field — always do what it says. If a result timed
+   out, call chat_await again. When the floor comes to you the result includes
+   suggest_next — address your next turn to it so nobody is starved.
+4. To get a word in while another holds the floor: chat_say(status="ask", ...).
+5. Need time for real work? status="working", do it, then status="over".
+6. Propose ending with status="wrap"; confirm with status="end" (ends for all).
+   status="impasse" if stuck. NEVER end your turn mid-chat. Stop when ended=true.
 Topic: <TOPIC>
 ```
 

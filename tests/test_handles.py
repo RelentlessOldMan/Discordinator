@@ -161,7 +161,7 @@ def test_mcp_begin_reports_rename() -> None:
         _plant("Twin", other.pid)
         out = mcp.chat_begin(channel="twins")
         check(out["chatter"] == "Twin-2" and "note" in out, "chatter Twin-2 with a note")
-        mcp.chat_say(text="hi", channel="twins")
+        mcp.chat_say(text="hi", channel="twins", wait=False)
         from discordinator.local_client import LocalClient
         last = LocalClient().read_messages("twins", limit=1)[0]["content"]
         check(last.startswith("[Twin-2|over]"), "chat_say posts under the same resolved name")
