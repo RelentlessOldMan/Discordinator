@@ -135,6 +135,45 @@ def test_silent_participants_age_out() -> None:
     check(st["floor_requests"] == [{"from": "C"}], "fresh hand-raise kept")
 
 
+def test_slow_reply_keeps_other_party() -> None:
+    print("a 2-party reply that took 30+ min still owes the turn to the other side:")
+    c = LocalClient()
+    room = "slow"
+    _say(c, room, "B", "over", "question")
+    _say(c, room, "A", "over", "answer after a long think")
+    _age(c, room, [35, 0])
+    st = chat.compute_state(c, room)
+    check(st["participants"] == ["B", "A"], f"B kept despite 35m: {st['participants']}")
+    check(st["floor"] == "B", "floor goes to B (regression: was None)")
+
+
+def test_unparseable_timestamps_tolerated() -> None:
+    print("records with unusable timestamps never break state or age anyone out:")
+    c = LocalClient()
+    room = "badts"
+    _say(c, room, "A", "over", "one")
+    _say(c, room, "B", "over", "two")
+    path = c._room_path(room)
+    recs = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x]
+    for r in recs:
+        r["timestamp"] = "garbage"
+    path.write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+    st = chat.compute_state(c, room)
+    check(st["participants"] == ["A", "B"] and st["floor"] == "A",
+          "no timestamps -> nobody aged out, floor still derived")
+
+
+def test_from_whom_case_insensitive() -> None:
+    print("from_whom matches the sender regardless of case:")
+    c = LocalClient()
+    room = "fromwhom"
+    _say(c, room, "Zed", "over", "start")
+    chat.reset(room, "me", c.read_messages(room, limit=1)[0]["id"], 20)
+    _say(c, room, "Peer", "over", "for you")
+    res = chat.await_turn(c, room, "me", timeout=1, poll=0.05, nudge_after=0, from_whom="PEER")
+    check(res["from"] == "Peer" and res["your_turn"], "from_whom='PEER' woke on Peer's turn")
+
+
 def test_configured_handle() -> None:
     print("chatter defaults to the project's fixed DISCORDINATOR_CHAT_HANDLE:")
     room = "handled"
@@ -150,8 +189,8 @@ def test_configured_handle() -> None:
         mcp.chat_say(text="hello", status="over", channel=room)
         last = LocalClient().read_messages(room, limit=1)[0]["content"]
         check(last.startswith("[CodeCarver|over]"), f"chat_say tagged with it: {last[:30]}")
-        out = mcp.chat_begin(chatter="Carver2", channel=room)
-        check(out["chatter"] == "Carver2", "an explicit chatter still overrides")
+        out = mcp.chat_begin(chatter="ui", channel=room)
+        check(out["chatter"] == "CodeCarver/ui", "an explicit chatter becomes a role suffix")
         st = mcp.chat_status(channel=room)
         check("your_turn" in st, "chat_status computes your_turn from the configured handle")
         res = mcp.chat_await(channel=room, timeout=0.2, poll=0.05, nudge_after=0)
@@ -176,6 +215,9 @@ def main() -> int:
     test_scoped_to_current_chat()
     test_human_stop_is_a_boundary()
     test_silent_participants_age_out()
+    test_slow_reply_keeps_other_party()
+    test_unparseable_timestamps_tolerated()
+    test_from_whom_case_insensitive()
     test_configured_handle()
     test_footer_label()
     print(f"\nALL {_passed} CHAT-IDENTITY CHECKS PASSED")

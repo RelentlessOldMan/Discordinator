@@ -148,6 +148,45 @@ def test_attachments_removed_with_message() -> None:
     check(keep_dir.exists(), "kept message's attachment dir untouched")
 
 
+def test_bad_head_record_falls_back() -> None:
+    print("an undated/damaged FIRST record doesn't switch retention off:")
+    c = LocalClient(label="r", retention_days=7)
+    _backdate(c, "badhead", [1, 30, 2])  # head is fresh but we'll break it
+    path = c._room_path("badhead")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    head = json.loads(lines[0])
+    head["timestamp"] = "not a date"
+    lines[0] = json.dumps(head)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    c.post("badhead", "fresh")
+    check(_contents(c, "badhead") == ["msg aged 1d", "msg aged 2d", "fresh"],
+          "30d record pruned via full-scan fallback; undated head kept")
+    path.write_text("{not json\n", encoding="utf-8")
+    c.post("badhead", "after damage")
+    check(_contents(c, "badhead") == ["after damage"], "damaged head line: no crash, write proceeds")
+
+
+def test_prune_io_failure_is_best_effort() -> None:
+    print("an I/O failure while rewriting leaves the room intact (retry next write):")
+    import discordinator.local_client as lc
+    c = LocalClient(label="r", retention_days=7)
+    _backdate(c, "iofail", [30, 1])
+    real_replace = lc.os.replace
+
+    def boom(*a, **k):
+        raise PermissionError("file in use")
+    lc.os.replace = boom
+    try:
+        c.post("iofail", "fresh")
+    finally:
+        lc.os.replace = real_replace
+    check(_contents(c, "iofail") == ["msg aged 30d", "msg aged 1d", "fresh"],
+          "nothing lost; append still happened")
+    check(not Path(str(c._room_path("iofail")) + ".tmp").exists(), "temp file cleaned up")
+    c.post("iofail", "later")
+    check(_contents(c, "iofail") == ["msg aged 1d", "fresh", "later"], "next write prunes")
+
+
 def test_factory_passes_config() -> None:
     print("make_client hands the configured retention to LocalClient:")
     os.environ["DISCORDINATOR_LOCAL_RETENTION_DAYS"] = "4"
@@ -167,6 +206,8 @@ def main() -> int:
     test_zero_keeps_forever()
     test_unparseable_timestamp_kept()
     test_attachments_removed_with_message()
+    test_bad_head_record_falls_back()
+    test_prune_io_failure_is_best_effort()
     test_factory_passes_config()
     print(f"\nALL {_passed} LOCAL-RETENTION CHECKS PASSED")
     return 0
