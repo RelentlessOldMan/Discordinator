@@ -278,12 +278,20 @@ def _post_nudge(client: DiscordClient, channel_id: str, me: str, waited_s: float
         others = [p for p in participants if not same_handle(p, me)]
         mins = max(1, int(waited_s // 60))
         requests = [r["from"] for r in st.get("floor_requests", [])]
+        stalled_say = [x for x in st.get("progress", [])
+                       if x["status"] == "say" and not same_handle(x["from"], me)]
 
         if any(same_handle(r, me) for r in requests) and floor and not same_handle(floor, me):
             # I raised a hand and I'm not the one holding the floor — starvation.
             msg = (f"{NUDGE_MARK} [{me}] raised a hand ~{mins}m ago and is waiting to "
                    f"speak. [{floor}] holds the floor — please yield to [{me}] "
                    f"(chat_say(status=\"over\", to=\"{me}\")) or a human can prompt them.")
+        elif stalled_say:
+            x = stalled_say[-1]
+            msg = (f"{NUDGE_MARK} [{x['from']}] sent status 'say' (more coming) but never "
+                   f"finished the turn; [{me}] has been waiting ~{mins}m. "
+                   f"[{x['from']}]: send chat_say(..., status=\"over\") to hand over. "
+                   f"A human watching can poke that session.")
         else:
             who = floor or (", ".join(others) if others else "the other side")
             msg = (f"{NUDGE_MARK} [{me}] has been waiting ~{mins}m for the next turn. "
@@ -345,8 +353,31 @@ def await_turn(
     # Anything newer than my cursor (a human, a plain reply) wins: let the
     # normal loop deliver it.
     cursor0 = get_cursor(channel_id, me)
-    fresh = bool(cursor0) and bool(client.read_messages(channel_id, limit=1, after=cursor0))
+    fresh = bool(cursor0) and any(
+        _from_someone_else(simplify_message(m), me)
+        for m in client.read_messages(channel_id, limit=50, after=cursor0))
     st0 = {} if fresh else compute_state(client, channel_id, me)
+    # My own turn isn't finished (I sent `say`/`working` and never yielded)?
+    # Then everyone is waiting on ME - waiting here too would deadlock the chat.
+    mine = [x for x in st0.get("progress", []) if same_handle(x["from"], me)]
+    if mine:
+        x = mine[-1]
+        result = _result(me, channel_id, sender=None, status=None, text="",
+                         messages=[], ended=False, stop_reason=None, your_turn=True)
+        result["unfinished_turn"] = True
+        if x["status"] == "working":
+            result["note"] = (
+                f"You said you're working on something (\"{x['text'][:120]}\") and still "
+                "hold the floor - nobody will reply until you finish. Do the work, then "
+                "post the results with chat_say(..., status='over').")
+        else:
+            result["note"] = (
+                f"Your turn isn't finished: your last message (\"{x['text'][:120]}\") was "
+                "status='say', which means 'more coming' and keeps the floor - the others "
+                "are waiting for YOU, so waiting here would deadlock the chat. Send "
+                "chat_say(<message>, status='over') to hand over.")
+        return _finish(channel_id, me, result)
+
     owed = st0.get("pending_turn")
     if (st0.get("your_turn") and owed and cursor0
             and int(owed["id"]) <= int(cursor0)
@@ -683,6 +714,15 @@ def _recently_working(st: dict[str, Any], me: str) -> bool:
     return False
 
 
+def _from_someone_else(m: dict[str, Any], me: str) -> bool:
+    """A message worth delivering to ``me``: not my own chat message and not a
+    system waiting-reminder."""
+    if (m.get("content") or "").lstrip().startswith(NUDGE_MARK):
+        return False
+    p = parse(m.get("content") or "")
+    return not (p and same_handle(p["participant"], me))
+
+
 def _working_note(st: dict[str, Any], me: str) -> Optional[str]:
     """A human-readable line if someone else is mid-turn (said `working`/`say`
     and hasn't yielded yet), e.g. while they go off to do a 20-minute task."""
@@ -705,6 +745,9 @@ def next_step(result: dict[str, Any]) -> str:
     never stalls because a session ended its turn at the wrong moment."""
     if result.get("ended"):
         return "The chat has ended. You may stop."
+    if result.get("unfinished_turn"):
+        return ("Finish YOUR turn: chat_say(<message>, status='over'). The others are "
+                "waiting on you; don't call chat_await until you have.")
     if result.get("from") == "human":
         return ("A human spoke in the chat. Do what they ask; if the chat should "
                 "continue, reply with chat_say.")

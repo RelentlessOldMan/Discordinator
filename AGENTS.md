@@ -223,7 +223,7 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   resolves to a DISTINCT handle (project handle, `project/role`, or e.g. "A"/"B"
   when no project handle is set). The result's `chatter` is your handle. Seeds read position to now, resets turn count.
 - `chat_say(text, chatter?, status="over", channel?, to?, wait=True, timeout=120)` —
-  send with an explicit status: `say` (more coming), `working` ("hold on, I'm going
+  send with an explicit status — **almost always `over`** (the default). `say` (only to split one long turn; never end on it — if you call `chat_await` with a turn left on `say`, it refuses and tells you to send `over`), `working` ("hold on, I'm going
   to go do something" — keeps the floor, tells the others you're busy; post the
   results with `over` when done), `ask` (raise a hand — request the floor without
   taking the turn), `over` (your turn), `wrap` (propose ending — agree?), `end`
