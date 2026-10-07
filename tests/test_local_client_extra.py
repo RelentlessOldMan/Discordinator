@@ -95,6 +95,26 @@ def test_append_lock_stale_steal() -> None:
     check(not lockpath.exists(), "stealing then releasing removes the lock file")
 
 
+def test_append_lock_steal_is_safe() -> None:
+    print("_AppendLock: a crashed holder's lock is stolen before anyone writes unlocked:")
+    lk = _AppendLock(_TMP / "steal.jsonl")
+    check(lk.stale < lk.timeout, f"default stale ({lk.stale}s) < timeout ({lk.timeout}s)")
+    lockpath = Path(str(_TMP / "steal.jsonl") + ".lock")
+    # Another waiter replaced the stale lock with a fresh one between our age
+    # check and our steal: the fresh lock must be put back, not deleted.
+    lockpath.write_text("", encoding="utf-8")
+    lk._steal()
+    check(lockpath.exists(), "a fresh lock grabbed by mistake is put back")
+    old = time.time() - 120
+    os.utime(lockpath, (old, old))
+    lk._steal()
+    check(not lockpath.exists(), "a stale lock is removed")
+    lk._steal()
+    check(True, "stealing a lock that's already gone is a no-op")
+    leftovers = [p for p in lockpath.parent.iterdir() if p.name.startswith(lockpath.name + ".")]
+    check(not leftovers, "no renamed-aside files left behind")
+
+
 def test_append_lock_timeout_proceeds() -> None:
     print("_AppendLock proceeds unlocked rather than hanging forever:")
     c = LocalClient(label="lock2")
@@ -135,6 +155,7 @@ def main() -> int:
     test_torn_trailing_line_tolerated()
     test_delete_missing_room_noop()
     test_append_lock_stale_steal()
+    test_append_lock_steal_is_safe()
     test_append_lock_timeout_proceeds()
     test_surface_parity()
     print(f"\nALL {_passed} LOCAL-CLIENT EDGE CHECKS PASSED")

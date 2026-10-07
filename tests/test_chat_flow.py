@@ -250,6 +250,77 @@ def test_non_holder_working_3way() -> None:
     check([x["from"] for x in st["progress"]] == ["A"], "the holder's `working` does count")
 
 
+def test_ask_doesnt_hide_unfinished_turn() -> None:
+    print("3-way: a raised hand doesn't hide that the floor holder owes the turn:")
+    r = "trio-ask"
+    for h in ("A", "B", "C"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="B, go", chatter="A", channel=r, to="B", wait=False)
+    got = mcp.chat_await(chatter="B", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    check(got["your_turn"], "B has the floor")
+    mcp.chat_say(text="hold on, running tests", chatter="B", channel=r, status="working", wait=False)
+    mcp.chat_say(text="me next please", chatter="C", channel=r, status="ask", wait=False)
+    b = mcp.chat_await(chatter="B", channel=r, timeout=0.3, poll=0.02, nudge_after=0)
+    check(b.get("unfinished_turn") and not b.get("timed_out"),
+          "B is told to finish its turn, not to keep waiting on itself")
+
+
+LONG = "PART1 " + "x" * 2100 + " PART2-END"
+
+
+def test_long_turn_recovered_whole() -> None:
+    print("a turn split into pieces is recovered whole (chat_begin, already_received):")
+    r = "long-recover"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text=LONG, chatter="A", channel=r, wait=False)
+    mcp.chat_begin(chatter="B", channel=r)  # B (re)joins: the turn is owed
+    got = mcp.chat_await(chatter="B", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    check(got["from"] == "A" and "PART1" in got["text"] and "PART2-END" in got["text"],
+          "chat_begin recovery delivers every piece")
+    again = mcp.chat_await(chatter="B", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    check(again.get("already_received") and "PART1" in again["text"]
+          and "PART2-END" in again["text"], "already_received hands back the whole turn")
+    st = chat.compute_state(LocalClient("B"), r, "B")
+    check(st["_pending_text"].startswith("PART1"), "state's pending text is the whole turn")
+
+
+def test_timeout_mid_turn_keeps_first_half() -> None:
+    print("a timeout between someone's say and over doesn't lose the first half:")
+    r = "half"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="FIRST-HALF", chatter="A", channel=r, status="say", wait=False)
+    t = mcp.chat_await(chatter="B", channel=r, timeout=0.2, poll=0.02, nudge_after=0)
+    check(t["timed_out"], "B times out mid-turn")
+    mcp.chat_say(text="SECOND-HALF", chatter="A", channel=r, wait=False)
+    got = mcp.chat_await(chatter="B", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    check(got["text"] == "FIRST-HALF\nSECOND-HALF", f"whole turn arrives: {got['text']!r}")
+
+
+def test_unknown_to_warns_now() -> None:
+    print("`to` naming nobody known warns at once instead of silently waiting:")
+    r = "typo"
+    for h in ("Alpha", "Beta"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="hi", chatter="Beta", channel=r, wait=False)
+    t0 = time.monotonic()
+    out = mcp.chat_say(text="hello", chatter="Alpha", channel=r, to="Bet")
+    check(time.monotonic() - t0 < 5 and "reply" not in out, "doesn't wait for a reply")
+    check("did you mean 'Beta'" in out["note"] and "Check `to`" in out["next"],
+          "suggests the close match and says what to do")
+    ok = mcp.chat_say(text="hello", chatter="Alpha", channel=r, to="Beta", wait=False)
+    check("note" not in ok, "a known peer gets no warning")
+    live = mcp.chat_say(text="x", chatter="Alpha", channel=r, to="Gamma", wait=False)
+    check("note" in live, "an unknown handle warns")
+    from discordinator import handles
+    handles.resolve("Gamma", {})  # Gamma is now a live session on this machine
+    quiet = mcp.chat_say(text="x", chatter="Alpha", channel=r, to="Gamma", wait=False)
+    check("note" not in quiet, "a live session that hasn't posted yet is fine")
+    bc = mcp.chat_say(text="x", chatter="Alpha", channel=r, to="all", wait=False)
+    check("note" not in bc or "Nobody called" not in bc["note"], "a broadcast is never 'unknown'")
+
+
 def main() -> int:
     test_say_waits_for_reply()
     test_say_wait_timeout_says_keep_waiting()
@@ -263,6 +334,10 @@ def main() -> int:
     test_nudge_names_stalled_say()
     test_mcp_await_has_next()
     test_non_holder_working_3way()
+    test_ask_doesnt_hide_unfinished_turn()
+    test_long_turn_recovered_whole()
+    test_timeout_mid_turn_keeps_first_half()
+    test_unknown_to_warns_now()
     print(f"\nALL {_passed} CHAT-FLOW CHECKS PASSED")
     return 0
 

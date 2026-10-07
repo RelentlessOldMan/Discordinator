@@ -154,7 +154,10 @@ def test_allows_when_ended() -> None:
     p3 = transcript(user("go"), call("chat_say", {"status": "end"}, {"ended": True}))
     check(run(p3) == "", "own end -> allowed")
     p4 = transcript(user("go"), call("chat_say", {"status": "impasse"}, "Error executing tool"))
-    check(run(p4) == "", "own impasse -> allowed even if result unreadable")
+    out = run(p4)
+    check(out and "returned an error" in json.loads(out)["reason"],
+          "own impasse that FAILED -> blocked (the others never saw it)")
+    check(run(p4, stop_hook_active=True) == "", "...once")
 
 
 def test_only_current_turn_counts() -> None:
@@ -208,6 +211,8 @@ def test_never_breaks() -> None:
     guard.config._atomic_write = fail
     try:
         check(json.loads(run(p))["decision"] == "block", "unwritable state file -> still works")
+        check(run(p, stop_hook_active=True, session_id="no-record") == "",
+              "...but can't record a reminder on a repeat stop -> allow (never loop)")
     finally:
         guard.config._atomic_write = orig
     bad = _TMP / "torn.jsonl"

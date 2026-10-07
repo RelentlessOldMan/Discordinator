@@ -148,10 +148,29 @@ def test_failed_send_keeps_turn_3way() -> None:
         mcp.chat_say(text="x", chatter="A", channel=room, to="C")
         raise AssertionError("a send failure should raise")
     except ChatSendError as e:
-        check("disk full" in str(e) and "did NOT go through" in str(e),
-              "a failure mid-send says the message did not go through")
+        check("disk full" in str(e) and "Nothing was posted" in str(e),
+              "a failure before any piece went out says nothing was posted")
     finally:
         mcp.chat.send_chat = orig
+
+    calls = {"n": 0}
+    orig_post = LocalClient.post
+    def flaky(self, channel_id, content):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("network blip")
+        return orig_post(self, channel_id, content)
+    LocalClient.post = flaky
+    try:
+        long = "START " + "y" * 2500 + " TAIL-END"
+        mcp.chat_say(text=long, chatter="A", channel=room, to="C")
+        raise AssertionError("the 2nd piece should fail")
+    except ChatSendError as e:
+        msg = str(e)
+        check("first 1 of 2 pieces" in msg and "Don't resend those" in msg
+              and "status='over'" in msg, "a partial send says how far it got and what to resend")
+    finally:
+        LocalClient.post = orig_post
 
 
 def test_download_success() -> None:

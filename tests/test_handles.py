@@ -130,6 +130,56 @@ def test_dead_or_expired_claims_reclaimed() -> None:
     check(reg["proj"]["pid"] == os.getpid(), "registry now records this process")
 
 
+def test_live_session_keeps_name_however_idle() -> None:
+    print("a live session keeps its name past the old 24h lease; a recycled pid doesn't:")
+    _fresh()
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        started = handles.process_started(other.pid)
+        check(started is not None and started == handles.process_started(other.pid),
+              "process start time is readable and stable")
+        _plant("Idle", other.pid, age=handles.CLAIM_TTL + 3600)
+        reg = json.loads(handles.registry_path().read_text(encoding="utf-8"))
+        reg["idle"]["started"] = started
+        handles.registry_path().write_text(json.dumps(reg), encoding="utf-8")
+        check(handles.resolve(None, {"chat_handle": "Idle"})[0] == "Idle-2",
+              "same live process, idle for 25h -> still holds the name")
+        check("Idle" in handles.live_handles(), "listed as a live handle")
+        _fresh()
+        _plant("Reused", other.pid)
+        reg = json.loads(handles.registry_path().read_text(encoding="utf-8"))
+        reg["reused"]["started"] = started + 1  # a different process had this pid
+        handles.registry_path().write_text(json.dumps(reg), encoding="utf-8")
+        check(handles.resolve(None, {"chat_handle": "Reused"})[0] == "Reused",
+              "pid alive but a different process -> name reclaimed")
+    finally:
+        other.kill()
+        other.wait()
+    me = json.loads(handles.registry_path().read_text(encoding="utf-8"))["reused"]
+    check(me.get("started") == handles.process_started(os.getpid()),
+          "own claims record this process's start time")
+    check(handles.process_started(-1) is None and handles.process_started(_dead_pid()) is None,
+          "no start time for bad or dead pids")
+
+
+def test_rename_note_on_every_call() -> None:
+    print("a renamed handle is reported on chat_say and chat_await too:")
+    _fresh()
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Echo"
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _plant("Echo", other.pid)
+        mcp.chat_begin(channel="echo")
+        said = mcp.chat_say(text="hi", channel="echo", wait=False)
+        check("Echo-2" in said.get("handle_note", ""), "chat_say carries handle_note")
+        waited = mcp.chat_await(channel="echo", timeout=0.1, poll=0.02, nudge_after=0)
+        check("Echo-2" in waited.get("handle_note", ""), "chat_await carries handle_note")
+    finally:
+        other.kill()
+        other.wait()
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+
+
 def test_suffix_respects_length() -> None:
     print("the -N suffix never pushes a handle past 32 chars:")
     _fresh()
@@ -178,6 +228,8 @@ def main() -> int:
     test_pid_alive()
     test_collision_gets_suffix()
     test_dead_or_expired_claims_reclaimed()
+    test_live_session_keeps_name_however_idle()
+    test_rename_note_on_every_call()
     test_suffix_respects_length()
     test_release_all()
     test_mcp_begin_reports_rename()

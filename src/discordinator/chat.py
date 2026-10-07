@@ -218,10 +218,16 @@ def send_chat(client: DiscordClient, channel_id: str, me: str, status: str, text
         last = i == len(pieces) - 1
         st = status if last else "say"
         content = f"{header(me, st, to)}{piece}"
-        if files and last:
-            sent.extend(client.send_files(channel_id, content, list(files), label=None))
-        else:
-            sent.append(client.post(channel_id, content))
+        try:
+            if files and last:
+                sent.extend(client.send_files(channel_id, content, list(files), label=None))
+            else:
+                sent.append(client.post(channel_id, content))
+        except Exception as e:
+            # Tell the caller how far it got, so a retry doesn't repeat pieces.
+            e.chat_pieces_sent, e.chat_pieces_total = i, len(pieces)  # type: ignore[attr-defined]
+            e.chat_rest = "".join(pieces[i:])  # type: ignore[attr-defined]
+            raise
     return sent
 
 
@@ -354,7 +360,7 @@ def await_turn(
     # normal loop deliver it.
     cursor0 = get_cursor(channel_id, me)
     fresh = bool(cursor0) and any(
-        _from_someone_else(simplify_message(m), me)
+        _would_wake(simplify_message(m), me, from_whom)
         for m in client.read_messages(channel_id, limit=50, after=cursor0))
     st0 = {} if fresh else compute_state(client, channel_id, me)
     # My own turn isn't finished (I sent `say`/`working` and never yielded)?
@@ -499,6 +505,11 @@ def await_turn(
                 _set_wait(channel_id, me, since, True)
                 nudged = True
             leftover = [e for buf in pending_by_sender.values() for e in buf]
+            if leftover:
+                # A turn is half in (say/working pieces, no final message yet).
+                # Re-read it next call so the finished turn arrives whole.
+                first = min(int(e["id"]) for e in leftover)
+                set_cursor(channel_id, me, str(first - 1))
             result = _result(me, channel_id, sender=None, status=None, text="",
                              messages=_lean(leftover), ended=False, stop_reason=None,
                              your_turn=False, timed_out=True)
@@ -563,6 +574,7 @@ def compute_state(
 
     real = YIELD_STATUSES + TERMINAL_STATUSES  # statuses that complete a turn
     participants: list[str] = []
+    posters: list[str] = []  # who has actually posted in this chat
     last_seen: dict[str, Optional[datetime]] = {}  # participant -> last post/address time
     latest_ts: Optional[datetime] = None
     last_turn: Optional[dict[str, Any]] = None
@@ -571,7 +583,10 @@ def compute_state(
     last_significant: dict[str, dict[str, Any]] = {}  # ignoring pure `say`
     turn_authors: list[str] = []  # author of each completed turn, in order
     progress: dict[str, dict[str, Any]] = {}  # who -> latest say/working since their last turn
+    run_start: dict[str, int] = {}         # who -> index of their first say/working piece
+    run_bodies: dict[str, list[str]] = {}  # who -> bodies of those pieces
     last_text = ""
+    last_turn_start = -1  # index of the first piece of the last completed turn
     for i in range(start, len(msgs)):
         m, p = msgs[i], parsed_list[i]
         if not p:
@@ -580,6 +595,8 @@ def compute_state(
         if ts is not None:
             latest_ts = ts if latest_ts is None else max(latest_ts, ts)
         who = canon(p["participant"])
+        if who not in posters:
+            posters.append(who)
         to = p["to"] if _is_broadcast(p["to"]) else canon(p["to"])
         names = [who] + ([to] if to and not _is_broadcast(to) else [])
         # An addressed peer is a known participant even before it has posted.
@@ -590,8 +607,14 @@ def compute_state(
         if p["status"] in PROGRESS_STATUSES:
             progress[who] = {"from": who, "status": p["status"],
                              "text": (p["body"] or "")[:300], "ts": m["timestamp"]}
+            run_start.setdefault(who, i)
+            run_bodies.setdefault(who, []).append(p["body"] or "")
             continue
         progress.pop(who, None)
+        # A long turn arrives as say/working pieces then its final message:
+        # the turn starts at the first piece and its text is all of them.
+        first = run_start.pop(who, i)
+        bodies = run_bodies.pop(who, []) + [p["body"] or ""]
         last_significant[who] = {"status": p["status"], "i": i}
         if p["status"] in real:
             turn_authors.append(who)
@@ -599,7 +622,8 @@ def compute_state(
             last_turn = {"from": who, "to": to, "status": p["status"],
                          "id": m["id"], "ts": m["timestamp"]}
             last_turn_i = i
-            last_text = p["body"] or ""
+            last_turn_start = first
+            last_text = "\n".join(bodies)
 
     # The querying caller is a participant too (it may not have posted yet).
     me_norm = canon(sanitize_handle(me)) if me is not None else None
@@ -615,9 +639,10 @@ def compute_state(
     pending_predecessor = None
     if last_turn and last_turn["status"] in YIELD_STATUSES:
         pending = last_turn
+        # Just before the turn's FIRST piece, so a re-read gets all of it.
         pending_predecessor = (
-            msgs[last_turn_i - 1]["id"] if last_turn_i > 0
-            else str(int(last_turn["id"]) - 1)
+            msgs[last_turn_start - 1]["id"] if last_turn_start > 0
+            else str(int(msgs[last_turn_start]["id"]) - 1)
         )
 
     # Drop participants who have gone quiet: not seen within STALE_AFTER of the
@@ -696,6 +721,7 @@ def compute_state(
                      if k in participants and (floor is None or k == floor)],
         "_pending_predecessor": pending_predecessor,
         "_pending_text": last_text if pending else None,
+        "_posters": posters,
     }
     if me_norm is not None:
         state["your_turn"] = bool(
@@ -717,13 +743,23 @@ def _recently_working(st: dict[str, Any], me: str) -> bool:
     return False
 
 
-def _from_someone_else(m: dict[str, Any], me: str) -> bool:
-    """A message worth delivering to ``me``: not my own chat message and not a
-    system waiting-reminder."""
-    if (m.get("content") or "").lstrip().startswith(NUDGE_MARK):
+def _would_wake(m: dict[str, Any], me: str, from_whom: Optional[str] = None) -> bool:
+    """Would the await loop deliver this message to ``me``? (A human or plain
+    post, an ending, or a yielded turn that targets me - not my own posts, a
+    reminder, or someone's say/working/ask, which wake nobody.)"""
+    content = m.get("content") or ""
+    if content.lstrip().startswith(NUDGE_MARK):
         return False
-    p = parse(m.get("content") or "")
-    return not (p and same_handle(p["participant"], me))
+    p = parse(content)
+    if p is None:
+        return True
+    if same_handle(p["participant"], me) or p["status"] in PROGRESS_STATUSES + ("ask",):
+        return False
+    if p["status"] in TERMINAL_STATUSES:
+        return True
+    if from_whom is not None and not same_handle(p["participant"], from_whom):
+        return False
+    return _targets(p["to"], me)
 
 
 def _working_note(st: dict[str, Any], me: str) -> Optional[str]:

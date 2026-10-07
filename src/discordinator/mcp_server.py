@@ -18,6 +18,7 @@ config file, or by raw numeric channel ids.
 
 from __future__ import annotations
 
+import difflib
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -360,11 +361,12 @@ def whoami() -> dict[str, Any]:
 # ==========================================================================
 
 
-def _chatter(chatter: Optional[str], cfg: dict[str, Any]) -> str:
+def _chatter(chatter: Optional[str], cfg: dict[str, Any]) -> tuple[str, Optional[str]]:
     """This session's handle (see handles.resolve): the project's fixed handle,
     optionally with a role (`CodeCarver/ui`), made unique among live sessions on
-    this machine."""
-    return handles.resolve(chatter, cfg)[0]
+    this machine. Plus a note when it isn't the name the session asked for -
+    returned on every chat result so a rename can't go unnoticed."""
+    return handles.resolve(chatter, cfg)
 
 
 @mcp.tool()
@@ -461,7 +463,9 @@ def chat_say(
     discipline in a 3+ party room — an addressed `over`/`wrap` passes the floor to
     exactly that peer, so only they wake; leaving it unset broadcasts (anyone may
     answer, which can collide). In a 2-party chat just omit it. Special targets
-    all/everyone/* broadcast explicitly.
+    all/everyone/* broadcast explicitly. If `to` names nobody known (nobody by
+    that name has posted, and no live session here has it), it returns at once
+    with a `note` ("did you mean ...?") instead of waiting.
 
     Long text is split across messages, each re-tagged (and re-addressed), so
     multi-part turns stay intact. Returns your turn count and, in a multiparty
@@ -483,7 +487,7 @@ def chat_say(
     """
     cfg = config.load()
     try:
-        me = _chatter(chatter, cfg)
+        me, handle_note = _chatter(chatter, cfg)
         if status not in chat.STATUSES:
             raise ValueError(f"status must be one of {chat.STATUSES}, got {status!r}")
         target = chat.sanitize_handle(to) if to else None
@@ -507,15 +511,25 @@ def chat_say(
             "turn, it still is - the others are waiting on you. Fix this and send "
             "it again with chat_say(...) before calling chat_await.") from e
     with chat_client as client:
+        to_note = _unknown_to_note(client, channel_id, me, target)
         try:
             sent = chat.send_chat(client, channel_id, me, status, text, to=target,
                                   files=file_list)
         except Exception as e:
+            done = getattr(e, "chat_pieces_sent", 0)
+            if done:
+                total = getattr(e, "chat_pieces_total", "?")
+                rest = getattr(e, "chat_rest", "")
+                raise ChatSendError(
+                    f"{e}\n\nOnly the first {done} of {total} pieces of this long "
+                    "message were posted (as status 'say', so the others are still "
+                    "waiting on you). Don't resend those: send just the rest, which "
+                    f"starts: \"{rest[:80]}\", with chat_say(..., status='{status}')."
+                ) from e
             raise ChatSendError(
-                f"{e}\n\nThis message did NOT go through (nothing, or only part of "
-                "it, was posted). If it was your turn, it still is - the others are "
-                "waiting on you. Fix this and send it again with chat_say(...) "
-                "before calling chat_await.") from e
+                f"{e}\n\nNothing was posted, so nobody saw this message. If it was "
+                "your turn, it still is - the others are waiting on you. Fix this and "
+                "send it again with chat_say(...) before calling chat_await.") from e
         # `say`/`ask` don't complete a turn, so they don't count against the cap.
         took_turn = status not in chat.NON_TURN_STATUSES
         turns = chat.bump_turn(channel_id, me) if took_turn else chat.get_meta(channel_id, me)[0]
@@ -531,6 +545,8 @@ def chat_say(
         }
         if shared:
             out["files_shared"] = shared
+        if handle_note:
+            out["handle_note"] = handle_note
         # After yielding in a multiparty room, tell the model who's waiting so it
         # can rotate fairly (address suggest_next next time to avoid starving).
         if status in chat.YIELD_STATUSES:
@@ -544,13 +560,41 @@ def chat_say(
                                    "anyone may answer. Address your next turn "
                                    "(to=...) to avoid collisions and starvation — "
                                    f"suggested: {st.get('suggest_next')}.")
-        if status in chat.YIELD_STATUSES and wait:
+        if to_note:
+            # Probably a typo: waiting would just sit there, so say so now.
+            out["note"] = to_note
+            out["next"] = (f"Check `to`: if '{target}' is right, call chat_await to "
+                           "wait for their reply; if not, re-send to the right handle.")
+        elif status in chat.YIELD_STATUSES and wait:
             reply = chat.await_turn(client, channel_id, me, timeout=timeout)
             out["reply"] = reply
             out["next"] = chat.next_step(reply)
         else:
             out["next"] = _say_next(status)
     return out
+
+
+def _unknown_to_note(client: Client, channel_id: str, me: str,
+                     target: Optional[str]) -> Optional[str]:
+    """A warning when `to` names nobody known: not anyone who has posted in this
+    chat, nor a live session on this machine. (Could still be right - a peer on
+    another machine that hasn't spoken yet - so warn, don't refuse.)"""
+    if not target or chat._is_broadcast(target):
+        return None
+    st = chat.compute_state(client, channel_id, me)
+    known = [h for h in st.get("_posters", []) + handles.live_handles()
+             if not chat.same_handle(h, me)]
+    if any(chat.same_handle(target, h) for h in known):
+        return None
+    names = sorted({chat.handle_key(h): h for h in known}.values())
+    close = difflib.get_close_matches(target.casefold(),
+                                      [h.casefold() for h in names], n=1, cutoff=0.6)
+    hint = next((h for h in names if close and h.casefold() == close[0]), None)
+    return (f"Nobody called '{target}' has posted in this chat and no live session "
+            f"on this machine has that name"
+            + (f" - did you mean '{hint}'?" if hint else ".")
+            + (f" Known: {', '.join(names)}." if names else "")
+            + " Your message was sent, but only they will be woken by it.")
 
 
 def _say_next(status: str) -> str:
@@ -627,12 +671,14 @@ def chat_await(
     looks like a stop command ("stop"/"halt"/"[[STOP]]") the chat ends.
     """
     cfg = config.load()
-    me = _chatter(chatter, cfg)
+    me, handle_note = _chatter(chatter, cfg)
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client("chat") as client:
         result = chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll,
                                  nudge_after=nudge_after, from_whom=from_whom)
     result["next"] = chat.next_step(result)
+    if handle_note:
+        result["handle_note"] = handle_note
     return result
 
 

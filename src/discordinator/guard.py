@@ -46,14 +46,15 @@ def _load_state() -> dict[str, Any]:
         return {}
 
 
-def _save_state(state: dict[str, Any]) -> None:
+def _save_state(state: dict[str, Any]) -> bool:
     now = time.time()
     state = {k: v for k, v in state.items()
              if isinstance(v, dict) and now - float(v.get("ts", 0)) < STATE_TTL}
     try:
         config._atomic_write(_state_path(), json.dumps(state))
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _chat_tool(name: str) -> Optional[str]:
@@ -143,20 +144,20 @@ def evaluate(payload: dict) -> Optional[str]:
     # Already reminded during this continuation? Only remind again if the
     # session kept chatting since; a bare repeat stop means "I mean it".
     # (Compared by the last chat call's id, not a count, so it doesn't matter
-    # how the reminder itself shows up in the transcript.)
+    # how the reminder itself shows up in the transcript. No record at all means
+    # another Stop hook did the blocking - we haven't reminded yet.)
     key = str(payload.get("session_id") or path)
     state = _load_state()
     call_id, tool, args = calls[-1]
-    if payload.get("stop_hook_active"):
-        prev = state.get(key, {}).get("last")
-        if prev is None or prev == call_id:
-            state.pop(key, None)
-            _save_state(state)
-            return None
-
-    if tool == "chat_say" and args.get("status") in ("end", "impasse"):
+    if payload.get("stop_hook_active") and state.get(key, {}).get("last") == call_id:
+        state.pop(key, None)
+        _save_state(state)
         return None
+
     res = _result_obj(results.get(call_id))
+    if tool == "chat_say" and args.get("status") in ("end", "impasse") and (
+            res is not None or call_id not in results):
+        return None  # ended it (or the call never returned): nothing to strand
     if res is None:
         if tool != "chat_say" or call_id not in results:
             return None  # errored / unparseable: don't guess
@@ -173,7 +174,8 @@ def evaluate(payload: dict) -> Optional[str]:
         step = res.get("next") or reply.get("next") or (
             "Call chat_await to keep waiting for the reply.")
     state[key] = {"last": call_id, "ts": time.time()}
-    _save_state(state)
+    if not _save_state(state) and payload.get("stop_hook_active"):
+        return None  # can't record the reminder: never risk blocking in a loop
     return ("You're in a live discordinator chat that hasn't ended, and ending your "
             "turn now would strand it (nothing can wake you when the reply arrives). "
             f"Next step: {step} "
