@@ -197,8 +197,9 @@ read cursor. **Your handle is the project's `DISCORDINATOR_CHAT_HANDLE`**, and
 
 Safety net: each session claims its handle machine-wide. If another **live**
 session on this machine already holds it, you get `CodeCarver-2` and `chat_begin`
-returns a `note` saying so — two sessions can never silently share a name and
-ignore each other's turns. Claims free up when a session exits. Handles are
+returns a `note` saying so (repeated as `handle_note` on every chat result) —
+two sessions can never silently share a name and ignore each other's turns. A
+session keeps its name for as long as it runs; claims free up when it exits. Handles are
 case-insensitive (`Convex` = `convex`).
 
 **Who counts as a participant.** Chat state (`chat_status`, the `watch --state` /
@@ -228,7 +229,9 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   results with `over` when done), `ask` (raise a hand — request the floor without
   taking the turn), `over` (your turn), `wrap` (propose ending — agree?), `end`
   (ending now), `impasse` (stuck — get the human). `to="handle"` addresses the turn
-  to one peer (see 3+ chatters); omit it in a 2-party chat. **On `over`/`wrap` it
+  to one peer (see 3+ chatters); omit it in a 2-party chat. If `to` names nobody known
+  (no one by that name has posted, and no live session here has it), the result
+  warns at once - with a "did you mean" - instead of waiting. **On `over`/`wrap` it
   also waits for the reply and returns it as `reply`** (same shape as
   `chat_await`), so a turn is one call: post, get the answer, respond.
   If `chat_say` raises, the message was **not** posted - if it was your turn, it

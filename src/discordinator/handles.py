@@ -11,8 +11,9 @@ machine-wide registry (``~/.discordinator/handles.json``). If another live
 process on this machine already holds it, this one gets ``<handle>-2`` (then
 ``-3``, ...) instead — so two sessions can never silently share a name and
 ignore each other's turns. Claims are released at exit, and a claim whose
-process is gone (or that hasn't been refreshed for a day) is ignored, so a
-restarted session gets its name back.
+process is gone is ignored, so a restarted session gets its name back. Each
+claim records its process's start time, so a recycled pid can't hold a dead
+session's name, and a live session keeps its name however long it's idle.
 
 The registry is per machine. Across machines, give each machine's project its
 own handle in that machine's .mcp.json (e.g. ``CodeCarverWork``).
@@ -29,8 +30,9 @@ from typing import Any, Optional
 from . import chat, config
 from .local_client import _AppendLock
 
-# A claim not refreshed for this long is ignored even if its pid looks alive —
-# guards against a recycled pid holding a name forever.
+# Fallback only, for a claim whose process start time can't be compared (an
+# old registry entry, or a platform without it): ignored after this long, so
+# a recycled pid can't hold a name forever.
 CLAIM_TTL = 24 * 3600.0
 
 # This process's resolved handles: requested key -> handle actually in use.
@@ -75,6 +77,38 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def process_started(pid: int) -> Optional[int]:
+    """An opaque start-time stamp for ``pid`` (same process -> same value, a
+    recycled pid -> a different one), or None if it can't be read."""
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
+                ctypes.POINTER(wintypes.FILETIME)] * 4
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return None
+            try:
+                t = [wintypes.FILETIME() for _ in range(4)]
+                if not kernel32.GetProcessTimes(handle, *[ctypes.byref(x) for x in t]):
+                    return None
+                return (t[0].dwHighDateTime << 32) | t[0].dwLowDateTime
+            finally:
+                kernel32.CloseHandle(handle)
+        with open(f"/proc/{pid}/stat", "rb") as fh:  # Linux; field 22 = starttime
+            return int(fh.read().rsplit(b")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
+
+
 def compose(chatter: Optional[str], base: Optional[str]) -> str:
     """The handle a session asks for: ``base/role`` when the project has a fixed
     handle and the session names a role; the bare base when it doesn't; the
@@ -113,11 +147,23 @@ def _held_by_other(entry: Any, me: int, now: float) -> bool:
     if not isinstance(entry, dict):
         return False
     pid = entry.get("pid")
-    if pid == me:
+    if pid == me or not pid_alive(pid):
         return False
-    if now - float(entry.get("ts", 0) or 0) > CLAIM_TTL:
-        return False
-    return pid_alive(pid)
+    started = entry.get("started")
+    current = process_started(pid) if started is not None else None
+    if current is not None:
+        return current == started  # same process: holds it, however long idle
+    return now - float(entry.get("ts", 0) or 0) <= CLAIM_TTL
+
+
+def _my_start() -> Optional[int]:
+    global _MY_START
+    if _MY_START is None:
+        _MY_START = process_started(os.getpid())
+    return _MY_START
+
+
+_MY_START: Optional[int] = None
 
 
 def claim(desired: str) -> str:
@@ -135,7 +181,8 @@ def claim(desired: str) -> str:
         # Prune dead/expired claims while we hold the lock.
         reg = {k: v for k, v in reg.items()
                if isinstance(v, dict) and (v.get("pid") == me or _held_by_other(v, me, now))}
-        reg[chat.handle_key(handle)] = {"handle": handle, "pid": me, "ts": now}
+        reg[chat.handle_key(handle)] = {"handle": handle, "pid": me, "ts": now,
+                                        "started": _my_start()}
         config._atomic_write(path, json.dumps(reg, indent=2, sort_keys=True))
     return handle
 
@@ -154,6 +201,15 @@ def resolve(chatter: Optional[str], cfg: dict[str, Any]) -> tuple[str, Optional[
                 f"machine, so you are '{handle}'. Pass chatter=\"<role>\" to pick a "
                 f"clearer name (e.g. chatter=\"ui\" -> '{desired}/ui').")
     return handle, note
+
+
+def live_handles() -> list[str]:
+    """Handles currently held by live sessions on this machine."""
+    reg = _load(registry_path())
+    me, now = os.getpid(), time.time()
+    return [v["handle"] for v in reg.values()
+            if isinstance(v, dict) and isinstance(v.get("handle"), str)
+            and (v.get("pid") == me or _held_by_other(v, me, now))]
 
 
 def release_all() -> None:

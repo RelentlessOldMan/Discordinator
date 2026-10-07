@@ -81,7 +81,9 @@ class _AppendLock:
     torn trailing line is tolerated by the reader (it skips unparseable lines).
     """
 
-    def __init__(self, target: Path, timeout: float = 10.0, stale: float = 30.0):
+    # stale < timeout: a crashed holder's lock is stolen well before any waiter
+    # gives up and writes unlocked.
+    def __init__(self, target: Path, timeout: float = 15.0, stale: float = 8.0):
         self.lockpath = str(target) + ".lock"
         self.timeout = timeout
         self.stale = stale
@@ -97,7 +99,7 @@ class _AppendLock:
                 try:
                     age = time.time() - os.path.getmtime(self.lockpath)
                     if age > self.stale:
-                        os.remove(self.lockpath)
+                        self._steal()
                         continue
                 except OSError:
                     pass
@@ -105,6 +107,26 @@ class _AppendLock:
                     self.fd = None  # give up waiting; proceed unlocked
                     return self
                 time.sleep(0.02)
+
+    def _steal(self) -> None:
+        """Remove a stale lock. Renamed aside first (atomic: only one waiter can
+        win), then re-checked - if another waiter had just replaced it with a
+        fresh lock, that one is put back instead of deleted."""
+        aside = f"{self.lockpath}.{os.getpid()}.{time.monotonic_ns()}"
+        try:
+            os.rename(self.lockpath, aside)
+        except OSError:
+            return  # someone else got there first
+        try:
+            if time.time() - os.path.getmtime(aside) > self.stale:
+                os.remove(aside)
+            else:
+                os.rename(aside, self.lockpath)
+        except OSError:
+            try:
+                os.remove(aside)
+            except OSError:
+                pass
 
     def __exit__(self, *exc: object) -> None:
         if self.fd is not None:
