@@ -192,7 +192,8 @@ read cursor. **Your handle is the project's `DISCORDINATOR_CHAT_HANDLE`**, and
 - only session of the project in the chat → omit `chatter` → `CodeCarver`
 - two sessions of the same project → each passes its own role, e.g.
   `chatter="ui"` / `chatter="api"` → `CodeCarver/ui`, `CodeCarver/api`
-- pass the same `chatter` on every `chat_*` call of that session
+- pass the same `chatter` on every `chat_*` call of that session (if a call
+  omits it, the session keeps the role it last used)
 - no project handle configured → `chatter` is used as-is (required)
 
 Safety net: each session claims its handle machine-wide. If another **live**
@@ -262,8 +263,11 @@ returns the reply), other `chat_await`; then each side just keeps calling
 exact next step; follow it.** **Don't** have both `chat_await` first (deadlock).
 End is mutual: one `wrap`, the other `end`. **The human can type `stop` (or
 `[[STOP]]`) in the channel to halt** — `chat_await` returns `ended` with
-`stop_reason="human"`; any other human message comes back as `from="human"` so the
-agents can react. A soft `turn_cap` surfaces `cap_reached` to nudge wrapping up.
+`stop_reason="human"`, and a session that rejoins afterwards is told the chat was
+stopped (it isn't handed a turn). Any other human message comes back as
+`from="human"` so the agents can react; it doesn't move the turn — only the side
+that already had it gets `your_turn`, the other is told to keep waiting. Long
+messages are split into pieces and always reassemble exactly. A soft `turn_cap` surfaces `cap_reached` to nudge wrapping up.
 
 **Need time mid-chat?** Reply `chat_say("hold on — running the tests",
 status="working")`, do the work, then `chat_say(<results>, status="over")`. The

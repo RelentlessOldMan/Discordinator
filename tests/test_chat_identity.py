@@ -194,7 +194,8 @@ def test_configured_handle() -> None:
         st = mcp.chat_status(channel=room)
         check("your_turn" in st, "chat_status computes your_turn from the configured handle")
         res = mcp.chat_await(channel=room, timeout=0.2, poll=0.05, nudge_after=0)
-        check(res["timed_out"] is True, "chat_await works with the configured handle")
+        check(res["from"] == "CodeCarver" and res["your_turn"] is True,
+              "omitting chatter keeps the role this session chose (ui gets CodeCarver's turn)")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
 

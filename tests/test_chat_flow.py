@@ -321,6 +321,123 @@ def test_unknown_to_warns_now() -> None:
     check("note" not in bc or "Nobody called" not in bc["note"], "a broadcast is never 'unknown'")
 
 
+def test_human_stop_holds_on_rejoin() -> None:
+    print("a human stop that is the last message ends the chat - a rejoin doesn't restart it:")
+    r = "stopped"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="hi", chatter="A", channel=r, wait=False)
+    mcp.chat_say(text="your turn A", chatter="B", channel=r, wait=False)
+    LocalClient("human").post_human(r, "stop")
+    st = mcp.chat_status(chatter="A", channel=r)
+    check(st["ended"] and st["stop_reason"] == "human" and not st["your_turn"]
+          and st["pending_turn"] is None, "state: ended by the human, nothing owed")
+    b = mcp.chat_begin(chatter="A", channel=r)
+    check(not b["recovered_pending_turn"] and "stopped by the human" in b["next"],
+          "chat_begin says the chat was stopped instead of handing a turn back")
+    mcp.chat_say(text="new topic", chatter="A", channel=r, wait=False)
+    st2 = mcp.chat_status(chatter="B", channel=r)
+    check(not st2["ended"] and st2["your_turn"], "a new chat after the stop works normally")
+
+
+def test_interjection_mid_split_turn() -> None:
+    print("a human remark in the middle of someone's long turn doesn't lose its first part:")
+    r = "mid-human"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="PART-ONE", chatter="B", channel=r, status="say", wait=False)
+    LocalClient("human").post_human(r, "quick question")
+    mcp.chat_say(text="PART-TWO", chatter="B", channel=r, wait=False)
+    first = mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    check(first["from"] == "human", "the remark is delivered first")
+    second = mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    check(second["text"] == "PART-ONE\nPART-TWO", f"then the whole turn: {second['text']!r}")
+    st = chat.config.load_state()["chat"][r]["a"]
+    check("partial" not in st, "nothing left buffered once the turn completed")
+
+
+def test_peer_turn_mid_split_turn_3way() -> None:
+    print("3-way: another peer's turn arriving mid-turn doesn't lose the first part:")
+    r = "mid-peer"
+    for h in ("A", "B", "C"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="C-ONE", chatter="C", channel=r, status="say", wait=False)
+    mcp.chat_say(text="for A", chatter="B", channel=r, to="A", wait=False)
+    mcp.chat_say(text="C-TWO", chatter="C", channel=r, to="A", wait=False)
+    got1 = mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    check(got1["from"] == "B", "B's turn wakes A first")
+    got2 = mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    check(got2["from"] == "C" and got2["text"] == "C-ONE\nC-TWO", f"C's turn whole: {got2['text']!r}")
+
+
+def test_begin_mid_split_turn() -> None:
+    print("joining while someone is partway through a long turn still gets all of it:")
+    r = "join-mid"
+    mcp.chat_begin(chatter="B", channel=r)
+    mcp.chat_say(text="EARLY", chatter="B", channel=r, status="say", wait=False)
+    mcp.chat_begin(chatter="A", channel=r)
+    mcp.chat_say(text="LATE", chatter="B", channel=r, wait=False)
+    got = mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    check(got["text"] == "EARLY\nLATE", f"whole turn: {got['text']!r}")
+
+
+def test_long_lines_exact() -> None:
+    print("long turns come back byte-for-byte (no inserted or lost newlines):")
+    import random
+    rnd = random.Random(7)
+    for limit in (50, 1990):
+        for _ in range(200):
+            n = rnd.randint(0, limit * 4)
+            text = "".join(rnd.choice("ab \n{}\"") for _ in range(n))
+            pieces = chat.split_turn(text, limit)
+            if not (all(len(p) <= limit for p in pieces) and chat.join_pieces(pieces) == text):
+                raise AssertionError(f"roundtrip failed (limit {limit}): {text!r}")
+    check(True, "random texts round-trip exactly and every piece fits")
+    r = "longline"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    blob = '{"k": "' + "v" * 4500 + '"}'
+    para = "x" * 1980 + "\n\n" + "y" * 100
+    for body in (blob, para):
+        mcp.chat_say(text=body, chatter="A", channel=r, wait=False)
+        got = mcp.chat_await(chatter="B", channel=r, timeout=2, poll=0.02, nudge_after=0)
+        check(got["text"] == body, f"{len(body)}-char turn arrives exactly")
+        mcp.chat_say(text="ok", chatter="B", channel=r, wait=False)
+        mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
+
+
+def test_typo_leaves_no_phantom() -> None:
+    print("a mistyped `to` that was re-sent doesn't leave a phantom participant:")
+    r = "phantom"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="hi", chatter="B", channel=r, wait=False)
+    mcp.chat_say(text="q", chatter="A", channel=r, to="Bobb", wait=False)
+    mcp.chat_say(text="q", chatter="A", channel=r, to="B", wait=False)
+    mcp.chat_say(text="answer", chatter="B", channel=r, wait=False)
+    st = chat.compute_state(LocalClient("A"), r, "A")
+    check(st["participants"] == ["B", "A"] or sorted(st["participants"]) == ["A", "B"],
+          f"just A and B: {st['participants']}")
+    check(not st["multiparty"] and st["floor"] == "A", "still a 2-party chat; A's turn")
+
+
+def test_interjection_only_wakes_holder() -> None:
+    print("a human remark doesn't hand the turn to the side that isn't owed it:")
+    r = "remark"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="hi B", chatter="A", channel=r, wait=False)
+    mcp.chat_await(chatter="B", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    mcp.chat_say(text="over to you A", chatter="B", channel=r, wait=False)
+    LocalClient("human").post_human(r, "fyi: prefer small commits")
+    b = mcp.chat_await(chatter="B", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    check(b["from"] == "human" and b["your_turn"] is False and b["floor"] == "A",
+          "B (waiting) sees the remark but isn't given the turn")
+    check("not your turn" in b["next"] and "chat_await" in b["next"], "B is told to keep waiting")
+    a = mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
+    check(a["from"] in ("B", "human") and a["your_turn"], "A (owed the turn) still has it")
+
+
 def main() -> int:
     test_say_waits_for_reply()
     test_say_wait_timeout_says_keep_waiting()
@@ -338,6 +455,13 @@ def main() -> int:
     test_long_turn_recovered_whole()
     test_timeout_mid_turn_keeps_first_half()
     test_unknown_to_warns_now()
+    test_human_stop_holds_on_rejoin()
+    test_interjection_mid_split_turn()
+    test_peer_turn_mid_split_turn_3way()
+    test_begin_mid_split_turn()
+    test_long_lines_exact()
+    test_typo_leaves_no_phantom()
+    test_interjection_only_wakes_holder()
     print(f"\nALL {_passed} CHAT-FLOW CHECKS PASSED")
     return 0
 

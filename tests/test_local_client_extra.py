@@ -115,6 +115,25 @@ def test_append_lock_steal_is_safe() -> None:
     check(not leftovers, "no renamed-aside files left behind")
 
 
+def test_read_retries_while_file_swapped() -> None:
+    print("a read during a prune/delete file swap retries instead of returning nothing:")
+    c = LocalClient(label="swap")
+    c.post("swaproom", "kept")
+    real = Path.read_text
+    fails = {"n": 2}
+    def flaky(self, *a, **k):
+        if self.name.endswith(".jsonl") and fails["n"] > 0:
+            fails["n"] -= 1
+            raise PermissionError("being replaced")
+        return real(self, *a, **k)
+    Path.read_text = flaky
+    try:
+        got = c.read_messages("swaproom", limit=5)
+    finally:
+        Path.read_text = real
+    check(len(got) == 1 and fails["n"] == 0, "two failed reads, then the real content")
+
+
 def test_append_lock_timeout_proceeds() -> None:
     print("_AppendLock proceeds unlocked rather than hanging forever:")
     c = LocalClient(label="lock2")
@@ -156,6 +175,7 @@ def main() -> int:
     test_delete_missing_room_noop()
     test_append_lock_stale_steal()
     test_append_lock_steal_is_safe()
+    test_read_retries_while_file_swapped()
     test_append_lock_timeout_proceeds()
     test_surface_parity()
     print(f"\nALL {_passed} LOCAL-CLIENT EDGE CHECKS PASSED")

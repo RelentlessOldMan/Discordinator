@@ -403,6 +403,10 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
             # side spoke again). Position the cursor so chat_await re-delivers it
             # immediately — recovery instead of a silent stall.
             cursor = st["_pending_predecessor"]
+        elif st.get("_open_run_predecessor"):
+            # Someone is partway through a long turn: start before its first
+            # piece so it arrives whole.
+            cursor = st["_open_run_predecessor"]
         else:
             latest = client.read_messages(channel_id, limit=1)
             cursor = latest[0]["id"] if latest else "0"
@@ -412,8 +416,11 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         "channel": channel_id, "chatter": me, "turn_cap": turn_cap,
         "recovered_pending_turn": owed,
         "state": {k: v for k, v in st.items() if not k.startswith("_")},
-        "next": ("A turn is owed to you — call chat_await now to receive it."
-                 if owed else "initiator: chat_say(...); other: chat_await(...)"),
+        "next": ("A turn is owed to you — call chat_await now to receive it." if owed
+                 else "The last chat here was stopped by the human. Start a new one "
+                      "only if you've been asked to (initiator: chat_say(...); other: "
+                      "chat_await(...))." if st.get("stop_reason") == "human"
+                 else "initiator: chat_say(...); other: chat_await(...)"),
     }
     if note:
         out["note"] = note
@@ -717,8 +724,7 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
     """
     cfg = config.load()
     channel_id = config.resolve_chat_channel(cfg, channel)
-    me = (handles.resolve(chatter, cfg)[0]
-          if chatter not in (None, "") or cfg.get("chat_handle") else None)
+    me = handles.current(chatter, cfg)  # read-only: never claims a name
     with _client("chat") as client:
         st = chat.compute_state(client, channel_id, me)
     public = {k: v for k, v in st.items() if not k.startswith("_")}

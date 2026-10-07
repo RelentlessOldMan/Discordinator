@@ -37,6 +37,9 @@ CLAIM_TTL = 24 * 3600.0
 
 # This process's resolved handles: requested key -> handle actually in use.
 _resolved: dict[str, str] = {}
+# The role (chatter) this session last asked for, used when a later call omits
+# it - so forgetting `chatter` once doesn't switch the session's identity.
+_last_chatter: Optional[str] = None
 
 
 def registry_path():
@@ -191,7 +194,12 @@ def resolve(chatter: Optional[str], cfg: dict[str, Any]) -> tuple[str, Optional[
     """This session's handle for a chat_* call, plus a note if it had to be
     renamed to avoid another live session. Stable for the life of the process:
     the same request always resolves to the same handle."""
+    global _last_chatter
+    if chatter in (None, "") and _last_chatter is not None:
+        chatter = _last_chatter
     desired = compose(chatter, cfg.get("chat_handle"))
+    if chatter not in (None, ""):
+        _last_chatter = str(chatter)
     key = chat.handle_key(desired)
     handle = claim(_resolved.get(key, desired))
     _resolved[key] = handle
@@ -201,6 +209,18 @@ def resolve(chatter: Optional[str], cfg: dict[str, Any]) -> tuple[str, Optional[
                 f"machine, so you are '{handle}'. Pass chatter=\"<role>\" to pick a "
                 f"clearer name (e.g. chatter=\"ui\" -> '{desired}/ui').")
     return handle, note
+
+
+def current(chatter: Optional[str], cfg: dict[str, Any]) -> Optional[str]:
+    """The handle this session would use, WITHOUT claiming anything (for
+    read-only calls like chat_status). None when no handle can be formed."""
+    if chatter in (None, "") and _last_chatter is not None:
+        chatter = _last_chatter
+    try:
+        desired = compose(chatter, cfg.get("chat_handle"))
+    except config.ConfigError:
+        return None
+    return _resolved.get(chat.handle_key(desired), desired)
 
 
 def live_handles() -> list[str]:
