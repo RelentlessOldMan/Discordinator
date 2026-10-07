@@ -234,7 +234,9 @@ def test_never_breaks() -> None:
 def test_cli_end_to_end() -> None:
     print("`discordinator chat-guard` works as a real hook process:")
     p = transcript(user("chat"), call("chat_say", {"status": "over"}, WAITING))
-    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+        p for p in (src, os.environ.get("PYTHONPATH")) if p))
     r = subprocess.run([sys.executable, "-m", "discordinator.cli", "chat-guard"],
                        input=json.dumps({"transcript_path": p}), capture_output=True,
                        text=True, env=env, timeout=60)

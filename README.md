@@ -1,5 +1,7 @@
 # Discordinator
 
+[![Tests](https://github.com/RelentlessOldMan/Discordinator/actions/workflows/tests.yml/badge.svg)](https://github.com/RelentlessOldMan/Discordinator/actions/workflows/tests.yml)
+
 A combo **CLI + MCP server** for sending and reading messages in Discord
 channels. Built to relay information back and forth between Claude sessions on
 different machines through a private Discord server.
