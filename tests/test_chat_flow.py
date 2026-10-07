@@ -635,6 +635,36 @@ def test_glue_in_user_text_exact() -> None:
           "a one-piece turn ending in the marker keeps it")
 
 
+def test_errors_reach_the_model() -> None:
+    print("a tool's error text reaches the model through MCP, not just its name:")
+    import asyncio
+
+    async def call(name, args):
+        try:
+            res = await mcp.mcp.call_tool(name, args)
+            return None, res
+        except Exception as e:  # noqa: BLE001
+            return str(e), None
+
+    err, _ = asyncio.run(call("chat_say", {"text": "x", "chatter": "A", "status": "bogus",
+                                           "channel": "errs"}))
+    check(err and "status must be one of" in err and "Nothing was posted" in err,
+          f"chat_say's refusal arrives in full: {(err or '')[:60]}")
+    os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "discord"
+    try:
+        err, _ = asyncio.run(call("send_message", {"text": "x"}))
+    finally:
+        os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
+    check(err and len(err) > len("Error executing tool send_message: "),
+          f"a config error says what's wrong: {(err or '')[:70]}")
+    err, res = asyncio.run(call("chat_status", {"chatter": "A", "channel": "errs"}))
+    check(err is None and res is not None, "a working tool still returns its result")
+    tools = asyncio.run(mcp.mcp.list_tools())
+    say = next(t for t in tools if t.name == "chat_say")
+    check(len(tools) == 12 and {"text", "chatter", "status", "to"} <= set(say.input_schema["properties"]),
+          "every tool still registers with its parameters")
+
+
 def main() -> int:
     test_say_waits_for_reply()
     test_say_wait_timeout_says_keep_waiting()
@@ -667,6 +697,7 @@ def main() -> int:
     test_first_reply_wins()
     test_finishing_own_turn_never_blocked()
     test_glue_in_user_text_exact()
+    test_errors_reach_the_model()
     print(f"\nALL {_passed} CHAT-FLOW CHECKS PASSED")
     return 0
 

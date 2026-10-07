@@ -19,12 +19,14 @@ config file, or by raw numeric channel ids.
 from __future__ import annotations
 
 import difflib
+import functools
 import logging
 import re
 from pathlib import Path
 from typing import Any, Optional
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from . import chat, config, handles, use_system_certs
 from .client_factory import Client, make_client, make_client_for_url
@@ -36,6 +38,25 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 mcp = MCPServer("discordinator")
+
+
+def _tool():
+    """Register a tool so its errors reach the model in full. The MCP SDK passes
+    on only a ToolError's text; anything else arrives as a bare "Error executing
+    tool <name>", and every "nothing was posted, because ..." we write would be
+    lost. The module keeps the plain function (tests call it directly)."""
+    def register(fn):
+        @functools.wraps(fn)
+        def reported(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except ToolError:
+                raise
+            except Exception as e:  # noqa: BLE001 - re-raised with its text
+                raise ToolError(f"{type(e).__name__}: {e}") from e
+        mcp.tool()(reported)
+        return fn
+    return register
 
 
 def _client(mode: Optional[str] = None) -> Client:
@@ -75,7 +96,7 @@ def _try_ack(client: Client, channel_id: str, messages: list[dict[str, Any]]) ->
         pass
 
 
-@mcp.tool()
+@_tool()
 def send_message(
     text: str,
     channel: Optional[str] = None,
@@ -139,7 +160,7 @@ def _owed_chat_reply(cfg: dict[str, Any], channel_id: str) -> Optional[tuple[str
     return me, owed["from"]
 
 
-@mcp.tool()
+@_tool()
 def read_messages(
     channel: Optional[str] = None,
     limit: int = 20,
@@ -179,7 +200,7 @@ def read_messages(
     return messages
 
 
-@mcp.tool()
+@_tool()
 def send_file(
     paths: Any,
     text: str = "",
@@ -215,7 +236,7 @@ def send_file(
     return f"Sent {len(sent)} message(s) with {len(file_list)} file(s) to channel {channel_id}."
 
 
-@mcp.tool()
+@_tool()
 def download_attachment(url: str, dest: Optional[str] = None) -> dict[str, Any]:
     """Download an attachment to local disk and return where it was saved.
 
@@ -249,7 +270,7 @@ def download_attachment(url: str, dest: Optional[str] = None) -> dict[str, Any]:
     return {"saved": str(saved), "filename": saved.name}
 
 
-@mcp.tool()
+@_tool()
 def get_new_messages(
     channel: Optional[str] = None,
     include_self: bool = False,
@@ -305,7 +326,7 @@ def get_new_messages(
     return messages
 
 
-@mcp.tool()
+@_tool()
 def purge_messages(
     channel: Optional[str] = None,
     older_than_days: float = 7.0,
@@ -377,7 +398,7 @@ def purge_messages(
         return {"dry_run": False, "deleted": deleted}
 
 
-@mcp.tool()
+@_tool()
 def list_channels() -> dict[str, Any]:
     """List the friendly channel names configured for Discordinator."""
     cfg = config.load()
@@ -388,7 +409,7 @@ def list_channels() -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@_tool()
 def whoami() -> dict[str, Any]:
     """Return the bot's own identity (verifies the token is valid)."""
     with _client("relay") as client:
@@ -408,15 +429,93 @@ def whoami() -> dict[str, Any]:
 # ==========================================================================
 
 
-def _chatter(chatter: Optional[str], cfg: dict[str, Any]) -> tuple[str, Optional[str]]:
+def _chatter(chatter: Optional[str], cfg: dict[str, Any],
+             channel: Optional[str] = None) -> tuple[str, Optional[str]]:
     """This session's handle (see handles.resolve): the project's fixed handle,
     optionally with a role (`CodeCarver/ui`), made unique among live sessions on
     this machine. Plus a note when it isn't the name the session asked for -
-    returned on every chat result so a rename can't go unnoticed."""
-    return handles.resolve(chatter, cfg)
+    returned on every chat result so a rename can't go unnoticed.
+
+    A restarted session (an /mcp reconnect, or a new DISCORDINATOR_CHAT_HANDLE
+    taking effect) has forgotten its role. If it doesn't name one and a turn in
+    the room is owed to exactly one `<project handle>/<role>` that no running
+    session holds, that was this session: it takes the name back instead of
+    becoming the bare project handle and never seeing the turn."""
+    role = _lost_role(chatter, cfg, channel)
+    if role is None:
+        return handles.resolve(chatter, cfg)
+    me, note = handles.resolve(role, cfg)
+    back = (f"A turn in this room is owed to '{me}', which no running session holds, "
+            "so this session has taken that name back (its role was forgotten when "
+            f"it restarted). Pass chatter=\"{role}\" on your chat calls.")
+    return me, f"{note} {back}" if note else back
 
 
-@mcp.tool()
+def _lost_role(chatter: Optional[str], cfg: dict[str, Any],
+               channel: Optional[str]) -> Optional[str]:
+    """The role to rejoin as (see _chatter), or None."""
+    base = cfg.get("chat_handle")
+    if chatter not in (None, "") or handles._last_chatter is not None or handles._resolved:
+        return None  # it named itself, or already has a name in this process
+    if not base:
+        return None
+    try:
+        channel_id = config.resolve_chat_channel(cfg, channel)
+        with _client("chat") as client:
+            lost = _lost_turns(client, channel_id, chat.sanitize_handle(base), cfg)
+    except Exception:
+        return None
+    prefix = chat.handle_key(base) + "/"
+    mine = [h for h in lost if chat.handle_key(h).startswith(prefix)]
+    return mine[0][len(prefix):] if len(mine) == 1 else None
+
+
+def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any]) -> list[str]:
+    """Handles that look like this session's own earlier name - another role of
+    its project, the bare project handle, or its role used as a whole handle
+    (the name before the project got a fixed handle) - that a turn in the room
+    is owed to and no running session on this machine holds."""
+    base = cfg.get("chat_handle")
+    me_key = chat.handle_key(me)
+    looks: set[str] = set()
+    if base:
+        b = chat.handle_key(base)
+        looks.add(b)
+        if me_key.startswith(b + "/"):
+            looks.add(me_key[len(b) + 1:])  # "convex" for "ProjectB/convex"
+    held = {chat.handle_key(h) for h in handles.live_handles()}
+    found: dict[str, str] = {}
+    for m in client.read_messages(channel_id, limit=100):
+        p = chat.parse(m.get("content") or "")
+        if not p or p["status"] not in chat.YIELD_STATUSES or chat._is_broadcast(p["to"]):
+            continue
+        k = chat.handle_key(p["to"])
+        if k == me_key or k in held or k in found:
+            continue
+        if k in looks or (base and k.startswith(chat.handle_key(base) + "/")):
+            found[k] = p["to"]
+    return [h for h in found.values()
+            if chat.compute_state(client, channel_id, h).get("your_turn")]
+
+
+def _lost_note(lost: list[str], cfg: dict[str, Any]) -> str:
+    base = cfg.get("chat_handle")
+    how = []
+    for h in lost:
+        k = chat.handle_key(h)
+        if base and k.startswith(chat.handle_key(base) + "/"):
+            how.append(f"'{h}' (chat_begin(chatter=\"{h[len(base) + 1:]}\") takes it back)")
+        elif base and k == chat.handle_key(base):
+            how.append(f"'{h}' (chat_begin(chatter=\"{base}\") takes it back)")
+        else:
+            how.append(f"'{h}' (read it with read_messages and answer its sender with "
+                       "chat_say(to=...))")
+    return ("A turn in this room is owed to " + ", ".join(how) + ", and no running "
+            "session holds that name. If that was you (before a restart or a handle "
+            "change), take it back as shown - otherwise you won't see the turn.")
+
+
+@_tool()
 def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, turn_cap: int = 20) -> dict[str, Any]:
     """Start or join a turn-based chat as participant `chatter`.
 
@@ -441,10 +540,11 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         turn_cap: soft cap on your turns before you're nudged to wrap up.
     """
     cfg = config.load()
-    me, note = handles.resolve(chatter, cfg)
+    me, note = _chatter(chatter, cfg, channel)
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client("chat") as client:
         st = chat.compute_state(client, channel_id, me)
+        lost = [] if st.get("your_turn") else _lost_turns(client, channel_id, me, cfg)
         # A turn already owed to me (e.g. I ended/dropped and the other side
         # spoke again) is re-delivered by chat_await - recovery instead of a
         # silent stall; a long turn in progress arrives whole.
@@ -464,7 +564,9 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
     }
     others = st.get("_others_chatting", [])
     joined = any(chat.same_handle(p, me) for p in st.get("_posters", []))
-    if others and not owed and not joined:
+    if lost:
+        note = f"{note} {_lost_note(lost, cfg)}" if note else _lost_note(lost, cfg)
+    elif others and not owed and not joined:
         busy = (f"Another chat is going on in this room ({', '.join(others)}). Address "
                 "your opener (to='<your peer>') so it reaches the right session.")
         note = f"{note} {busy}" if note else busy
@@ -473,7 +575,7 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
     return out
 
 
-@mcp.tool()
+@_tool()
 def chat_say(
     text: str,
     chatter: Optional[str] = None,
@@ -547,7 +649,7 @@ def chat_say(
     """
     cfg = config.load()
     try:
-        me, handle_note = _chatter(chatter, cfg)
+        me, handle_note = _chatter(chatter, cfg, channel)
         if status not in chat.STATUSES:
             raise ValueError(f"status must be one of {chat.STATUSES}, got {status!r}")
         target = chat.sanitize_handle(to) if to else None
@@ -775,7 +877,7 @@ def _say_next(status: str) -> str:
             "arrives; don't end your turn mid-chat.")
 
 
-@mcp.tool()
+@_tool()
 def chat_await(
     chatter: Optional[str] = None,
     channel: Optional[str] = None,
@@ -836,18 +938,22 @@ def chat_await(
     looks like a stop command ("stop"/"halt"/"[[STOP]]") the chat ends.
     """
     cfg = config.load()
-    me, handle_note = _chatter(chatter, cfg)
+    me, handle_note = _chatter(chatter, cfg, channel)
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client("chat") as client:
         result = chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll,
                                  nudge_after=nudge_after, from_whom=from_whom)
+        # Waiting in vain because the turn went to this session's old name?
+        lost = _lost_turns(client, channel_id, me, cfg) if result.get("timed_out") else []
+    if lost:
+        handle_note = f"{handle_note} {_lost_note(lost, cfg)}" if handle_note else _lost_note(lost, cfg)
     result["next"] = chat.next_step(result)
     if handle_note:
         result["handle_note"] = handle_note
     return result
 
 
-@mcp.tool()
+@_tool()
 def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) -> dict[str, Any]:
     """Report the current chat state on a channel, derived from history. **Call
     this when (re)engaging a chat channel** — it tells you whether a turn is owed
@@ -882,11 +988,21 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
     """
     cfg = config.load()
     channel_id = config.resolve_chat_channel(cfg, channel)
-    me = handles.current(chatter, cfg)  # read-only: never claims a name
+    role = _lost_role(chatter, cfg, channel)
+    me = handles.current(role or chatter, cfg)  # read-only: never claims a name
     with _client("chat") as client:
         st = chat.compute_state(client, channel_id, me)
+        lost = (_lost_turns(client, channel_id, me, cfg)
+                if me and not st.get("your_turn") else [])
     public = {k: v for k, v in st.items() if not k.startswith("_")}
     public["channel"] = channel_id
+    if role is not None:
+        public["chatter"] = me
+        public["note"] = (f"A turn here is owed to '{me}', which no running session "
+                          "holds - you, before a restart. Your next chat call takes "
+                          "that name back.")
+    elif lost:
+        public["note"] = _lost_note(lost, cfg)
     return public
 
 
