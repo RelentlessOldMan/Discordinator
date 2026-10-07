@@ -8,6 +8,14 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.31] - 2026-10-06
+Second review fixes: human stop and remarks, whole split turns, exact long text, no phantoms, stable names
+- A human stop really ends the chat - rejoining doesn't restart it; a human remark doesn't give the turn to both sides
+- Long split turns always arrive whole (across remarks, other peers' turns, timeouts, or joining mid-turn) and byte-for-byte exact
+- A corrected typo in to= no longer leaves a phantom participant
+- Omitting chatter keeps the session's role; chat_status never claims a name
+- Local transport: reads retry while the room file is being swapped
+
 ## [1.0.30] - 2026-10-06
 Independent review fixes: 3-way stalls, split turns, typo'd addresses, stable handles, guard gaps
 - 3+ party chats: a raised hand no longer hides that the floor holder owes its turn
