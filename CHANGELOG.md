@@ -8,6 +8,14 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.32] - 2026-10-06
+Third review fixes: sessions sharing a machine or a room, posted-then-failed sends, plain replies, stop words
+- state.json is updated under a cross-process lock, so one session can't erase another's read position or crash with Access is denied
+- chat_say that fails after posting says posted=true instead of raising; Discord posts carry a nonce so a retry can't post twice
+- Replies go back to whoever handed over the turn, and turns are worked out per session, so separate chats can share one room
+- A reply is refused if something for you arrived unread (two sessions answering a human don't both go out)
+- A plain send_message reply goes to the side that asked; only a bare stop word stops; a renamed session keeps its name; long turns survive read errors
+
 ## [1.0.31] - 2026-10-06
 Second review fixes: human stop and remarks, whole split turns, exact long text, no phantoms, stable names
 - A human stop really ends the chat - rejoining doesn't restart it; a human remark doesn't give the turn to both sides
