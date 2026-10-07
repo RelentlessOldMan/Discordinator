@@ -89,13 +89,54 @@ def send_message(
             configured default channel if omitted.
         label: Optional tag prefixed to the message (e.g. the machine/session
             name). Falls back to the configured machine_label.
+
+    Sent to a chat room where this session owes a chat reply, it goes out as
+    that reply (a chat turn back to whoever handed you the turn), so a reply
+    sent with the wrong tool can't be mistaken for someone else's.
     """
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
+    owed = _owed_chat_reply(cfg, channel_id)
+    if owed is not None:
+        me, peer = owed
+        out = chat_say(text=text, chatter=me, channel=channel_id, to=peer, wait=False)
+        return (f"Sent as your chat turn to {peer} ({out['sent_messages']} message(s)) - "
+                "you owed them a reply in this chat room. Use chat_say for chat turns; "
+                "call chat_await to wait for their answer.")
     tag = label if label is not None else cfg.get("machine_label")
     with _client("relay") as client:
         sent = client.send_message(channel_id, text, label=tag)
+    _remember_sent(sent)
     return f"Sent {len(sent)} message(s) to channel {channel_id}."
+
+
+# Ids of the relay messages this session (this server process) sent, so its own
+# inbox skips exactly those - not everything carrying its label, which another
+# session on the machine may share.
+_sent_ids: set[str] = set()
+
+
+def _remember_sent(sent: list[dict[str, Any]]) -> None:
+    _sent_ids.update(str(m.get("id")) for m in sent if isinstance(m, dict))
+
+
+def _owed_chat_reply(cfg: dict[str, Any], channel_id: str) -> Optional[tuple[str, str]]:
+    """(my handle, the peer) if this session is chatting in this room and owes
+    a reply there - a send_message there is that reply. Else None."""
+    if not handles._resolved:
+        return None  # this session hasn't chatted
+    try:
+        me = handles.current(None, cfg)
+        if not me or not chat.get_cursor(channel_id, me):
+            return None
+        with _client("chat") as client:
+            st = chat.compute_state(client, channel_id, me)
+    except Exception:
+        return None
+    owed = st.get("_owed_turn")
+    if not st.get("your_turn") or not owed or owed["from"] in ("human", "participant"):
+        return None
+    return me, owed["from"]
 
 
 @mcp.tool()
@@ -170,6 +211,7 @@ def send_file(
     file_list = [paths] if isinstance(paths, str) else list(paths)
     with _client("relay") as client:
         sent = client.send_files(channel_id, text, file_list, label=tag)
+    _remember_sent(sent)
     return f"Sent {len(sent)} message(s) with {len(file_list)} file(s) to channel {channel_id}."
 
 
@@ -218,15 +260,16 @@ def get_new_messages(
     channel — the relay primitive for two-way session handoff.
 
     A per-channel cursor is stored and advanced on each call, so repeated calls
-    return only fresh messages (not the whole history). Each label has its own
-    cursor, so sessions with different labels never consume each other's. By default your own
-    machine's messages (matched by the configured machine_label prefix) are
-    filtered out, so you see just what the other session/machine said.
+    return only fresh messages (not the whole history). Each project (label +
+    chat handle) has its own cursor, so two sessions on one machine never
+    consume each other's messages. By default the messages this session sent
+    are filtered out, so you see just what the other session/machine said -
+    another session on this machine is someone else, even with the same label.
 
     Args:
         channel: A configured channel name or raw channel id. Defaults to the
             configured default channel.
-        include_self: If true, also include your own machine's messages.
+        include_self: If true, also include the messages this session sent.
         limit: How many recent messages to return on the FIRST call (before a
             cursor exists). Subsequent calls return everything new since.
         ack: React ✅ to the newest returned message so the other side can see
@@ -237,10 +280,10 @@ def get_new_messages(
     """
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
-    own_label = cfg.get("machine_label")
+    reader = config.relay_reader(cfg)
     if ack is None:
         ack = bool(cfg.get("ack_on_read"))
-    cursor = config.get_cursor(channel_id, own_label)
+    cursor = config.get_cursor(channel_id, reader)
 
     capped = max(1, min(int(limit), 100))
     with _client("relay") as client:
@@ -252,11 +295,10 @@ def get_new_messages(
         messages.reverse()
 
         if messages:
-            config.set_cursor(channel_id, messages[-1]["id"], own_label)
+            config.set_cursor(channel_id, messages[-1]["id"], reader)
 
-        if not include_self and own_label:
-            prefix = f"[{own_label}]"
-            messages = [m for m in messages if not m["content"].startswith(prefix)]
+        if not include_self:
+            messages = [m for m in messages if str(m["id"]) not in _sent_ids]
 
         if ack:
             _try_ack(client, channel_id, messages)
@@ -531,7 +573,14 @@ def chat_say(
     with chat_client as client:
         # Check-then-post under a lock, so two sessions on this machine answering
         # the same message at the same moment can't both get through the check.
-        with config.FileLock(_post_lock(channel_id), timeout=30):
+        lock = config.FileLock(_post_lock(channel_id), timeout=30)
+        try:
+            lock.__enter__()
+        except config.LockTimeout as e:
+            raise ChatSendError(
+                f"{e}\n\nAnother session in this room is busy posting. Nothing was "
+                "posted - send it again in a moment.") from e
+        try:
             try:
                 target, auto_note = _check_turn(client, channel_id, me, status, target)
             except Exception as e:
@@ -544,6 +593,8 @@ def chat_say(
                                       files=file_list)
             except Exception as e:
                 raise _send_failed(e, status) from e
+        finally:
+            lock.__exit__(None, None, None)
         try:
             return _after_post(client, channel_id, me, status, target, sent, shared,
                                handle_note, auto_note, to_note, wait, timeout)

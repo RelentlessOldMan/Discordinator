@@ -562,7 +562,7 @@ def test_failed_read_keeps_partial() -> None:
 
 
 def test_plain_reply_goes_to_asker() -> None:
-    print("a plain send_message reply goes to the side that asked, not back to its sender:")
+    print("a send_message reply goes to the side that asked, not back to its sender:")
     r = "plain-mcp"
     for h in ("A", "B"):
         mcp.chat_begin(chatter=h, channel=r)
@@ -570,9 +570,10 @@ def test_plain_reply_goes_to_asker() -> None:
     mcp.chat_await(chatter="B", channel=r, timeout=1, poll=0.02, nudge_after=0)
     mcp.send_message(text="use 8080", channel=r)
     b = mcp.chat_await(chatter="B", channel=r, timeout=0.3, poll=0.02, nudge_after=0)
-    check(b["timed_out"], "B isn't handed its own plain reply")
+    check(b["timed_out"], "B isn't handed its own reply")
     a = mcp.chat_await(chatter="A", channel=r, timeout=1, poll=0.02, nudge_after=0)
-    check(a["status"] == "plain" and a["your_turn"] and "8080" in a["text"], "A gets it as its turn")
+    check(a["from"] == "B" and a["your_turn"] and "8080" in a["text"],
+          "A gets it as B's turn (sent as a chat turn, since B owed A a reply)")
     check(not mcp.chat_status(chatter="B", channel=r)["your_turn"], "and B's state agrees")
     r2 = "plain-then-say"
     for h in ("A", "B"):

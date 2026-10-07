@@ -200,8 +200,18 @@ def test_cli_stop_finds_the_room() -> None:
 def test_relay_between_two_sessions() -> None:
     print("two sessions relaying on one machine don't consume each other's messages:")
 
+    sent: dict[str, set] = {}
+    current = {"label": None}
+
     def as_session(label: str) -> None:
-        os.environ["DISCORDINATOR_LABEL"] = label  # per project, in .mcp.json
+        # Each session is its own MCP server process: its own label (set per
+        # project in .mcp.json) and its own record of what it sent.
+        if current["label"]:
+            sent[current["label"]] = set(mcp._sent_ids)
+        mcp._sent_ids.clear()
+        mcp._sent_ids.update(sent.get(label, set()))
+        current["label"] = label
+        os.environ["DISCORDINATOR_LABEL"] = label
 
     try:
         as_session("sessA")
@@ -218,6 +228,7 @@ def test_relay_between_two_sessions() -> None:
         check(mcp.get_new_messages(channel="relay-room") == [], "each read moves only its own position")
     finally:
         os.environ.pop("DISCORDINATOR_LABEL", None)
+        mcp._sent_ids.clear()
 
 
 def test_config_set_saves_only_the_setting() -> None:
@@ -277,6 +288,59 @@ def test_two_answers_at_once() -> None:
     check(sorted(results.values()) == ["posted", "refused"], f"one posts, one is refused: {results}")
 
 
+def test_same_label_sessions_relay() -> None:
+    print("two sessions with the SAME label relay to each other:")
+    a_sent = set()
+
+    def as_session(handle: str, sent: set) -> None:
+        # One MCP server process per session: its own sent-ids and project handle.
+        os.environ["DISCORDINATOR_CHAT_HANDLE"] = handle
+        mcp._sent_ids.clear()
+        mcp._sent_ids.update(sent)
+
+    os.environ["DISCORDINATOR_LABEL"] = "laptop"  # shared, e.g. from `config set-label`
+    try:
+        as_session("ProjA", set())
+        mcp.send_message("A: please review", channel="label-room")
+        a_sent = set(mcp._sent_ids)
+        check(mcp.get_new_messages(channel="label-room") == [], "A doesn't see its own message")
+        as_session("ProjB", set())
+        got = mcp.get_new_messages(channel="label-room")
+        check([m["content"] for m in got] == ["[laptop] A: please review"],
+              "B sees A's message though they share a label")
+        mcp.send_message("B: done", channel="label-room")
+        b_sent = set(mcp._sent_ids)
+        as_session("ProjA", a_sent)
+        got = mcp.get_new_messages(channel="label-room")
+        check([m["content"] for m in got] == ["[laptop] B: done"], "and A sees B's answer")
+        as_session("ProjB", b_sent)
+        check(mcp.get_new_messages(channel="label-room") == [], "neither re-reads or loses anything")
+    finally:
+        os.environ.pop("DISCORDINATOR_LABEL")
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        mcp._sent_ids.clear()
+
+
+def test_plain_reply_reaches_its_peer() -> None:
+    print("a chat reply sent with send_message reaches the right peer, not another chat:")
+    r = "plain-room"
+    c = LocalClient()
+    for h in ("A", "B", "C", "D"):
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "A", "over", "B, can you review my diff?", to="B")
+    wait("B", r)  # B now owes A a reply
+    chat.send_chat(c, r, "C", "over", "D, status?", to="D")  # another pair goes on
+    out = mcp.send_message("looks good to me", channel=r)  # B answers with the wrong tool
+    check("chat turn to A" in out, f"it goes out as B's chat turn to A: {out[:60]}")
+    a = wait("A", r)
+    check(a["from"] == "B" and a["text"] == "looks good to me" and a["your_turn"],
+          "A gets it as B's reply")
+    d = wait("D", r)
+    check(d["from"] == "C", "D still gets C's turn, not B's message")
+    plain = mcp.send_message("an unrelated note", channel="not-a-chat-room")
+    check(plain.startswith("Sent 1 message"), "elsewhere, send_message is a plain relay post")
+
+
 def main() -> int:
     test_other_chats_end_isnt_mine()
     test_two_pairs_not_multiparty()
@@ -288,6 +352,8 @@ def main() -> int:
     test_relay_between_two_sessions()
     test_config_set_saves_only_the_setting()
     test_two_answers_at_once()
+    test_same_label_sessions_relay()
+    test_plain_reply_reaches_its_peer()
     print(f"\nALL {_passed} SHARED-ROOM CHECKS PASSED")
     return 0
 

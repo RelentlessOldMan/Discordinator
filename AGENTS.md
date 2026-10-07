@@ -58,11 +58,13 @@ Set each mode (env: `DISCORDINATOR_RELAY_TRANSPORT` / `DISCORDINATOR_CHAT_TRANSP
 discordinator config set-relay-transport discord   # send/read/relay
 discordinator config set-chat-transport  local     # live chat_*
 ```
-Two sessions on one machine that relay to each other need **different labels**
-(each skips messages carrying its own). `config set-label` writes the home config
-every session shares, so give each project its own in its `.mcp.json` env instead:
-`"DISCORDINATOR_LABEL": "<SESSION_LABEL>"`. Each label keeps its own read
-position, so one session reading its inbox never uses up the other's messages.
+Two sessions on one machine can relay to each other even with the same label:
+each skips only the messages it sent itself, and each project (its
+`DISCORDINATOR_CHAT_HANDLE`) keeps its own read position, so one session reading
+its inbox never uses up the other's messages. To tell them apart in the channel,
+give each project its own label in its `.mcp.json` env
+(`"DISCORDINATOR_LABEL": "<SESSION_LABEL>"`); `config set-label` sets the one
+label every session on the machine shares.
 For a mode on `local`, skip steps 2–3 for it (no bot/token/channels): relay
 defaults to room `relay`, chat to room `chat`; pass any `channel="..."` for
 another room. The rest of this doc's tool usage is identical on both transports.
@@ -183,8 +185,8 @@ Confirm inside Claude Code with `/mcp`.
 - `read_messages(channel?, limit?, after?, before?, newest_first?)` — read recent
   (includes plain, untagged messages a human typed directly in the channel).
 - `get_new_messages(channel?, include_self?, limit?, ack?)` — **relay primitive**:
-  only messages new since the last call (advances a per-channel cursor), your own
-  machine's messages filtered out. `ack=true` reacts ✅ to the newest.
+  only messages new since the last call (advances a per-channel cursor), with the
+  messages this session sent filtered out. `ack=true` reacts ✅ to the newest.
 - `purge_messages(channel?, older_than_days?, only_mine?, scan_limit?, dry_run?)` —
   delete old messages. Safe defaults: dry_run=True, only_mine=True, 7-day floor.
 - `list_channels()` — configured channel names + default.
@@ -269,10 +271,11 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   doesn't wake you — you hold until the floor is yours. `from_whom` narrows waking to
   one peer. **If `timed_out` and not `ended`, call it again** — the other side is
   still busy, and waiting a long time is fine; the timeout `note` shows what they
-  said they're working on. (A plain `send_message` reply counts as the floor
-  holder's turn: it comes back as `status="plain"` to the side that handed them the
-  floor, so a non-`chat_say` reply can't strand you - and isn't echoed back to its
-  sender.) Called when it's
+  said they're working on. (A session that owes a reply and sends it with
+  `send_message` to the chat room has it posted as its chat turn to that peer. An
+  untagged message from elsewhere counts as the floor holder's turn: it comes
+  back as `status="plain"` to the side that handed them the floor, so a
+  non-`chat_say` reply can't strand you.) Called when it's
   already your turn, it hands that turn straight back (`already_received`) instead
   of blocking on yourself. After a long wait (`nudge_after`, default 240s) it posts
   one visible channel reminder so a human knows which session to poke — held back
@@ -314,7 +317,9 @@ a session genuinely needs the human); a session that keeps chatting and drops ou
 again is reminded again. A `chat_await` that failed once (a transient error) is
 not a reason to drop out: it's blocked with "call chat_await again". It reads the
 session's own transcript, so two sessions in
-one directory are never confused, and any error means "allow". Install once per
+one directory are never confused, and any error means "allow". A background
+task finishing (or a compacted session continuing) wakes the session without
+the human speaking, so it's still the same chat turn. Install once per
 machine in `~/.claude/settings.json`:
 ```json
 { "hooks": { "Stop": [ { "hooks": [ {
@@ -428,8 +433,8 @@ bot's OWN messages needs nothing extra.
 ## Reading human messages
 If a person just types a message directly in the channel (no `[label]` tag),
 agents still see it: `read_messages` returns everything, and `get_new_messages`
-only filters out the *bot's own machine label* — a plain human message has no
-such prefix, so it passes through. Human messages also come from the person's
+only filters out the messages the session itself sent, so a human's passes
+through. Human messages also come from the person's
 Discord account, not the bot.
 
 **Requires the Message Content Intent.** To read the *content and attachments* of

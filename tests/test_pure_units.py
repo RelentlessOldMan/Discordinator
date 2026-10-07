@@ -188,6 +188,45 @@ def test_parse_header_roundtrip() -> None:
     check(chat.parse("") is None, "empty content parses to None")
 
 
+def test_relay_chunks_lose_nothing() -> None:
+    print("long relay messages: no blank line or space is lost where they're cut:")
+    import random
+    from discordinator.discord_client import split_chunks
+    rnd = random.Random(11)
+    words = ["a", "bb", " ", "  ", "\n", "\n\n", "\n\n\n", "y" * 30, "\t", "- item"]
+    for n in range(6000):
+        prefixed = n % 2 == 1  # sent after a "[label] " (shields the start)
+        text = "".join(rnd.choice(words) for _ in range(rnd.randint(1, 80)))
+        limit = rnd.randint(4, 40)
+        pairs = split_chunks(text, limit, prefixed)
+        chunks = [c for c, _ in pairs]
+        if any(len(c) > limit for c in chunks):
+            raise AssertionError(f"chunk over the limit: {text!r} {limit} -> {pairs!r}")
+        if "".join(c + sep for c, sep in pairs) != text:
+            raise AssertionError(f"lost text: {text!r} {limit} -> {pairs!r}")
+        # Discord trims each message's ends; a cut must never leave whitespace
+        # there (the text's own start and end are its sender's business) -
+        # unless the window had no clean place to cut at all.
+        pos = 0
+        for i, (c, sep) in enumerate(pairs[:-1]):
+            rest = text[pos:]
+            clean_cut_exists = any(
+                not rest[j - 1].isspace() and (prefixed or not rest[j].isspace())
+                for j in range(1, min(limit, len(rest) - 1) + 1))
+            nxt = pairs[i + 1][0]
+            lead_lost = nxt[:1].isspace() and not prefixed
+            if clean_cut_exists and (c[-1:].isspace() or lead_lost):
+                raise AssertionError(f"trimmable cut: {text!r} {limit} {prefixed} -> {chunks!r}")
+            pos += len(c) + len(sep)
+    check(True, "every cut drops just one newline (or nothing) and leaves nothing to trim")
+    t = "para one\n\n\npara two"
+    pairs = split_chunks(t, 12, prefixed=True)
+    check(pairs == [("para one", "\n"), ("\n\npara two", "")],
+          f"a labeled message is cut at the paragraph, blank lines kept: {pairs}")
+    pairs = split_chunks("one two three four", 10, prefixed=True)
+    check(pairs[0][0] == "one two", f"...and otherwise between words, not mid-word: {pairs}")
+
+
 def test_split_turn_survives_trimming() -> None:
     print("split turns come back exactly even if the transport trims each message:")
     import random
@@ -220,6 +259,7 @@ def main() -> int:
     test_is_human_stop()
     test_parse_header_roundtrip()
     test_split_turn_survives_trimming()
+    test_relay_chunks_lose_nothing()
     print(f"\nALL {_passed} PURE-UNIT CHECKS PASSED")
     return 0
 

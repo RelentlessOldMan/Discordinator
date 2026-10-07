@@ -248,3 +248,14 @@ closes the conversation it was sent in, and a human stop closes all of them.
 | Two sessions relay to each other on one machine | Each label has its own read position. Give each project its own label with `DISCORDINATOR_LABEL` in `.mcp.json`. |
 | `discordinator config set-...` in a shell with env settings | Only the setting being changed is saved; env overrides like `DISCORDINATOR_ALLOW_SEND=1` stay in that shell. |
 | A purge on the local transport while sessions read the room | The room is rewritten once for the whole purge, retrying for a few seconds while Windows refuses. |
+
+## Loose ends from the fourth review (v1.0.34)
+
+| Situation | What now happens |
+|---|---|
+| A background task finishes (or a compacted session continues) mid-chat | Claude Code writes these as user messages, so the Stop-hook guard took them for the human speaking and let the session drop out. Lines whose `origin` isn't the human, `<task-notification>` lines and compaction summaries no longer start a new turn. |
+| A session owes a chat reply and sends it with `send_message` to the chat room | It's posted as that session's chat turn to the peer it owes, instead of an untagged message the room had to guess about (which could be credited to another chat). |
+| Two sessions on one machine relay with the same label | Each skips only the messages it sent itself, and each project keeps its own read position. |
+| A long relay message is cut | Each cut drops at most the one newline it falls on, and never leaves whitespace Discord would trim; blank lines and indentation survive. |
+| A session holding a shared file's lock stalls | Waiters no longer go ahead unlocked after 15s (which could lose an update). The lock holds its holder's pid: an exited holder's lock is taken at once, a live one's only after 2 minutes, and a waiter that runs out of time gets an error ("nothing was posted - try again"). |
+| A local delete while sessions read the room nonstop | If Windows won't allow the room to be rewritten, a deletion record is appended instead; reads skip those messages and the next rewrite drops them. A delete no longer fails. |

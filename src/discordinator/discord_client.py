@@ -46,24 +46,59 @@ class DiscordError(Exception):
     """Raised when a Discord API request fails."""
 
 
-def chunk_content(content: str, limit: int = MAX_MESSAGE_LEN) -> list[str]:
+def chunk_content(content: str, limit: int = MAX_MESSAGE_LEN,
+                  prefixed: bool = False) -> list[str]:
     """Split ``content`` into pieces that respect Discord's per-message limit,
-    preferring to break on newline boundaries."""
-    if len(content) <= limit:
-        return [content] if content else [""]
+    preferring to break on newline boundaries. ``prefixed``: each piece will be
+    sent after a label (``[laptop] ...``), so it may start with whitespace."""
+    return [c for c, _sep in split_chunks(content, limit, prefixed)]
 
-    chunks: list[str] = []
-    remaining = content
-    while len(remaining) > limit:
-        window = remaining[:limit]
-        split = window.rfind("\n")
-        if split <= 0:
-            split = limit  # no newline; hard split
-        chunks.append(remaining[:split])
-        remaining = remaining[split:].lstrip("\n") if split != limit else remaining[split:]
-    if remaining:
-        chunks.append(remaining)
-    return chunks
+
+def split_chunks(content: str, limit: int = MAX_MESSAGE_LEN,
+                 prefixed: bool = False) -> list[tuple[str, str]]:
+    """``chunk_content`` with what each cut removed: ``(chunk, sep)`` pairs where
+    ``"".join(c + sep ...)`` is exactly ``content``. A cut at a newline drops
+    just that one newline (``sep="\\n"``), else it falls mid-line (``sep=""``).
+
+    Discord trims whitespace off both ends of a message, so a cut never leaves
+    any at the end of a chunk - nor at the start, unless each chunk goes out
+    after a label (``prefixed``), which shields it. So blank lines and
+    indentation at a cut survive. Preferred cuts: a newline, then (prefixed) a
+    word break, then mid-word; only a window with no clean cut at all is cut
+    at the limit."""
+    if len(content) <= limit:
+        return [(content, "")]
+
+    def ws(i: int) -> bool:
+        return 0 <= i < len(rest) and rest[i].isspace()
+
+    def clean(i: int) -> bool:  # rest[:i] / rest[i:] lose nothing to a trim
+        return not ws(i - 1) and (prefixed or not ws(i))
+
+    out: list[tuple[str, str]] = []
+    rest = content
+    while len(rest) > limit:
+        cut, sep = None, ""
+        for i in range(min(limit, len(rest) - 1), 0, -1):  # a newline
+            if rest[i] == "\n" and not ws(i - 1) and (prefixed or not ws(i + 1)):
+                cut, sep = i, "\n"
+                break
+        if cut is None and prefixed:
+            for i in range(limit, 0, -1):  # a word break: "word| next"
+                if not ws(i - 1) and ws(i):
+                    cut = i
+                    break
+        if cut is None:
+            for i in range(limit, 0, -1):  # mid-word
+                if clean(i):
+                    cut = i
+                    break
+        if cut is None:
+            cut = limit  # a window of nothing but whitespace
+        out.append((rest[:cut], sep))
+        rest = rest[cut + len(sep):]
+    out.append((rest, ""))
+    return out
 
 
 def _nonce() -> dict[str, Any]:
@@ -155,7 +190,7 @@ class DiscordClient:
         prefix = f"[{label}] " if label else ""
         body_limit = MAX_MESSAGE_LEN - len(prefix)
         sent: list[dict[str, Any]] = []
-        for piece in chunk_content(content, body_limit):
+        for piece in chunk_content(content, body_limit, prefixed=bool(prefix)):
             resp = self._request(
                 "POST",
                 f"/channels/{channel_id}/messages",

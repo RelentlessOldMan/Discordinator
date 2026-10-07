@@ -56,20 +56,65 @@ def read_json(path: Path, default: Any) -> Any:
         return default
 
 
-class FileLock:
-    """Cross-process lock via an ``O_EXCL`` lock file beside ``target``.
+class LockTimeout(OSError):
+    """A lock stayed held by a live process past the wait limit. Raised instead
+    of going ahead without it - that could lose another process's update."""
 
-    Holds are short, so contention is brief. A stale lock (holder crashed) is
-    stolen after ``stale`` seconds. If the lock can't be taken within
-    ``timeout`` seconds we proceed anyway rather than hang a chat forever.
+
+def pid_alive(pid: Any) -> bool:
+    """True if a process with this pid is running. Never signals the process
+    (on Windows, ``os.kill(pid, 0)`` would TERMINATE it, so query instead)."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        process_query_limited_information = 0x1000
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: exists
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+class FileLock:
+    """Cross-process lock via an ``O_EXCL`` lock file beside ``target``, which
+    holds the holder's pid.
+
+    Holds are short, so contention is brief. A lock whose holder has exited is
+    taken over at once; one with no readable pid (being written, or from an
+    older version) after ``stale`` seconds; one whose holder is still running
+    only after ``hung`` seconds (no real hold lasts that long). A waiter that
+    can't get the lock within ``timeout`` raises :class:`LockTimeout` - never
+    goes ahead without it, which could write over the holder's update.
     """
 
-    # stale < timeout: a crashed holder's lock is stolen well before any waiter
-    # gives up and proceeds unlocked.
-    def __init__(self, target: Path, timeout: float = 15.0, stale: float = 8.0):
+    def __init__(self, target: Path, timeout: float = 15.0, stale: float = 8.0,
+                 hung: float = 120.0):
         self.lockpath = str(target) + ".lock"
         self.timeout = timeout
         self.stale = stale
+        self.hung = hung
         self.fd: Optional[int] = None
 
     def __enter__(self) -> "FileLock":
@@ -78,10 +123,14 @@ class FileLock:
         while True:
             try:
                 self.fd = os.open(self.lockpath, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    os.write(self.fd, str(os.getpid()).encode())
+                except OSError:
+                    pass  # an unreadable pid only means waiters fall back to `stale`
                 return self
             except FileExistsError:
                 try:
-                    if time.time() - os.path.getmtime(self.lockpath) > self.stale:
+                    if self._abandoned(self.lockpath):
                         self._steal()
                 except OSError:
                     pass
@@ -90,21 +139,42 @@ class FileLock:
             # Check the deadline and pause on EVERY path - a lock we fail to
             # steal (its holder still has it open) must not spin forever.
             if time.monotonic() - start > self.timeout:
-                self.fd = None  # give up waiting; proceed unlocked
-                return self
+                raise LockTimeout(
+                    f"{self.lockpath} is held by another process (pid "
+                    f"{self._holder(self.lockpath) or 'unknown'}) for over "
+                    f"{self.timeout:.0f}s; nothing was changed - try again.")
             time.sleep(0.02)
 
+    @staticmethod
+    def _holder(path: str) -> Optional[int]:
+        try:
+            with open(path, "rb") as fh:
+                return int(fh.read(32).decode().strip() or "x")
+        except (OSError, ValueError):
+            return None
+
+    def _abandoned(self, path: str) -> bool:
+        """May this lock be taken over? Its holder has exited, or it has been
+        held far longer than any real hold."""
+        age = time.time() - os.path.getmtime(path)
+        pid = self._holder(path)
+        if pid is None:
+            return age > self.stale
+        if pid == os.getpid() or pid_alive(pid):
+            return age > self.hung
+        return True
+
     def _steal(self) -> None:
-        """Remove a stale lock. Renamed aside first (atomic: only one waiter can
-        win), then re-checked - if another waiter had just replaced it with a
-        fresh lock, that one is put back instead of deleted."""
+        """Remove an abandoned lock. Renamed aside first (atomic: only one waiter
+        can win), then re-checked - if another waiter had just replaced it with
+        a live lock, that one is put back instead of deleted."""
         aside = f"{self.lockpath}.{os.getpid()}.{time.monotonic_ns()}"
         try:
             os.rename(self.lockpath, aside)
         except OSError:
             return  # someone else got there first, or the holder still has it open
         try:
-            if time.time() - os.path.getmtime(aside) > self.stale:
+            if self._abandoned(aside):
                 os.remove(aside)
             else:
                 os.rename(aside, self.lockpath)
@@ -120,10 +190,18 @@ class FileLock:
                 os.close(self.fd)
             except OSError:
                 pass
-            try:
-                os.remove(self.lockpath)
-            except OSError:
-                pass
+            self.fd = None
+            # Windows refuses the delete while a waiter is reading the pid out
+            # of it (a moment): retry, or the lock would be left behind with a
+            # live pid in it and everyone would wait it out.
+            for _ in range(_IO_RETRIES):
+                try:
+                    os.remove(self.lockpath)
+                    return
+                except FileNotFoundError:
+                    return
+                except OSError:
+                    time.sleep(_IO_PAUSE)
 
 
 def _atomic_write(path: Path, text: str, restrict: bool = False) -> None:
@@ -494,9 +572,21 @@ def get_cursor(channel_id: str, reader: Optional[str] = None) -> Optional[str]:
     state = load_state()
     if reader:
         mine = (state.get("relay_cursors") or {}).get(str(channel_id)) or {}
-        if reader in mine:
-            return mine[reader] or None  # None: reset, read from scratch
+        for key in (reader, reader.split("|")[0]):  # "label|project", then "label"
+            if key in mine:
+                return mine[key] or None  # None: reset, read from scratch
     return (state.get("cursors") or {}).get(str(channel_id))
+
+
+def relay_reader(cfg: dict[str, Any]) -> Optional[str]:
+    """Whose relay read position this is: the label, plus the project's chat
+    handle when there is one - so two projects' sessions on one machine have
+    their own position even if they share a label."""
+    label = cfg.get("machine_label")
+    handle = cfg.get("chat_handle")
+    if label and handle:
+        return f"{label}|{handle}"
+    return label or (f"|{handle}" if handle else None)
 
 
 def set_cursor(channel_id: str, message_id: str, reader: Optional[str] = None) -> None:
