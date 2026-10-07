@@ -189,7 +189,18 @@ def test_result_shapes() -> None:
     p2 = transcript(user("x"), call("chat_await", {}, {"result": {"timed_out": True, "ended": False}}))
     check("chat_await" in json.loads(run(p2))["reason"], "{'result': {...}} unwrapped; default next")
     p3 = transcript(user("x"), call("chat_await", {}, "Error executing tool chat_await"))
-    check(run(p3) == "", "error result -> allowed (don't guess)")
+    check("chat_await again" in json.loads(run(p3))["reason"],
+          "a failed chat_await mid-chat blocks: wait again (it was waiting, so the chat is live)")
+    p3b = transcript(user("x"), call("chat_begin", {}, "Error executing tool chat_begin"))
+    check(run(p3b) == "", "a failed chat_begin with nothing before it -> allowed (don't guess)")
+    p3c = transcript(user("x"), call("chat_await", {}, "Error executing tool chat_await"),
+                     call("chat_say", {"status": "over"}, WAITING),
+                     call("chat_begin", {}, "Error executing tool chat_begin"))
+    check("chat_await again" in json.loads(run(p3c))["reason"],
+          "a failed chat_begin after a live chat result blocks (skipping unreadable results)")
+    p3d = transcript(user("x"), call("chat_await", {}, {"ended": True}),
+                     call("chat_begin", {}, "Error executing tool chat_begin"))
+    check(run(p3d) == "", "...but not when that result showed the chat ended")
     p4 = transcript(user("x"), call("chat_say", {"status": "over"}, WAITING, server="disco2"))
     check(json.loads(run(p4))["decision"] == "block", "any MCP server name works")
 

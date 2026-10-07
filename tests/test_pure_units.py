@@ -163,6 +163,13 @@ def test_is_human_stop() -> None:
     for t in ("endpoint changes done", "ending the retry loop", "endeavor to simplify"):
         check(chat.is_human_stop(t) is False,
               f"{t!r} does NOT end the chat (bare 'end' prefix footgun fixed)")
+    # REGRESSION: ordinary remarks that START with a stop word are remarks.
+    for t in ("Stop arguing about naming and look at the failing test.",
+              "End users will see this, keep the old name.",
+              "halt, wait - check the CHANGELOG first", "stop: use the v2 API"):
+        check(chat.is_human_stop(t) is False, f"{t!r} is a remark, not a stop")
+    for t in ("please stop", "Stop the chat", "end chat now!"):
+        check(chat.is_human_stop(t) is True, f"{t!r} is still a stop")
 
 
 def test_parse_header_roundtrip() -> None:

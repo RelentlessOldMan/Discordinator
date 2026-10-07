@@ -29,7 +29,7 @@ for _k in ("DISCORD_BOT_TOKEN", "DISCORDINATOR_CHAT_HANDLE"):
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
-from discordinator import handles  # noqa: E402
+from discordinator import config, handles  # noqa: E402
 from discordinator.config import ConfigError  # noqa: E402
 
 _passed = 0
@@ -162,6 +162,10 @@ def test_live_session_keeps_name_however_idle() -> None:
           "own claims record this process's start time")
     check(handles.process_started(-1) is None and handles.process_started(_dead_pid()) is None,
           "no start time for bad or dead pids")
+    held = subprocess.Popen([sys.executable, "-c", "pass"])
+    held.wait()  # exited, but this Popen still holds a handle to it
+    check(handles.process_started(held.pid) is None,
+          "an exited process has no start time even while a handle to it is open")
 
 
 def test_rename_note_on_every_call() -> None:
@@ -176,6 +180,30 @@ def test_rename_note_on_every_call() -> None:
         check("Echo-2" in said.get("handle_note", ""), "chat_say carries handle_note")
         waited = mcp.chat_await(channel="echo", timeout=0.1, poll=0.02, nudge_after=0)
         check("Echo-2" in waited.get("handle_note", ""), "chat_await carries handle_note")
+    finally:
+        other.kill()
+        other.wait()
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+
+
+def test_renamed_handle_passed_back() -> None:
+    print("a renamed session that passes its new name back as chatter stays itself:")
+    _fresh()
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CodeCarver"
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _plant("CodeCarver", other.pid)
+        b = mcp.chat_begin(channel="cc2")
+        check(b["chatter"] == "CodeCarver-2", "renamed to CodeCarver-2")
+        from discordinator import chat as _chat
+        from discordinator.local_client import LocalClient
+        _chat.send_chat(LocalClient("peer"), "cc2", "Peer", "over", "for you", to="CodeCarver-2")
+        got = mcp.chat_await(chatter="CodeCarver-2", channel="cc2", timeout=1, poll=0.02,
+                             nudge_after=0)
+        check(got["from"] == "Peer" and got["your_turn"],
+              "chatter='CodeCarver-2' is the same session, and gets its turn")
+        slots = config.load_state()["chat"]["cc2"]
+        check("codecarver/codecarver-2" not in slots, f"no stray role handle: {sorted(slots)}")
     finally:
         other.kill()
         other.wait()
@@ -252,6 +280,7 @@ def main() -> int:
     test_dead_or_expired_claims_reclaimed()
     test_live_session_keeps_name_however_idle()
     test_rename_note_on_every_call()
+    test_renamed_handle_passed_back()
     test_status_uses_session_name_without_claiming()
     test_suffix_respects_length()
     test_release_all()

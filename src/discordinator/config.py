@@ -11,8 +11,119 @@ import json
 import math
 import os
 import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
+
+# Windows refuses to replace or open a file another process has open at that
+# instant (sharing violation -> PermissionError). It clears within moments, so
+# file operations here retry briefly before giving up.
+_IO_RETRIES = 50
+_IO_PAUSE = 0.02
+
+
+def _replace(src: str, dst: Path) -> None:
+    for attempt in range(_IO_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _IO_RETRIES - 1:
+                raise
+            time.sleep(_IO_PAUSE)
+
+
+def read_json(path: Path, default: Any) -> Any:
+    """Parse a JSON file, retrying while another process is swapping it in.
+    A missing file gives ``default``; so does one that isn't valid JSON (writes
+    are atomic, so that means it's corrupt, not half-written). A file that stays
+    unreadable raises - never mistaken for "empty", which a later save would
+    then write back over everything in it."""
+    for attempt in range(_IO_RETRIES):
+        try:
+            text = path.read_text(encoding="utf-8")
+            break
+        except FileNotFoundError:
+            return default
+        except OSError:
+            if attempt == _IO_RETRIES - 1:
+                raise
+            time.sleep(_IO_PAUSE)
+    try:
+        return json.loads(text)
+    except ValueError:
+        return default
+
+
+class FileLock:
+    """Cross-process lock via an ``O_EXCL`` lock file beside ``target``.
+
+    Holds are short, so contention is brief. A stale lock (holder crashed) is
+    stolen after ``stale`` seconds. If the lock can't be taken within
+    ``timeout`` seconds we proceed anyway rather than hang a chat forever.
+    """
+
+    # stale < timeout: a crashed holder's lock is stolen well before any waiter
+    # gives up and proceeds unlocked.
+    def __init__(self, target: Path, timeout: float = 15.0, stale: float = 8.0):
+        self.lockpath = str(target) + ".lock"
+        self.timeout = timeout
+        self.stale = stale
+        self.fd: Optional[int] = None
+
+    def __enter__(self) -> "FileLock":
+        Path(self.lockpath).parent.mkdir(parents=True, exist_ok=True)
+        start = time.monotonic()
+        while True:
+            try:
+                self.fd = os.open(self.lockpath, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.lockpath) > self.stale:
+                        self._steal()
+                except OSError:
+                    pass
+            except PermissionError:
+                pass  # Windows: the lock file is mid-delete; try again
+            # Check the deadline and pause on EVERY path - a lock we fail to
+            # steal (its holder still has it open) must not spin forever.
+            if time.monotonic() - start > self.timeout:
+                self.fd = None  # give up waiting; proceed unlocked
+                return self
+            time.sleep(0.02)
+
+    def _steal(self) -> None:
+        """Remove a stale lock. Renamed aside first (atomic: only one waiter can
+        win), then re-checked - if another waiter had just replaced it with a
+        fresh lock, that one is put back instead of deleted."""
+        aside = f"{self.lockpath}.{os.getpid()}.{time.monotonic_ns()}"
+        try:
+            os.rename(self.lockpath, aside)
+        except OSError:
+            return  # someone else got there first, or the holder still has it open
+        try:
+            if time.time() - os.path.getmtime(aside) > self.stale:
+                os.remove(aside)
+            else:
+                os.rename(aside, self.lockpath)
+        except OSError:
+            try:
+                os.remove(aside)
+            except OSError:
+                pass
+
+    def __exit__(self, *exc: object) -> None:
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            try:
+                os.remove(self.lockpath)
+            except OSError:
+                pass
 
 
 def _atomic_write(path: Path, text: str, restrict: bool = False) -> None:
@@ -28,7 +139,7 @@ def _atomic_write(path: Path, text: str, restrict: bool = False) -> None:
                 os.chmod(tmp, 0o600)
             except OSError:
                 pass
-        os.replace(tmp, path)
+        _replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             try:
@@ -347,19 +458,23 @@ def state_path() -> Path:
 
 
 def load_state() -> dict[str, Any]:
-    path = state_path()
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
+    data = read_json(state_path(), {})
+    return data if isinstance(data, dict) else {}
 
 
 def save_state(state: dict[str, Any]) -> None:
     _atomic_write(state_path(), json.dumps(state, indent=2))
+
+
+@contextmanager
+def update_state() -> Iterator[dict[str, Any]]:
+    """Read-modify-write state.json under a cross-process lock. Every session on
+    the machine shares this file (each with its own cursors), so an unlocked
+    update could write a stale copy back over another session's fresh one."""
+    with FileLock(state_path()):
+        state = load_state()
+        yield state
+        save_state(state)
 
 
 def get_cursor(channel_id: str) -> Optional[str]:
@@ -367,14 +482,12 @@ def get_cursor(channel_id: str) -> Optional[str]:
 
 
 def set_cursor(channel_id: str, message_id: str) -> None:
-    state = load_state()
-    state.setdefault("cursors", {})[str(channel_id)] = str(message_id)
-    save_state(state)
+    with update_state() as state:
+        state.setdefault("cursors", {})[str(channel_id)] = str(message_id)
 
 
 def clear_cursor(channel_id: str) -> None:
-    state = load_state()
-    cursors = state.get("cursors") or {}
-    cursors.pop(str(channel_id), None)
-    state["cursors"] = cursors
-    save_state(state)
+    with update_state() as state:
+        cursors = state.get("cursors") or {}
+        cursors.pop(str(channel_id), None)
+        state["cursors"] = cursors

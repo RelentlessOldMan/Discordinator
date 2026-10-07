@@ -398,18 +398,10 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client("chat") as client:
         st = chat.compute_state(client, channel_id, me)
-        if st.get("your_turn") and st.get("_pending_predecessor"):
-            # A turn is already owed to me (e.g. I ended/dropped and the other
-            # side spoke again). Position the cursor so chat_await re-delivers it
-            # immediately — recovery instead of a silent stall.
-            cursor = st["_pending_predecessor"]
-        elif st.get("_open_run_predecessor"):
-            # Someone is partway through a long turn: start before its first
-            # piece so it arrives whole.
-            cursor = st["_open_run_predecessor"]
-        else:
-            latest = client.read_messages(channel_id, limit=1)
-            cursor = latest[0]["id"] if latest else "0"
+        # A turn already owed to me (e.g. I ended/dropped and the other side
+        # spoke again) is re-delivered by chat_await - recovery instead of a
+        # silent stall; a long turn in progress arrives whole.
+        cursor = chat.seed_cursor(client, channel_id, me)
     chat.reset(channel_id, me, cursor, turn_cap)
     owed = bool(st.get("your_turn"))
     out = {
@@ -422,6 +414,12 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
                       "chat_await(...))." if st.get("stop_reason") == "human"
                  else "initiator: chat_say(...); other: chat_await(...)"),
     }
+    others = [p for p in st.get("participants", []) if not chat.same_handle(p, me)]
+    joined = any(chat.same_handle(p, me) for p in st.get("_posters", []))
+    if st.get("session_active") and others and not owed and not joined:
+        busy = (f"Another chat is going on in this room ({', '.join(others)}). Address "
+                "every turn you send (to='<your peer>') so yours and theirs don't mix.")
+        note = f"{note} {busy}" if note else busy
     if note:
         out["note"] = note
     return out
@@ -468,8 +466,10 @@ def chat_say(
 
     `to`: address this turn to ONE participant by handle (e.g. to="C"). Required
     discipline in a 3+ party room — an addressed `over`/`wrap` passes the floor to
-    exactly that peer, so only they wake; leaving it unset broadcasts (anyone may
-    answer, which can collide). In a 2-party chat just omit it. Special targets
+    exactly that peer, so only they wake. Omitted, the turn is addressed to
+    whoever handed you the turn (so a reply goes back to its asker, even with
+    other chats in the room); with nobody to reply to (an opener) it's open to
+    anyone - so address an opener when you know your peer. Special targets
     all/everyone/* broadcast explicitly. If `to` names nobody known (nobody by
     that name has posted, and no live session here has it), it returns at once
     with a `note` ("did you mean ...?") instead of waiting.
@@ -490,7 +490,11 @@ def chat_say(
     paths in `text` yourself.
 
     If this call raises, the message was NOT posted (the error says so); if it
-    was your turn, it still is - fix the problem and call chat_say again.
+    was your turn, it still is - fix the problem and call chat_say again. It
+    refuses on purpose when something for you arrived that you haven't read
+    (call chat_await first) or when an unaddressed turn would talk over someone
+    else's floor. If it returns `posted: true` with an `error`, the message WAS
+    posted and something failed afterwards - don't send it again; follow `next`.
     """
     cfg = config.load()
     try:
@@ -518,6 +522,11 @@ def chat_say(
             "turn, it still is - the others are waiting on you. Fix this and send "
             "it again with chat_say(...) before calling chat_await.") from e
     with chat_client as client:
+        try:
+            target, auto_note = _check_turn(client, channel_id, me, status, target)
+        except Exception as e:
+            raise ChatSendError(
+                f"{e}\n\nNothing was posted, so nobody saw this message.") from e
         to_note = _unknown_to_note(client, channel_id, me, target)
         try:
             sent = chat.send_chat(client, channel_id, me, status, text, to=target,
@@ -537,47 +546,119 @@ def chat_say(
                 f"{e}\n\nNothing was posted, so nobody saw this message. If it was "
                 "your turn, it still is - the others are waiting on you. Fix this and "
                 "send it again with chat_say(...) before calling chat_await.") from e
-        # `say`/`ask` don't complete a turn, so they don't count against the cap.
-        took_turn = status not in chat.NON_TURN_STATUSES
-        turns = chat.bump_turn(channel_id, me) if took_turn else chat.get_meta(channel_id, me)[0]
-        _, cap = chat.get_meta(channel_id, me)
-        out = {
-            "sent_messages": len(sent),
-            "status": status,
-            "to": target,
-            "my_turns": turns,
-            "turn_cap": cap,
-            "cap_reached": turns >= cap,
-            "ended": status in chat.TERMINAL_STATUSES,
-        }
-        if shared:
-            out["files_shared"] = shared
-        if handle_note:
-            out["handle_note"] = handle_note
-        # After yielding in a multiparty room, tell the model who's waiting so it
-        # can rotate fairly (address suggest_next next time to avoid starving).
-        if status in chat.YIELD_STATUSES:
-            st = chat.compute_state(client, channel_id, me)
-            if st.get("multiparty"):
-                out["pending_requests"] = st.get("floor_requests", [])
-                out["waiting"] = st.get("waiting", [])
-                out["suggest_next"] = st.get("suggest_next")
-                if not target:
-                    out["note"] = ("Multiparty room: you yielded without a `to`, so "
-                                   "anyone may answer. Address your next turn "
-                                   "(to=...) to avoid collisions and starvation — "
-                                   f"suggested: {st.get('suggest_next')}.")
-        if to_note:
-            # Probably a typo: waiting would just sit there, so say so now.
-            out["note"] = to_note
-            out["next"] = (f"Check `to`: if '{target}' is right, call chat_await to "
-                           "wait for their reply; if not, re-send to the right handle.")
-        elif status in chat.YIELD_STATUSES and wait:
-            reply = chat.await_turn(client, channel_id, me, timeout=timeout)
-            out["reply"] = reply
-            out["next"] = chat.next_step(reply)
-        else:
-            out["next"] = _say_next(status)
+        try:
+            return _after_post(client, channel_id, me, status, target, sent, shared,
+                               handle_note, auto_note, to_note, wait, timeout)
+        except Exception as e:
+            # The message IS out - the others can see it. Say so, so it isn't
+            # sent twice; the reply (if any) is fetched with chat_await.
+            out = {"sent_messages": len(sent), "status": status, "to": target,
+                   "posted": True, "ended": status in chat.TERMINAL_STATUSES,
+                   "error": f"{type(e).__name__}: {e}"}
+            if status in chat.TERMINAL_STATUSES:
+                out["next"] = "The chat has ended. You may stop."
+            else:
+                out["next"] = ("Your message WAS posted - don't send it again. Something "
+                               "failed afterwards (see `error`). " + _say_next(status))
+            return out
+
+
+def _check_turn(client: Client, channel_id: str, me: str, status: str,
+                target: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Checks before posting a turn. Returns the address to use (an unaddressed
+    reply goes back to whoever handed me the turn) and a note if it was filled
+    in. Raises - so nothing is posted - when posting now would be talking over
+    someone: something new for me arrived that I haven't read, or another
+    participant holds the floor in a conversation I'm not part of."""
+    if status in chat.TERMINAL_STATUSES or status == "ask":
+        return target, None  # ending or raising a hand is always allowed
+    if not chat.get_cursor(channel_id, me):
+        # Never joined (no chat_begin) and speaking now: start reading from
+        # here, so the reply wait doesn't pick up turns from an older chat.
+        latest = client.read_messages(channel_id, limit=1)
+        chat.set_cursor(channel_id, me, latest[0]["id"] if latest else "0")
+    st = chat.compute_state(client, channel_id, me)
+    mid_turn = any(chat.same_handle(x["from"], me) for x in st.get("progress", []))
+    # (Finishing my own say/working turn is never blocked: I hold the floor,
+    # and chat_await would only tell me to finish it first.)
+    unread = [] if mid_turn else chat.unread_for_me(client, channel_id, me)
+    if unread:
+        m = unread[0]
+        p = chat.parse(m["content"])
+        who = "A human" if p is None else p["participant"]
+        raise RuntimeError(
+            f"{who} posted something you haven't read yet (\"{(p['body'] if p else m['content'])[:80]}\"). "
+            "Call chat_await to read it first, then reply.")
+    note = None
+    if target is None:
+        back = chat.get_reply_to(channel_id, me)
+        if back:
+            target = back
+            note = (f"Addressed to {back} (who handed you the turn). Pass to=... to "
+                    "pick someone else, or to='all' to let anyone answer.")
+    if target is None and status in chat.YIELD_STATUSES:
+        pend, floor = st.get("pending_turn"), st.get("floor")
+        if (pend and floor and not st.get("your_turn")
+                and not chat._is_broadcast(pend.get("to"))
+                and not chat.same_handle(floor, me)
+                and not chat.same_handle(pend["from"], me)):
+            raise RuntimeError(
+                f"{floor} has the floor ({pend['from']} handed it to them), so an "
+                "unaddressed turn would talk over them. To join their conversation, "
+                "raise a hand with status='ask'. To talk to someone else in this room, "
+                "address it: to='<their handle>'.")
+    return target, note
+
+
+def _after_post(client: Client, channel_id: str, me: str, status: str,
+                target: Optional[str], sent: list, shared: list,
+                handle_note: Optional[str], auto_note: Optional[str],
+                to_note: Optional[str], wait: bool, timeout: float) -> dict[str, Any]:
+    """Everything chat_say does once the message is out: count the turn, report
+    the room, and wait for the reply."""
+    # `say`/`ask` don't complete a turn, so they don't count against the cap.
+    took_turn = status not in chat.NON_TURN_STATUSES
+    turns = chat.bump_turn(channel_id, me) if took_turn else chat.get_meta(channel_id, me)[0]
+    _, cap = chat.get_meta(channel_id, me)
+    out = {
+        "sent_messages": len(sent),
+        "status": status,
+        "to": target,
+        "my_turns": turns,
+        "turn_cap": cap,
+        "cap_reached": turns >= cap,
+        "ended": status in chat.TERMINAL_STATUSES,
+    }
+    if shared:
+        out["files_shared"] = shared
+    if handle_note:
+        out["handle_note"] = handle_note
+    # After yielding in a multiparty room, tell the model who's waiting so it
+    # can rotate fairly (address suggest_next next time to avoid starving).
+    if status in chat.YIELD_STATUSES:
+        st = chat.compute_state(client, channel_id, me)
+        if st.get("multiparty"):
+            out["pending_requests"] = st.get("floor_requests", [])
+            out["waiting"] = st.get("waiting", [])
+            out["suggest_next"] = st.get("suggest_next")
+            if not target:
+                out["note"] = ("Multiparty room: you yielded without a `to`, so "
+                               "anyone may answer. Address your next turn "
+                               "(to=...) to avoid collisions and starvation — "
+                               f"suggested: {st.get('suggest_next')}.")
+    if auto_note and "note" not in out:
+        out["note"] = auto_note
+    if to_note:
+        # Probably a typo: waiting would just sit there, so say so now.
+        out["note"] = to_note
+        out["next"] = (f"Check `to`: if '{target}' is right, call chat_await to "
+                       "wait for their reply; if not, re-send to the right handle.")
+    elif status in chat.YIELD_STATUSES and wait:
+        reply = chat.await_turn(client, channel_id, me, timeout=timeout)
+        out["reply"] = reply
+        out["next"] = chat.next_step(reply)
+    else:
+        out["next"] = _say_next(status)
     return out
 
 

@@ -169,6 +169,50 @@ def test_surface_parity() -> None:
     check(True, "add_reaction is a harmless no-op in local mode")
 
 
+def test_attachments_copied_outside_lock() -> None:
+    print("attachments are copied before the room lock, and never moved afterwards:")
+    src = _TMP / "att.txt"
+    src.write_text("payload", encoding="utf-8")
+    c = LocalClient(label="att")
+    rec = c.send_files("attroom", "see file", [src])[0]
+    url = Path(rec["attachments"][0]["url"])
+    check(url.read_text(encoding="utf-8") == "payload" and url.parent.name == rec["id"],
+          "normally stored under the message's id")
+    # Another writer gets a larger id in while our copy is running.
+    real_store = LocalClient._store_files
+
+    def slow_store(self, fdir, files):
+        out = real_store(self, fdir, files)
+        with open(c._room_path("attroom"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"id": str(int(fdir.name) + 50), "author": {"id": "o", "bot": True},
+                                 "timestamp": "2099-01-01T00:00:00+00:00", "content": "jump",
+                                 "attachments": []}) + "\n")
+        return out
+
+    LocalClient._store_files = slow_store
+    try:
+        rec2 = c.send_files("attroom", "again", [src])[0]
+    finally:
+        LocalClient._store_files = real_store
+    url2 = Path(rec2["attachments"][0]["url"])
+    check(url2.read_text(encoding="utf-8") == "payload" and url2.parent.name != rec2["id"],
+          "if the id moved on, the file stays where it was copied and its url says so")
+    check(int(rec2["id"]) > int(url2.parent.name), "ids still only go up")
+    os.environ["DISCORDINATOR_LOCAL_RETENTION_DAYS"] = "1"
+    try:
+        lines = c._room_path("attroom").read_text(encoding="utf-8").splitlines()
+        recs = [json.loads(x) for x in lines if x.strip()]
+        for r in recs:
+            r["timestamp"] = "2000-01-01T00:00:00+00:00"  # everything is past the window
+        c._room_path("attroom").write_text("".join(json.dumps(r) + "\n" for r in recs),
+                                           encoding="utf-8")
+        LocalClient(label="pruner").post("attroom", "trigger prune")
+    finally:
+        os.environ.pop("DISCORDINATOR_LOCAL_RETENTION_DAYS")
+    check(not url2.parent.exists() and not url.parent.exists(),
+          "retention cleanup follows each url to remove the files")
+
+
 def main() -> int:
     test_max_id_large_room_tail_read()
     test_torn_trailing_line_tolerated()
@@ -178,6 +222,7 @@ def main() -> int:
     test_read_retries_while_file_swapped()
     test_append_lock_timeout_proceeds()
     test_surface_parity()
+    test_attachments_copied_outside_lock()
     print(f"\nALL {_passed} LOCAL-CLIENT EDGE CHECKS PASSED")
     return 0
 

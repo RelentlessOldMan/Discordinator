@@ -72,73 +72,8 @@ def sanitize_room(name: str) -> str:
     return safe.strip("-").lower() or "room"
 
 
-class _AppendLock:
-    """Cross-process spin-lock via an ``O_EXCL`` lock file.
-
-    Appends are tiny, so contention is brief. A stale lock (holder crashed) is
-    stolen after ``stale`` seconds. If the lock can't be taken within
-    ``timeout`` seconds we proceed anyway rather than hang a chat forever — a
-    torn trailing line is tolerated by the reader (it skips unparseable lines).
-    """
-
-    # stale < timeout: a crashed holder's lock is stolen well before any waiter
-    # gives up and writes unlocked.
-    def __init__(self, target: Path, timeout: float = 15.0, stale: float = 8.0):
-        self.lockpath = str(target) + ".lock"
-        self.timeout = timeout
-        self.stale = stale
-        self.fd: Optional[int] = None
-
-    def __enter__(self) -> "_AppendLock":
-        start = time.monotonic()
-        while True:
-            try:
-                self.fd = os.open(self.lockpath, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                return self
-            except FileExistsError:
-                try:
-                    age = time.time() - os.path.getmtime(self.lockpath)
-                    if age > self.stale:
-                        self._steal()
-                        continue
-                except OSError:
-                    pass
-                if time.monotonic() - start > self.timeout:
-                    self.fd = None  # give up waiting; proceed unlocked
-                    return self
-                time.sleep(0.02)
-
-    def _steal(self) -> None:
-        """Remove a stale lock. Renamed aside first (atomic: only one waiter can
-        win), then re-checked - if another waiter had just replaced it with a
-        fresh lock, that one is put back instead of deleted."""
-        aside = f"{self.lockpath}.{os.getpid()}.{time.monotonic_ns()}"
-        try:
-            os.rename(self.lockpath, aside)
-        except OSError:
-            return  # someone else got there first
-        try:
-            if time.time() - os.path.getmtime(aside) > self.stale:
-                os.remove(aside)
-            else:
-                os.rename(aside, self.lockpath)
-        except OSError:
-            try:
-                os.remove(aside)
-            except OSError:
-                pass
-
-    def __exit__(self, *exc: object) -> None:
-        if self.fd is not None:
-            try:
-                os.close(self.fd)
-            except OSError:
-                pass
-            try:
-                os.remove(self.lockpath)
-            except OSError:
-                pass
-            self.fd = None
+# One lock implementation for every shared file (rooms, handles, state).
+_AppendLock = config.FileLock
 
 
 class LocalClient:
@@ -224,11 +159,10 @@ class LocalClient:
         return self._dir / "files" / str(message_id)
 
     def _store_files(
-        self, message_id: str, source_files: list[Union[str, Path]]
+        self, fdir: Path, source_files: list[Union[str, Path]]
     ) -> list[dict[str, Any]]:
-        """Copy each source file into this message's store and return attachment
-        dicts (same shape as a Discord read) whose ``url`` is the stored path."""
-        fdir = self._files_dir(message_id)
+        """Copy each source file into ``fdir`` and return attachment dicts (same
+        shape as a Discord read) whose ``url`` is the stored path."""
         fdir.mkdir(parents=True, exist_ok=True)
         attachments: list[dict[str, Any]] = []
         for src in source_files:
@@ -305,9 +239,19 @@ class LocalClient:
             except OSError:
                 pass
             return 0
+        files_root = self._files_dir("x").parent.resolve()
         for r in dropped:  # their stored attachment copies go too
-            if r.get("attachments"):
-                shutil.rmtree(self._files_dir(str(r["id"])), ignore_errors=True)
+            atts = r.get("attachments") or []
+            dirs = {self._files_dir(str(r["id"]))} if atts else set()
+            for a in atts:
+                folder = Path(str(a.get("url") or "")).parent
+                try:
+                    if folder.resolve().parent == files_root:
+                        dirs.add(folder)
+                except OSError:
+                    pass
+            for d in dirs:
+                shutil.rmtree(d, ignore_errors=True)
         return len(dropped)
 
     def _append(
@@ -322,10 +266,32 @@ class LocalClient:
         who = author or self._label
         path = self._room_path(channel_id)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Copy attachments BEFORE taking the room lock (a big copy could outlast
+        # the stale-lock limit and let another writer in). They go in a folder
+        # named for the id this message will almost always get; if another
+        # writer got in first, the files simply stay there (each attachment's
+        # url says where, and retention cleanup follows the urls). Nothing is
+        # moved afterwards - Windows can refuse to move a folder of fresh files.
+        candidate = time.time_ns()
+        attachments: list[dict[str, Any]] = []
+        if source_files:
+            files_root = self._files_dir("x").parent
+            files_root.mkdir(parents=True, exist_ok=True)
+            while True:
+                try:
+                    (files_root / str(candidate)).mkdir()
+                    break
+                except FileExistsError:
+                    candidate += 1
+            staged = files_root / str(candidate)
+            try:
+                attachments = self._store_files(staged, source_files)
+            except BaseException:
+                shutil.rmtree(staged, ignore_errors=True)
+                raise
         with _AppendLock(path):
             self._prune_locked(channel_id)
-            new_id = max(self._max_id(channel_id) + 1, time.time_ns())  # monotonic
-            attachments = self._store_files(str(new_id), source_files) if source_files else []
+            new_id = max(self._max_id(channel_id) + 1, candidate)  # monotonic
             rec = {
                 "id": str(new_id),
                 "author": {

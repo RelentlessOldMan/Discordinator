@@ -96,10 +96,17 @@ def process_started(pid: int) -> Optional[int]:
             kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
                 ctypes.POINTER(wintypes.FILETIME)] * 4
             kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
             handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
             if not handle:
                 return None
             try:
+                # An exited process still answers while anything holds a handle
+                # to it - it has no live start time.
+                code = wintypes.DWORD()
+                if (not kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+                        or code.value != 259):  # STILL_ACTIVE
+                    return None
                 t = [wintypes.FILETIME() for _ in range(4)]
                 if not kernel32.GetProcessTimes(handle, *[ctypes.byref(x) for x in t]):
                     return None
@@ -140,10 +147,10 @@ def _with_suffix(handle: str, n: int) -> str:
 
 def _load(path) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+        data = config.read_json(path, {})  # retries while another session swaps it
+    except OSError:
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _held_by_other(entry: Any, me: int, now: float) -> bool:
@@ -197,6 +204,14 @@ def resolve(chatter: Optional[str], cfg: dict[str, Any]) -> tuple[str, Optional[
     global _last_chatter
     if chatter in (None, "") and _last_chatter is not None:
         chatter = _last_chatter
+    # A session renamed to e.g. "CodeCarver-2" that passes that name back as
+    # `chatter` (as told: "pass the same chatter on every call") means itself,
+    # not a role "CodeCarver/CodeCarver-2".
+    held = next((h for h in _resolved.values() if chat.same_handle(h, chatter)), None)
+    if held is not None:
+        _last_chatter = str(chatter)
+        claim(held)  # refresh the lease, as any call does
+        return held, None
     desired = compose(chatter, cfg.get("chat_handle"))
     if chatter not in (None, ""):
         _last_chatter = str(chatter)

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -63,6 +64,13 @@ def chunk_content(content: str, limit: int = MAX_MESSAGE_LEN) -> list[str]:
     if remaining:
         chunks.append(remaining)
     return chunks
+
+
+def _nonce() -> dict[str, Any]:
+    """Fields that make a message POST safe to retry: if Discord already created
+    the message (the response was lost to a timeout), a retry carrying the same
+    nonce returns that message instead of posting a second copy."""
+    return {"nonce": secrets.token_hex(12), "enforce_nonce": True}
 
 
 class DiscordClient:
@@ -151,7 +159,7 @@ class DiscordClient:
             resp = self._request(
                 "POST",
                 f"/channels/{channel_id}/messages",
-                json={"content": f"{prefix}{piece}"},
+                json={"content": f"{prefix}{piece}", **_nonce()},
             )
             sent.append(resp.json())
         return sent
@@ -205,6 +213,7 @@ class DiscordClient:
             payload = {
                 "content": full if start == 0 else "",  # text only on the first message
                 "attachments": [{"id": i, "filename": p.name} for i, p in enumerate(batch)],
+                **_nonce(),
             }
             resp = self._request(
                 "POST",
@@ -219,7 +228,7 @@ class DiscordClient:
         """Post a single message verbatim (no chunking, no label). Used by chat
         mode, which manages its own per-message headers and chunking."""
         return self._request(
-            "POST", f"/channels/{channel_id}/messages", json={"content": content}
+            "POST", f"/channels/{channel_id}/messages", json={"content": content, **_nonce()}
         ).json()
 
     def read_messages(

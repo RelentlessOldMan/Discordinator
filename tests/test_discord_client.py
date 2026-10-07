@@ -86,6 +86,41 @@ def test_retry_on_network_error_then_success() -> None:
         client.close()
 
 
+def test_post_retry_carries_same_nonce() -> None:
+    print("a message POST retried after a lost response can't post twice:")
+    import json as _json
+    bodies = []
+
+    def handler(req):
+        bodies.append(_json.loads(req.content))
+        if len(bodies) == 1:  # Discord stored it, but the response was lost
+            raise httpx.ReadTimeout("response lost", request=req)
+        return httpx.Response(200, json={"id": "1", "content": bodies[-1]["content"]})
+
+    client = _client(handler)
+    try:
+        client.post("123", "[A|over] deploy to prod? yes/no")
+    finally:
+        client.close()
+    check(len(bodies) == 2, "the POST was retried once")
+    check(bodies[0].get("nonce") and bodies[0]["nonce"] == bodies[1]["nonce"]
+          and bodies[0].get("enforce_nonce") is True and bodies[1].get("enforce_nonce") is True,
+          "both attempts carry the same nonce with enforce_nonce (Discord returns the first)")
+    seen = set()
+
+    def ok(req):
+        seen.add(_json.loads(req.content)["nonce"])
+        return httpx.Response(200, json={"id": "2"})
+
+    client = _client(ok)
+    try:
+        client.post("123", "one")
+        client.send_message("123", "two")
+    finally:
+        client.close()
+    check(len(seen) == 2, "separate messages get separate nonces")
+
+
 def test_retry_exhausted_network_error() -> None:
     print("persistent network errors surface as a DiscordError:")
     state = {"n": 0}
@@ -161,6 +196,7 @@ def main() -> int:
         test_error_mapping()
         test_success_passthrough()
         test_retry_on_network_error_then_success()
+        test_post_retry_carries_same_nonce()
         test_retry_exhausted_network_error()
         test_rate_limit_backoff_then_success()
         test_rate_limit_persistent()

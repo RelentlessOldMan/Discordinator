@@ -54,14 +54,20 @@ def test_out_of_band_plain_reply_surfaces() -> None:
     check(r1["from"] == "A" and r1["status"] == "over" and r1["your_turn"],
           "B first receives A's proper chat turn")
 
-    # A replies with send_message (a plain relay message) instead of chat_say.
-    # Without the fix this would never wake B — the classic stranded-awaiter bug.
+    # B replies with send_message (a plain relay message) instead of chat_say.
+    # Without the fix this would never wake A — the classic stranded-awaiter bug.
+    chat.reset(room, "A", r1["messages"][-1]["id"], 20)
     c.send_message(room, "oops, I replied out of band")
-    r2 = chat.await_turn(c, room, "B", timeout=2.0, poll=0.05, nudge_after=0)
+    r2 = chat.await_turn(c, room, "A", timeout=2.0, poll=0.05, nudge_after=0)
     check(r2["from"] == "participant" and r2["status"] == "plain",
           "a plain (non-chat) bot reply surfaces as a 'plain' turn")
     check(r2["your_turn"] is True and r2["ended"] is False,
-          "the plain turn hands B the floor and does not end the chat")
+          "the plain turn hands A (who handed B the floor) the turn and doesn't end the chat")
+    r3 = chat.await_turn(c, room, "B", timeout=0.3, poll=0.05, nudge_after=0)
+    check(r3["timed_out"], "B (who held the floor and sent it) isn't handed its own reply")
+    st = chat.compute_state(c, room, "B")
+    check(st["floor"] == "A" and not st["your_turn"] and st["pending_turn"]["from"] == "B",
+          "state: the plain reply counts as B's turn, so the floor is back with A")
 
 
 def test_from_whom_narrowing() -> None:
