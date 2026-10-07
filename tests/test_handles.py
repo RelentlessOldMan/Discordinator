@@ -273,6 +273,102 @@ def test_mcp_begin_reports_rename() -> None:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
 
 
+def _restart() -> None:
+    """As if this session's MCP server restarted: same project, nothing remembered."""
+    handles.release_all()
+    handles._resolved.clear()
+    handles._last_chatter = None
+
+
+def test_restart_takes_its_role_back() -> None:
+    print("a restarted session that forgot its role takes back the turn owed to it:")
+    from discordinator import chat
+    from discordinator.local_client import LocalClient
+    _fresh()
+    c, room = LocalClient(), "restart"
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "ProjectB"
+    try:
+        check(mcp.chat_begin(chatter="convex", channel=room)["chatter"] == "ProjectB/convex",
+              "before: ProjectB/convex")
+        chat.send_chat(c, room, "ProjectB/convex", "over", "I'm ProjectB/convex now")
+        chat.send_chat(c, room, "CodeCarver", "over", "noting your new handle. Q1? Q2?",
+                       to="ProjectB/convex")
+        _restart()
+        st = mcp.chat_status(channel=room)
+        check(st["your_turn"] is True and st["chatter"] == "ProjectB/convex"
+              and "restart" in st["note"], "chat_status sees the turn under the old name")
+        check(handles._resolved == {}, "chat_status still claims nothing")
+        try:
+            mcp.chat_say(text="back - what did you want?", channel=room, wait=False)
+            check(False, "a reply without reading the question must be refused")
+        except Exception as e:  # noqa: BLE001
+            check("chat_await" in str(e), f"chat_say refuses until the question is read: {str(e)[:50]}")
+        _restart()
+        b = mcp.chat_begin(channel=room)
+        check(b["chatter"] == "ProjectB/convex" and b["recovered_pending_turn"]
+              and 'chatter="convex"' in b["note"], "chat_begin rejoins as ProjectB/convex")
+        r = mcp.chat_await(channel=room, timeout=2, poll=0.2)
+        check(r["your_turn"] and "Q1?" in r["text"], "chat_await delivers the question")
+        mcp.chat_say(text="A1, A2", channel=room, wait=False)
+        check(c.read_messages(room, limit=1)[0]["content"].startswith("[ProjectB/convex>CodeCarver|over]"),
+              "the answer goes out under the same name")
+        _restart()
+        b = mcp.chat_begin(channel=room)  # nothing owed now
+        check(b["chatter"] == "ProjectB",
+              "with nothing owed, a fresh session is just the project handle")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+
+
+def test_lost_role_not_stolen_or_guessed() -> None:
+    print("a role held by a live session isn't taken; two lost roles are only named:")
+    from discordinator import chat
+    from discordinator.local_client import LocalClient
+    _fresh()
+    c = LocalClient()
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "ProjectB"
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        chat.send_chat(c, "held", "CodeCarver", "over", "Q?", to="ProjectB/ui")
+        _plant("ProjectB/ui", other.pid)
+        b = mcp.chat_begin(channel="held")
+        check(b["chatter"] == "ProjectB" and "ProjectB/ui" not in (b.get("note") or ""),
+              "a live sibling keeps its name and its turn")
+        _fresh()
+        chat.send_chat(c, "two", "CodeCarver", "over", "Q?", to="ProjectB/ui")
+        chat.send_chat(c, "two", "Other", "over", "Q?", to="ProjectB/api")
+        b = mcp.chat_begin(channel="two")
+        check(b["chatter"] == "ProjectB", "two candidates: no guess")
+        check("'ProjectB/ui'" in b["note"] and "'ProjectB/api'" in b["note"]
+              and 'chatter="ui"' in b["note"], "both lost turns named, with the fix")
+        r = mcp.chat_await(channel="two", timeout=0.3, poll=0.1)
+        check(r["timed_out"] and "ProjectB/ui" in r["handle_note"],
+              "a timed-out wait points at them too")
+    finally:
+        other.kill()
+        other.wait()
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+
+
+def test_turn_owed_to_the_name_before_a_project_handle() -> None:
+    print("a turn owed to the old handle (before the project had one) is pointed out:")
+    from discordinator import chat
+    from discordinator.local_client import LocalClient
+    _fresh()
+    c, room = LocalClient(), "oldname"
+    chat.send_chat(c, room, "carver", "over", "Q?", to="convex")
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "TDTS_Convex"
+    try:
+        b = mcp.chat_begin(chatter="convex", channel=room)
+        check(b["chatter"] == "TDTS_Convex/convex", "the session keeps its new name")
+        check("'convex'" in b["note"] and "read_messages" in b["note"],
+              "chat_begin says a turn is owed to its old name and how to answer it")
+        st = mcp.chat_status(channel=room)
+        check("'convex'" in st.get("note", ""), "chat_status says so too")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+
+
 def main() -> int:
     test_compose()
     test_pid_alive()
@@ -285,6 +381,9 @@ def main() -> int:
     test_suffix_respects_length()
     test_release_all()
     test_mcp_begin_reports_rename()
+    test_restart_takes_its_role_back()
+    test_lost_role_not_stolen_or_guessed()
+    test_turn_owed_to_the_name_before_a_project_handle()
     print(f"\nALL {_passed} HANDLE CHECKS PASSED")
     return 0
 

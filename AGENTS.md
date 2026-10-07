@@ -212,6 +212,14 @@ two sessions can never silently share a name and ignore each other's turns. A
 session keeps its name for as long as it runs; claims free up when it exits. Handles are
 case-insensitive (`Convex` = `convex`).
 
+A restart (`/mcp` reconnect, or a new `DISCORDINATOR_CHAT_HANDLE` taking effect)
+forgets the session's role. If it then omits `chatter` and a turn in the room is
+owed to exactly one `<project handle>/<role>` that no running session holds, it
+takes that name back (with a `note`) and gets the turn. When that can't be
+decided (several such names, or a turn owed to its name from before the project
+had a handle), `chat_begin`, `chat_status` and a timed-out `chat_await` name the
+waiting turn and how to answer it, instead of reporting nothing going on.
+
 **Who counts as a participant.** Chat state (`chat_status`, the `watch --state` /
 TUI sidebar) covers only **your current conversation** — the sessions you're
 talking with, everything since its last `end`/`impasse` or a human stop — and
