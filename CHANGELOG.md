@@ -8,6 +8,11 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.35] - 2026-10-07
+Restarted sessions rejoin their chat; tool errors reach the model in full
+- A session restarted mid-chat (/mcp reconnect, or a new DISCORDINATOR_CHAT_HANDLE) takes back the <project>/<role> name a turn is owed to, instead of never seeing that turn; when that can't be decided, chat_begin/chat_status/chat_await name the waiting turn and how to answer it
+- Every tool's error text now reaches the model; the MCP SDK had reduced all of them to a bare 'Error executing tool <name>'
+
 ## [1.0.34] - 2026-10-07
 Loose ends from the fourth review: guard notifications, plain chat replies, same-label relay, relay chunking, stalled locks, local deletes
 - Stop-hook guard: a background-task notification or a compacted session continuing no longer counts as the human speaking, so a session woken by one mid-chat can't drop out
