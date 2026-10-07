@@ -690,7 +690,10 @@ def compute_state(
         "floor_requests": floor_requests,
         "waiting": waiting,
         "suggest_next": suggest_next,
-        "progress": [v for k, v in progress.items() if k in participants],
+        # A say/working is a turn in progress only from whoever may speak now: in
+        # a 3+ room, a non-holder posting `working` doesn't hold anyone up.
+        "progress": [v for k, v in progress.items()
+                     if k in participants and (floor is None or k == floor)],
         "_pending_predecessor": pending_predecessor,
         "_pending_text": last_text if pending else None,
     }

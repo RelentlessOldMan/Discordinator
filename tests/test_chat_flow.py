@@ -228,6 +228,28 @@ def test_mcp_await_has_next() -> None:
     check("chat_await to wait" in chat.next_step({}), "fallback -> wait")
 
 
+def test_non_holder_working_3way() -> None:
+    print("3-way: a non-holder's `working` doesn't count as holding the floor:")
+    r = "trio-work"
+    for h in ("A", "B", "C"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="A, your call", chatter="B", channel=r, to="A", wait=False)
+    mcp.chat_say(text="meanwhile I'll check the schema", chatter="C", channel=r,
+                 status="working", wait=False)
+    for i in (1, 2):  # the 2nd call is past the fresh-message shortcut
+        c = mcp.chat_await(chatter="C", channel=r, timeout=0.2, poll=0.02, nudge_after=0)
+        check(not c.get("unfinished_turn") and c["timed_out"],
+              f"C's chat_await #{i} keeps waiting (A holds the floor, not C)")
+    b = mcp.chat_await(chatter="B", channel=r, timeout=0.2, poll=0.02, nudge_after=0)
+    check("C is working" not in (b.get("note") or "") and b["progress"] == [],
+          "B isn't told C holds the floor")
+    st = chat.compute_state(LocalClient("B"), r, "B")
+    check(st["floor"] == "A" and st["progress"] == [], "state: floor A, no turn in progress")
+    mcp.chat_say(text="on it", chatter="A", channel=r, status="working", wait=False)
+    st = chat.compute_state(LocalClient("B"), r, "B")
+    check([x["from"] for x in st["progress"]] == ["A"], "the holder's `working` does count")
+
+
 def main() -> int:
     test_say_waits_for_reply()
     test_say_wait_timeout_says_keep_waiting()
@@ -240,6 +262,7 @@ def main() -> int:
     test_newer_message_beats_unfinished_check()
     test_nudge_names_stalled_say()
     test_mcp_await_has_next()
+    test_non_holder_working_3way()
     print(f"\nALL {_passed} CHAT-FLOW CHECKS PASSED")
     return 0
 

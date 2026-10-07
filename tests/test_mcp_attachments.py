@@ -131,6 +131,15 @@ def test_failed_send_keeps_turn_3way() -> None:
     other = mcp.chat_await(chatter="C", channel=room, timeout=0.3, poll=0.02, nudge_after=0)
     check(other["timed_out"] and not other["your_turn"], "C (not addressed) keeps waiting")
 
+    many = [str(_TMP / "pic.png")] * 11
+    for kw, cause, what in ((dict(files=many), ValueError, "11 files"),
+                            (dict(status="bogus"), ValueError, "a bad status")):
+        try:
+            mcp.chat_say(text="x", chatter="A", channel=room, **kw)
+            raise AssertionError(what)
+        except ChatSendError as e:
+            check(isinstance(e.__cause__, cause) and "Nothing was posted" in str(e),
+                  f"{what} -> nothing posted, says so")
     orig = mcp.chat.send_chat
     def boom(*a, **k):
         raise RuntimeError("disk full")
