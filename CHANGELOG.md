@@ -8,6 +8,14 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.33] - 2026-10-07
+Fourth review fixes: one conversation per session in a shared room, per-session relay, config and CLI room
+- Another chat's end, unaddressed turns, plain replies and members no longer reach your conversation in a shared room; an unaddressed end goes to your peer
+- An unaddressed opener reaches a late responder; a turn owed to an idle session survives 100+ messages of other traffic
+- chat_status answers for a second session's own name; two answers at the same instant: one gets through
+- Split turns survive Discord trimming whitespace
+- Relay read positions are per label (set DISCORDINATOR_LABEL per project); config set-* never saves env overrides; stop/interject/watch use the room the sessions last used; local purges retry while Windows refuses
+
 ## [1.0.32] - 2026-10-06
 Third review fixes: sessions sharing a machine or a room, posted-then-failed sends, plain replies, stop words
 - state.json is updated under a cross-process lock, so one session can't erase another's read position or crash with Access is denied
