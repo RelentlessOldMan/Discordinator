@@ -8,6 +8,12 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.29] - 2026-10-06
+Review fixes: 3-way floor handling, Stop hook catches failed chat_say; docs caught up
+- 3+ party chats: a say/working from someone who doesn't hold the floor no longer counts as holding it (no false 'send over', no misleading wait notes, no suppressed reminder)
+- Stop-hook guard: blocks once when the last chat_say errored (the turn probably never went out); reminder tracking no longer depends on how Claude Code logs the hook's feedback
+- Docs: README, protocol notes, example transcripts, AGENTS and chat_await description updated for v1.0.26-1.0.28
+
 ## [1.0.28] - 2026-10-06
 A failed chat send can't strand a turn; local chats share file paths
 - If chat_say fails, the error says nothing was posted and that it is still your turn (works in 3+ party chats: only the floor holder is owed the turn)
