@@ -158,16 +158,86 @@ def test_lock_unstealable_still_times_out() -> None:
 
     lk._steal = cant_steal
     t0 = time.monotonic()
-    with lk:
-        took = time.monotonic() - t0
+    try:
+        with lk:
+            raise AssertionError("got a lock that is still held")
+    except config.LockTimeout:
+        pass
+    took = time.monotonic() - t0
     check(0.4 < took < 3.0, f"gave up at the timeout ({took:.2f}s), not past it")
     check(tries["n"] < 100, f"paused between attempts ({tries['n']} tries, no busy spin)")
-    check(lk.fd is None and lock.exists(), "proceeded unlocked; the holder's lock untouched")
+    check(lk.fd is None and lock.exists(), "raised (never went ahead unlocked); the holder's lock untouched")
     lock.unlink()
+
+
+def test_lock_follows_its_holder() -> None:
+    print("a lock is taken over when its holder has exited - and never from a live one:")
+    target = _TMP / "owned.jsonl"
+    lock = Path(str(target) + ".lock")
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    lock.write_text(str(gone.pid), encoding="utf-8")  # fresh, but its holder exited
+    t0 = time.monotonic()
+    lk = config.FileLock(target, timeout=2, stale=30)
+    with lk:
+        took = time.monotonic() - t0
+        check(lk.fd is not None and took < 1.0,
+              f"an exited holder's lock is taken over at once ({took:.2f}s)")
+    alive = os.getppid()
+    lock.write_text(str(alive), encoding="utf-8")
+    old = time.time() - 60
+    os.utime(lock, (old, old))  # older than `stale`, but its holder is running
+    try:
+        with config.FileLock(target, timeout=0.5, stale=8):
+            raise AssertionError("took a lock from a live holder")
+    except config.LockTimeout as e:
+        check(str(alive) in str(e), "a live holder's lock isn't taken; the error names its pid")
+    check(lock.read_text(encoding="utf-8") == str(alive), "and the holder's lock is left as it was")
+    lock.unlink()
+
+
+_STALLED = r"""
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from discordinator import config
+with config.update_state() as state:  # read, then stall, then write its copy back
+    print("holding", flush=True)
+    time.sleep(3)
+    state["stalled_writer"] = "done"
+"""
+
+
+def test_stalled_holder_loses_nothing() -> None:
+    print("a waiter never writes over a stalled holder's update:")
+    holder = subprocess.Popen([sys.executable, "-c", _STALLED, _SRC], stdout=subprocess.PIPE,
+                              text=True, env=os.environ.copy())
+    check(holder.stdout.readline().strip() == "holding", "a session holds state.json and stalls")
+    real = config.FileLock
+
+    def impatient(target, timeout=15.0, **k):  # give up after 1s instead of 15
+        return real(target, timeout=min(timeout, 1.0), **k)
+
+    config.FileLock = impatient
+    try:
+        try:
+            chat.set_cursor("stall", "A", "5")
+            gave_up = False
+        except config.LockTimeout:
+            gave_up = True
+    finally:
+        config.FileLock = real
+    holder.communicate(timeout=30)
+    check(gave_up, "the waiter gives up with an error instead of writing unlocked")
+    chat.set_cursor("stall", "A", "5")  # tried again once the holder is done
+    st = config.load_state()
+    check(st.get("stalled_writer") == "done" and chat.get_cursor("stall", "A") == "5",
+          "both updates are there")
 
 
 def main() -> int:
     test_concurrent_sessions_keep_their_cursors()
+    test_lock_follows_its_holder()
+    test_stalled_holder_loses_nothing()
     test_unreadable_state_is_not_empty()
     test_corrupt_state_recovers()
     test_replace_retries_sharing_violation()

@@ -257,8 +257,44 @@ def test_cli_end_to_end() -> None:
     check(rc == 0 and json.loads(printed)["decision"] == "block", "in-process cli entry too")
 
 
+def notice(content: str, **fields) -> dict:
+    """A user-type line Claude Code writes that the human didn't type, shaped as
+    found in real transcripts (no isMeta; content a plain string)."""
+    return {"type": "user", "userType": "external", "entrypoint": "cli",
+            "promptId": "p1", "message": {"role": "user", "content": content}, **fields}
+
+
+def test_notifications_dont_start_a_turn() -> None:
+    print("a background-task notification or a compaction summary isn't the human speaking:")
+    task = notice("<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
+                  "</task-notification>", origin={"kind": "task-notification"})
+    p = transcript(user("chat with B"), call("chat_say", {"status": "over"}, WAITING),
+                   task, say("The build finished."))
+    out = run(p)
+    check(out and json.loads(out)["decision"] == "block",
+          "woken by a task notification mid-chat, the session can't just drop out")
+    scheduled = notice("<task-notification><task-id>x</task-id></task-notification>",
+                       origin={"kind": "task-notification", "producer": "session-task"})
+    p = transcript(user("chat"), call("chat_say", {"status": "over"}, WAITING), scheduled)
+    check(run(p) != "", "...nor by a session task's notification")
+    other = notice("anything", origin={"kind": "something-new"})
+    p = transcript(user("chat"), call("chat_say", {"status": "over"}, WAITING), other)
+    check(run(p) != "", "...nor by any line whose origin isn't the human")
+    old = notice("<task-notification><task-id>y</task-id></task-notification>")
+    p = transcript(user("chat"), call("chat_say", {"status": "over"}, WAITING), old)
+    check(run(p) != "", "...nor by a notification with no origin field (older versions)")
+    summary = notice("This session is being continued from a previous conversation that "
+                     "ran out of context.", isCompactSummary=True, isVisibleInTranscriptOnly=True)
+    p = transcript(user("chat"), call("chat_say", {"status": "over"}, WAITING), summary)
+    check(run(p) != "", "...nor by the summary that continues a compacted session")
+    typed = notice("ok forget the chat", origin={"kind": "human"})
+    p = transcript(user("chat"), call("chat_say", {"status": "over"}, WAITING), typed)
+    check(run(p) == "", "but a message the human typed (origin human) still starts a new turn")
+
+
 def main() -> int:
     test_blocks_dropping_out_while_waiting()
+    test_notifications_dont_start_a_turn()
     test_reminds_again_if_it_keeps_chatting()
     test_reminder_logged_as_user_message()
     test_failed_chat_say()

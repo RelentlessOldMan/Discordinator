@@ -75,9 +75,10 @@ def sanitize_room(name: str) -> str:
 # One lock implementation for every shared file (rooms, handles, state).
 _AppendLock = config.FileLock
 
-# A delete swaps in a rewritten room; Windows refuses while any session is
-# reading it, so a delete keeps trying for ~5s (0.02s apart).
-_DELETE_RETRIES = 250
+# A delete swaps in a rewritten room. Windows refuses while any session is
+# reading it, so it tries for a moment (0.02s apart) and otherwise appends a
+# deletion record instead (see delete_messages).
+_DELETE_RETRIES = 25
 
 
 class LocalClient:
@@ -106,6 +107,15 @@ class LocalClient:
         return self._dir / f"{sanitize_room(channel_id)}.jsonl"
 
     def _read_all(self, channel_id: str) -> list[dict[str, Any]]:
+        """The room's messages, minus deleted ones (see delete_messages)."""
+        raw = self._read_raw(channel_id)
+        deleted = {str(i) for r in raw if "deletes" in r for i in r["deletes"] or []}
+        if not deleted and not any("deletes" in r for r in raw):
+            return raw
+        return [r for r in raw if "deletes" not in r and str(r["id"]) not in deleted]
+
+    def _read_raw(self, channel_id: str) -> list[dict[str, Any]]:
+        """Every record in the room file, deletion records included."""
         path = self._room_path(channel_id)
         if not path.exists():
             return []
@@ -156,7 +166,7 @@ class LocalClient:
                 return int(rec["id"])
             except (json.JSONDecodeError, UnicodeDecodeError, KeyError, ValueError, TypeError):
                 continue
-        return max((int(r["id"]) for r in self._read_all(channel_id)), default=0)
+        return max((int(r["id"]) for r in self._read_raw(channel_id)), default=0)
 
     def _files_dir(self, message_id: str) -> Path:
         """Per-message directory holding copies of that message's attachments."""
@@ -342,7 +352,7 @@ class LocalClient:
         prefix = f"[{label}] " if label else ""
         body_limit = MAX_MESSAGE_LEN - len(prefix)
         sent: list[dict[str, Any]] = []
-        for piece in chunk_content(content, body_limit):
+        for piece in chunk_content(content, body_limit, prefixed=bool(prefix)):
             sent.append(self._append(channel_id, f"{prefix}{piece}"))
         return sent
 
@@ -418,9 +428,11 @@ class LocalClient:
         self.delete_messages(channel_id, [message_id])
 
     def delete_messages(self, channel_id: str, message_ids: list[str]) -> int:
-        """Delete several messages with ONE rewrite of the room (a purge would
-        otherwise rewrite the whole file once per message). Returns how many
-        were removed."""
+        """Delete several messages; returns how many were removed. Never fails
+        because sessions are reading the room: the room is rewritten without
+        them if Windows allows the swap within a moment, else a deletion record
+        is appended (appending never conflicts with readers) and every read
+        skips those ids until the next rewrite (retention pruning) drops both."""
         path = self._room_path(channel_id)
         if not path.exists():
             return 0
@@ -436,20 +448,34 @@ class LocalClient:
                     for r in records:
                         if str(r["id"]) not in ids:
                             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-                # Windows refuses the swap while a reader has the room open
-                # (every session polls it): keep retrying for a few seconds.
                 config._replace(tmp, path, retries=_DELETE_RETRIES)
-            except BaseException:
+            except OSError:
                 try:
                     os.remove(tmp)
                 except OSError:
                     pass
-                raise
+                self._append_deletion(channel_id, path, [str(r["id"]) for r in gone])
         # Drop any stored attachment files for the deleted messages (hygiene).
         for r in gone:
             for d in self._attachment_dirs(r):
                 shutil.rmtree(d, ignore_errors=True)
         return len(gone)
+
+    def _append_deletion(self, channel_id: str, path: Path, ids: list[str]) -> None:
+        """Record that ``ids`` are deleted (caller holds the room lock). It has an
+        id like a message, so ids stay increasing, and reads like a reminder
+        line, so an older reader running alongside skips it."""
+        rec = {
+            "id": str(max(self._max_id(channel_id) + 1, time.time_ns())),
+            "author": {"id": "discordinator", "username": "discordinator",
+                       "global_name": "discordinator", "bot": True},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "content": f"⏳ ({len(ids)} message(s) deleted)",  # chat's NUDGE_MARK
+            "attachments": [],
+            "deletes": ids,
+        }
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def add_reaction(
         self, channel_id: str, message_id: str, emoji: str = "✅"

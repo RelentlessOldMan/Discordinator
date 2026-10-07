@@ -78,13 +78,26 @@ def _result_obj(content: Any) -> Optional[dict]:
     return obj if isinstance(obj, dict) else None
 
 
+# Lines Claude Code writes as ordinary user messages that the human didn't type:
+# a background task finishing, a scheduled check-in, the summary that continues
+# a compacted session. A session woken by one is still in the same chat, so
+# they don't start a new turn.
+_NOT_TYPED = ("<task-notification>", "This session is being continued from a previous")
+
+
 def _is_real_user_message(entry: dict) -> bool:
-    """A message the human typed (not a tool result, not a meta/system line)."""
+    """A message the human typed (not a tool result, not a meta/system line,
+    not a notification Claude Code delivers as a user message)."""
     if entry.get("type") != "user" or entry.get("isMeta") or entry.get("isSidechain"):
+        return False
+    if entry.get("isCompactSummary"):
+        return False
+    origin = entry.get("origin")
+    if isinstance(origin, dict) and origin.get("kind") not in (None, "human"):
         return False
     content = (entry.get("message") or {}).get("content")
     if isinstance(content, str):
-        return True
+        return not content.lstrip().startswith(_NOT_TYPED)
     return isinstance(content, list) and any(
         isinstance(b, dict) and b.get("type") == "text" for b in content)
 

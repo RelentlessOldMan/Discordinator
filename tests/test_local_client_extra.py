@@ -134,23 +134,29 @@ def test_read_retries_while_file_swapped() -> None:
     check(len(got) == 1 and fails["n"] == 0, "two failed reads, then the real content")
 
 
-def test_append_lock_timeout_proceeds() -> None:
-    print("_AppendLock proceeds unlocked rather than hanging forever:")
+def test_append_lock_timeout_raises() -> None:
+    print("_AppendLock gives up with an error rather than hanging or writing unlocked:")
+    from discordinator import config as _config
     c = LocalClient(label="lock2")
     room = "lockroom2"
     c.post(room, "seed")
     target = c._room_path(room)
     lockpath = Path(str(target) + ".lock")
-    # A FRESH lock held by someone else (recent mtime, not stale). We should give
-    # up waiting after `timeout` and proceed unlocked (fd is None) — a hung peer
-    # must never freeze a chat permanently.
+    # A FRESH lock held by someone else (recent mtime, not stale). We give up
+    # waiting after `timeout` - with an error, so nothing is written over the
+    # holder's update - and a hung peer still never freezes a chat forever.
     lockpath.write_text("", encoding="utf-8")
     start = time.monotonic()
-    with _AppendLock(target, timeout=0.2, stale=30.0) as lk:
-        waited = time.monotonic() - start
-        check(lk.fd is None, "gives up acquiring and proceeds unlocked (fd is None)")
-        check(0.2 <= waited < 3.0, "waited about the timeout, not indefinitely")
-    check(lockpath.exists(), "an unowned lock is left in place on exit (not deleted)")
+    lk = _AppendLock(target, timeout=0.2, stale=30.0)
+    try:
+        with lk:
+            raise AssertionError("acquired a lock someone else holds")
+    except _config.LockTimeout:
+        pass
+    waited = time.monotonic() - start
+    check(lk.fd is None, "gives up acquiring (fd is None) and raises LockTimeout")
+    check(0.2 <= waited < 3.0, "waited about the timeout, not indefinitely")
+    check(lockpath.exists(), "an unowned lock is left in place (not deleted)")
     lockpath.unlink()  # cleanup our manual lock
 
 
@@ -245,6 +251,47 @@ def test_delete_while_rooms_are_read() -> None:
     check(not list(c._dir.glob("*.tmp")), "no temp files left behind")
 
 
+def test_delete_when_room_cant_be_rewritten() -> None:
+    print("a delete still works when the room can't be rewritten (Windows readers):")
+    from discordinator import config as _config
+    c = LocalClient(label="tomb")
+    room = "tombroom"
+    ids = [c.post(room, f"m{i}")["id"] for i in range(6)]
+    real = _config._replace
+
+    def refuse(*a, **k):
+        raise PermissionError("[WinError 5] Access is denied")
+
+    _config._replace = refuse
+    try:
+        n = c.delete_messages(room, ids[1:3])
+        c.delete_message(room, ids[4])
+    finally:
+        _config._replace = real
+    check(n == 2, "the delete reports what it removed")
+    left = [m["content"] for m in reversed(c.read_messages(room, limit=100))]
+    check(left == ["m0", "m3", "m5"], f"deleted messages no longer read back: {left}")
+    raw = c._read_raw(room)
+    check(sum("deletes" in r for r in raw) == 2 and not list(c._dir.glob("*.tmp")),
+          "they're marked deleted in the room (no temp files left)")
+    check(c.read_messages(room, limit=1)[0]["content"] == "m5", "the marker itself is never read back")
+    nxt = c.post(room, "after")["id"]
+    check(int(nxt) > max(int(r["id"]) for r in raw), "ids still only go up")
+    check(c.delete_messages(room, ids[1:3]) == 0, "deleting them again removes nothing")
+    os.environ["DISCORDINATOR_LOCAL_RETENTION_DAYS"] = "1"
+    try:
+        recs = c._read_raw(room)
+        recs[0]["timestamp"] = "2000-01-01T00:00:00+00:00"  # m0 is past the window
+        c._room_path(room).write_text("".join(json.dumps(r) + "\n" for r in recs),
+                                      encoding="utf-8")
+        LocalClient(label="pruner").post(room, "trigger prune")
+    finally:
+        os.environ.pop("DISCORDINATOR_LOCAL_RETENTION_DAYS")
+    raw = c._read_raw(room)
+    check(not any("deletes" in r for r in raw) and len(raw) == 4,
+          "the next rewrite drops the markers and the deleted messages for good")
+
+
 def main() -> int:
     test_max_id_large_room_tail_read()
     test_torn_trailing_line_tolerated()
@@ -252,10 +299,11 @@ def main() -> int:
     test_append_lock_stale_steal()
     test_append_lock_steal_is_safe()
     test_read_retries_while_file_swapped()
-    test_append_lock_timeout_proceeds()
+    test_append_lock_timeout_raises()
     test_surface_parity()
     test_attachments_copied_outside_lock()
     test_delete_while_rooms_are_read()
+    test_delete_when_room_cant_be_rewritten()
     print(f"\nALL {_passed} LOCAL-CLIENT EDGE CHECKS PASSED")
     return 0
 
