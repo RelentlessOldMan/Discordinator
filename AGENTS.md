@@ -476,6 +476,17 @@ per-channel rate limit (~5 messages / 5s; the client auto-retries on 429).
 3. Confirm: `discordinator version` should match the repo's latest tag
    (`git -C C:\Playground\Discordinator describe --tags`).
 
+## Tests
+Each `tests/test_*.py` is a standalone script (no pytest) that exits non-zero on
+its first failed check. They use temp configs and the local transport or a mock
+server, so they need no token or network. Run them all:
+```bash
+for t in tests/test_*.py; do python "$t" > /dev/null || echo "FAIL $t"; done
+```
+GitHub Actions (`.github/workflows/tests.yml`) runs every suite on each push and
+pull request, on Windows and Linux with Python 3.10 and 3.12. Check it's green
+before cutting a release.
+
 ## Releasing
 Versioning is `1.0.x` (bump the patch each release). Once your code changes are
 committed, cut a release with the helper — it bumps `__version__`, prepends a
