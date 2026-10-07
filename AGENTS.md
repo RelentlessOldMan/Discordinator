@@ -404,6 +404,9 @@ told to). Enable per machine with `config set-attachments send on` /
 - **Send** (`send --file/--image`, MCP `send_file`, `chat_say(files=...)`): needs
   the send opt-in AND the bot's **Attach Files** permission (`permissions=101440`).
   Images auto-embed; ≤10 files/message, ~10MB/file.
+- **Local chats** (`chat_transport: local`): `chat_say(files=...)` copies
+  nothing and needs no opt-in. Both sessions share the disk, so the files' full
+  paths are added to the message for the other side to open directly.
 - **Receive** (`read --download`, MCP `download_attachment`): needs the receive
   opt-in. Reads surface each attachment as `{url, filename, content_type, size,
   width, height, is_image}`; pass the `url` to `download_attachment` to fetch the

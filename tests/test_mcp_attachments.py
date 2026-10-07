@@ -28,6 +28,7 @@ from discordinator import chat  # noqa: E402
 from discordinator.config import ConfigError  # noqa: E402
 from discordinator.discord_client import simplify_message  # noqa: E402
 from discordinator.local_client import LocalClient  # noqa: E402
+from discordinator.mcp_server import ChatSendError  # noqa: E402
 
 _passed = 0
 
@@ -59,11 +60,17 @@ def test_gates_block_when_off() -> None:
         raise AssertionError("send_file should be gated")
     except ConfigError:
         check(True, "send_file -> ConfigError when send opt-in is off")
+    os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "discord"  # the gate is Discord-only
     try:
         mcp.chat_say(text="no", chatter="A", status="over", channel="mcpchat", files=[str(f)])
         raise AssertionError("chat_say(files) should be gated")
-    except ConfigError:
-        check(True, "chat_say(files=...) -> ConfigError when send opt-in is off")
+    except ChatSendError as e:
+        check(isinstance(e.__cause__, ConfigError) and "set-attachments send on" in str(e),
+              "chat_say(files=...) on Discord is gated when send opt-in is off")
+        check("Nothing was posted" in str(e) and "If it was your turn, it still is" in str(e),
+              "...and the error says nothing was posted and the turn is still yours")
+    finally:
+        os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
     try:
         mcp.download_attachment(url=str(f))
         raise AssertionError("download_attachment should be gated")
@@ -87,18 +94,55 @@ def test_send_file_success() -> None:
     check("1 file" in out2, "a single string path is treated as one file")
 
 
-def test_chat_say_with_files_success() -> None:
-    print("chat_say(files=...) attaches to a live turn once enabled:")
-    _allow("send", True)
+def test_local_chat_shares_paths() -> None:
+    print("local chat_say(files=...) shares paths - no copy, no opt-in needed:")
+    _allow("send", False)
     img = _TMP / "pic.png"
     img.write_bytes(b"\x89PNG\r\n")
-    res = mcp.chat_say(text="diagram", chatter="A", status="over", channel="mcpchat", to="B", files=[str(img)], wait=False)
-    check(res["sent_messages"] >= 1 and res["status"] == "over", "the turn is sent")
-    # B receives the turn with the attachment.
+    res = mcp.chat_say(text="diagram", chatter="A", status="over", channel="mcpchat", to="B", files=str(img), wait=False)
+    check(res["sent_messages"] == 1 and res["status"] == "over", "the turn is sent with the opt-in off")
+    check(res["files_shared"] == [str(img.resolve())], "files_shared lists the absolute path")
     chat.reset("mcpchat", "B", "0", 20)
     got = chat.await_turn(LocalClient("B"), "mcpchat", "B", timeout=2, poll=0.02, nudge_after=0)
-    check(got["from"] == "A" and len(got["attachments"]) == 1,
-          "the awaiting peer sees the turn's attachment")
+    check(got["from"] == "A" and got["attachments"] == [], "nothing was copied as an attachment")
+    check(got["text"].startswith("diagram") and str(img.resolve()) in got["text"],
+          "the peer gets the path in the message text")
+
+
+def test_failed_send_keeps_turn_3way() -> None:
+    print("a failed chat_say posts nothing, and in a 3-way chat the turn stays with the floor holder:")
+    room = "trio"
+    for h in ("A", "B", "C"):
+        mcp.chat_begin(chatter=h, channel=room)
+    mcp.chat_say(text="A, your call", chatter="B", status="over", channel=room, to="A", wait=False)
+    got = mcp.chat_await(chatter="A", channel=room, timeout=2, poll=0.02, nudge_after=0)
+    check(got["from"] == "B" and got["your_turn"], "A holds the floor")
+    before = len(LocalClient("probe").read_messages(room, limit=50))
+    try:
+        mcp.chat_say(text="see file", chatter="A", channel=room, to="C", files=[str(_TMP / "nope.txt")])
+        raise AssertionError("a missing file should fail")
+    except ChatSendError as e:
+        check(isinstance(e.__cause__, FileNotFoundError) and "Nothing was posted" in str(e),
+              "missing file -> ChatSendError saying nothing was posted")
+    check(len(LocalClient("probe").read_messages(room, limit=50)) == before, "the room is unchanged")
+    back = mcp.chat_await(chatter="A", channel=room, timeout=2, poll=0.02, nudge_after=0)
+    check(back.get("already_received") and back["your_turn"] and back["from"] == "B",
+          "A's chat_await hands the still-owed turn straight back")
+    other = mcp.chat_await(chatter="C", channel=room, timeout=0.3, poll=0.02, nudge_after=0)
+    check(other["timed_out"] and not other["your_turn"], "C (not addressed) keeps waiting")
+
+    orig = mcp.chat.send_chat
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+    mcp.chat.send_chat = boom
+    try:
+        mcp.chat_say(text="x", chatter="A", channel=room, to="C")
+        raise AssertionError("a send failure should raise")
+    except ChatSendError as e:
+        check("disk full" in str(e) and "did NOT go through" in str(e),
+              "a failure mid-send says the message did not go through")
+    finally:
+        mcp.chat.send_chat = orig
 
 
 def test_download_success() -> None:
@@ -120,7 +164,8 @@ def main() -> int:
     try:
         test_gates_block_when_off()
         test_send_file_success()
-        test_chat_say_with_files_success()
+        test_local_chat_shares_paths()
+        test_failed_send_keeps_turn_3way()
         test_download_success()
     finally:
         for k in ("DISCORDINATOR_ALLOW_SEND", "DISCORDINATOR_ALLOW_RECEIVE"):
