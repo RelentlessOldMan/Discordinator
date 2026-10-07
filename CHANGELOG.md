@@ -8,6 +8,15 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.30] - 2026-10-06
+Independent review fixes: 3-way stalls, split turns, typo'd addresses, stable handles, guard gaps
+- 3+ party chats: a raised hand no longer hides that the floor holder owes its turn
+- Long (split) turns arrive whole after a rejoin, a hand-back, or a timeout mid-turn
+- chat_say warns at once (with 'did you mean') when to= names nobody known, instead of waiting
+- Handles: a live session keeps its name however long it's idle; recycled process ids can't hold a name; renames reported on every chat result
+- Stop-hook guard: works alongside other Stop hooks; a failed end/impasse is caught
+- Local transport: crashed-writer locks recovered safely before anyone writes unlocked; a partly-sent long message says what to resend
+
 ## [1.0.29] - 2026-10-06
 Review fixes: 3-way floor handling, Stop hook catches failed chat_say; docs caught up
 - 3+ party chats: a say/working from someone who doesn't hold the floor no longer counts as holding it (no false 'send over', no misleading wait notes, no suppressed reminder)
