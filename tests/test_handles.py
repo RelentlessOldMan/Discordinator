@@ -47,6 +47,7 @@ def _fresh() -> None:
     """Empty registry and forget this process's resolved names."""
     handles.registry_path().unlink(missing_ok=True)
     handles._resolved.clear()
+    handles._last_chatter = None
 
 
 def _plant(handle: str, pid: int, age: float = 0.0) -> None:
@@ -111,6 +112,7 @@ def test_collision_gets_suffix() -> None:
         check(role == "CodeCarver/ui" and rnote is None, "a role avoids the collision cleanly")
         _plant("CodeCarver-2", other.pid)
         handles._resolved.clear()
+        handles._last_chatter = None  # as a brand-new session
         third, _ = handles.resolve(None, cfg)
         check(third == "CodeCarver-3", "next free suffix is taken")
     finally:
@@ -180,6 +182,26 @@ def test_rename_note_on_every_call() -> None:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
 
 
+def test_status_uses_session_name_without_claiming() -> None:
+    print("chat_status() with no chatter answers for this session's name and claims nothing:")
+    _fresh()
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CC"
+    try:
+        mcp.chat_begin(chatter="ui", channel="cc-room")
+        from discordinator import chat as _chat
+        from discordinator.local_client import LocalClient
+        _chat.send_chat(LocalClient("peer"), "cc-room", "B", "over", "for ui", to="CC/ui")
+        st = mcp.chat_status(channel="cc-room")
+        check(st["your_turn"] is True, "answered for CC/ui (the turn is owed to it)")
+        reg = json.loads(handles.registry_path().read_text(encoding="utf-8"))
+        check("cc" not in reg and "cc/ui" in reg, f"bare 'CC' not claimed: {sorted(reg)}")
+        check(handles.current(None, {}) is None or True, "current() never raises")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+    _fresh()
+    check(handles.current(None, {}) is None, "no handle configured and no chatter -> None")
+
+
 def test_suffix_respects_length() -> None:
     print("the -N suffix never pushes a handle past 32 chars:")
     _fresh()
@@ -230,6 +252,7 @@ def main() -> int:
     test_dead_or_expired_claims_reclaimed()
     test_live_session_keeps_name_however_idle()
     test_rename_note_on_every_call()
+    test_status_uses_session_name_without_claiming()
     test_suffix_respects_length()
     test_release_all()
     test_mcp_begin_reports_rename()

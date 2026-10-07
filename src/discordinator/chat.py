@@ -49,7 +49,6 @@ from .discord_client import (
     MAX_MESSAGE_LEN,
     DiscordClient,
     DiscordError,
-    chunk_content,
     simplify_message,
 )
 
@@ -95,6 +94,43 @@ def header(handle: str, status: str, to: Optional[str] = None) -> str:
     if to:
         return f"[{handle}>{to}|{status}] "
     return f"[{handle}|{status}] "
+
+
+# Ends a piece that was cut mid-line (no newline to split on): the reader joins
+# it to the next piece with nothing in between instead of a newline. Invisible
+# in Discord, so a reader that doesn't know it just sees the old behavior.
+GLUE = "\u2060"  # WORD JOINER
+
+
+def split_turn(text: str, limit: int) -> list[str]:
+    """Split ``text`` into pieces of at most ``limit`` chars that join_pieces
+    puts back together exactly: cut at the last newline that fits (consuming
+    just that one newline), else mid-line with a trailing GLUE."""
+    if len(text) <= limit:
+        return [text]
+    pieces: list[str] = []
+    rest = text
+    while len(rest) > limit:
+        cut = rest.rfind("\n", 0, limit + 1)
+        if cut > 0:
+            pieces.append(rest[:cut])
+            rest = rest[cut + 1:]
+        else:
+            pieces.append(rest[:limit - 1] + GLUE)
+            rest = rest[limit - 1:]
+    pieces.append(rest)
+    return pieces
+
+
+def join_pieces(bodies: list[str]) -> str:
+    """Rejoin a turn's pieces: newline between them, except after a GLUE piece."""
+    out = []
+    for i, b in enumerate(bodies):
+        if b.endswith(GLUE):
+            out.append(b[:-1])
+        else:
+            out.append(b + ("\n" if i < len(bodies) - 1 else ""))
+    return "".join(out)
 
 
 def parse(content: str) -> Optional[dict[str, Optional[str]]]:
@@ -212,7 +248,7 @@ def send_chat(client: DiscordClient, channel_id: str, me: str, status: str, text
             f"(got {len(files)}); use a relay send for larger batches."
         )
     reserve = len(header(me, "impasse", to))  # longest status word, incl. address
-    pieces = chunk_content(text, MAX_MESSAGE_LEN - reserve) or [""]
+    pieces = split_turn(text, MAX_MESSAGE_LEN - reserve)
     sent: list[dict[str, Any]] = []
     for i, piece in enumerate(pieces):
         last = i == len(pieces) - 1
@@ -260,6 +296,25 @@ def _clear_wait(channel_id: str, me: str) -> None:
     slot = _slot(state, channel_id, me)
     slot.pop("waiting_since", None)
     slot.pop("nudged", None)
+    config.save_state(state)
+
+
+def _load_partial(channel_id: str, me: str) -> dict[str, list[dict[str, Any]]]:
+    """Pieces of other senders' unfinished turns, saved by my last await."""
+    part = _slot(config.load_state(), channel_id, me).get("partial")
+    return {k: list(v) for k, v in part.items()} if isinstance(part, dict) else {}
+
+
+def _save_partial(channel_id: str, me: str, partial: dict[str, list[dict[str, Any]]]) -> None:
+    state = config.load_state()
+    slot = _slot(state, channel_id, me)
+    kept = {k: v for k, v in partial.items() if v}
+    if kept:
+        slot["partial"] = kept
+    elif "partial" not in slot:
+        return
+    else:
+        slot.pop("partial")
     config.save_state(state)
 
 
@@ -399,9 +454,15 @@ def await_turn(
         return _finish(channel_id, me, result)
 
     # Per-sender say-continuation buffers so interleaved multiparty turns don't
-    # bleed into each other's text.
-    pending_by_sender: dict[str, list[dict[str, Any]]] = {}
+    # bleed into each other's text. Kept across calls (in my state slot), so a
+    # turn that's half in when I return - for a timeout, a human, another
+    # peer's turn - still arrives whole later.
+    pending_by_sender = _load_partial(channel_id, me)
     want = from_whom
+
+    def done(result: dict[str, Any]) -> dict[str, Any]:
+        _save_partial(channel_id, me, pending_by_sender)
+        return _finish(channel_id, me, result)
 
     # Track cumulative wait across repeated calls (for the nudge).
     since, nudged = _get_wait(channel_id, me)
@@ -434,7 +495,7 @@ def await_turn(
                     entry = [{"id": m["id"], "from": "participant", "to": None,
                               "status": "plain", "timestamp": m["timestamp"],
                               "attachments": atts}]
-                    return _finish(channel_id, me, _result(
+                    return done(_result(
                         me, channel_id, sender="participant", status="plain",
                         text=text, messages=entry, ended=False,
                         stop_reason=None, your_turn=True, attachments=atts))
@@ -443,14 +504,23 @@ def await_turn(
                                 "status": None, "timestamp": m["timestamp"],
                                 "attachments": atts}]
                 if is_human_stop(text):
-                    return _finish(channel_id, me, _result(
+                    pending_by_sender.clear()
+                    return done(_result(
                         me, channel_id, sender="human", status="stop",
                         text=text, messages=human_entry, ended=True,
                         stop_reason="human", your_turn=False, attachments=atts))
-                return _finish(channel_id, me, _result(
+                # A remark doesn't move the floor: it's my turn only if it
+                # already was (or nobody holds it). Otherwise two sides would
+                # both answer and the chat would fork.
+                st_h = compute_state(client, channel_id, me)
+                owed = bool(st_h.get("your_turn")) or st_h.get("pending_turn") is None
+                result = _result(
                     me, channel_id, sender="human", status="interjection",
                     text=text, messages=human_entry, ended=False,
-                    stop_reason=None, your_turn=True, attachments=atts))
+                    stop_reason=None, your_turn=owed, attachments=atts)
+                if not owed:
+                    result["floor"] = st_h.get("floor")
+                return done(result)
 
             sender = parsed["participant"]
             if same_handle(sender, me):
@@ -472,12 +542,13 @@ def await_turn(
                 continue  # mid-turn / working; keep accumulating for this sender
 
             pieces = pending_by_sender.pop(sender)
-            text = "\n".join(x["body"] for x in pieces)
+            text = join_pieces([x["body"] for x in pieces])
             atts = [a for x in pieces for a in x.get("attachments", [])]
 
             if status in TERMINAL_STATUSES:  # ends the chat for everyone
                 stop_reason = "agreed" if status == "end" else "impasse"
-                return _finish(channel_id, me, _result(
+                pending_by_sender.clear()
+                return done(_result(
                     me, channel_id, sender=sender, status=status, text=text,
                     messages=_lean(pieces), ended=True, stop_reason=stop_reason,
                     your_turn=False, addressed_to=to, attachments=atts))
@@ -493,7 +564,7 @@ def await_turn(
                 messages=_lean(pieces), ended=False, stop_reason=None,
                 your_turn=True, addressed_to=to, attachments=atts)
             result.update(_floor_context(client, channel_id, me))
-            return _finish(channel_id, me, result)
+            return done(result)
 
         if time.monotonic() >= deadline:
             waited = time.time() - since
@@ -505,11 +576,7 @@ def await_turn(
                 _set_wait(channel_id, me, since, True)
                 nudged = True
             leftover = [e for buf in pending_by_sender.values() for e in buf]
-            if leftover:
-                # A turn is half in (say/working pieces, no final message yet).
-                # Re-read it next call so the finished turn arrives whole.
-                first = min(int(e["id"]) for e in leftover)
-                set_cursor(channel_id, me, str(first - 1))
+            _save_partial(channel_id, me, pending_by_sender)
             result = _result(me, channel_id, sender=None, status=None, text="",
                              messages=_lean(leftover), ended=False, stop_reason=None,
                              your_turn=False, timed_out=True)
@@ -575,6 +642,7 @@ def compute_state(
     real = YIELD_STATUSES + TERMINAL_STATUSES  # statuses that complete a turn
     participants: list[str] = []
     posters: list[str] = []  # who has actually posted in this chat
+    addressed_at: dict[str, tuple[str, int]] = {}  # addressee -> (by whom, index), latest
     last_seen: dict[str, Optional[datetime]] = {}  # participant -> last post/address time
     latest_ts: Optional[datetime] = None
     last_turn: Optional[dict[str, Any]] = None
@@ -599,6 +667,8 @@ def compute_state(
             posters.append(who)
         to = p["to"] if _is_broadcast(p["to"]) else canon(p["to"])
         names = [who] + ([to] if to and not _is_broadcast(to) else [])
+        if to and not _is_broadcast(to) and p["status"] in YIELD_STATUSES:
+            addressed_at[to] = (who, i)
         # An addressed peer is a known participant even before it has posted.
         for n in names:
             if n not in participants:
@@ -623,27 +693,45 @@ def compute_state(
                          "id": m["id"], "ts": m["timestamp"]}
             last_turn_i = i
             last_turn_start = first
-            last_text = "\n".join(bodies)
+            last_text = join_pieces(bodies)
 
     # The querying caller is a participant too (it may not have posted yet).
     me_norm = canon(sanitize_handle(me)) if me is not None else None
     if me_norm and me_norm not in participants:
         participants.append(me_norm)
 
-    ended = bool(last_turn and last_turn["status"] in TERMINAL_STATUSES)
+    # A human stop after the last chat message ends the chat right there.
+    last_chat_i = max((i for i in range(start, len(msgs)) if parsed_list[i]), default=-1)
+    human_stop = any(
+        parsed_list[i] is None and not msgs[i].get("bot") and is_human_stop(msgs[i]["content"])
+        for i in range(max(start, last_chat_i + 1), len(msgs)))
+    if human_stop:
+        progress.clear()
+        run_start.clear()
+    ended = human_stop or bool(last_turn and last_turn["status"] in TERMINAL_STATUSES)
 
     # The last yielded turn is owed until someone completes a turn after it —
     # and since last_turn IS the most recent completed turn, a yield there is
     # by definition unanswered.
     pending = None
     pending_predecessor = None
-    if last_turn and last_turn["status"] in YIELD_STATUSES:
+    if last_turn and last_turn["status"] in YIELD_STATUSES and not human_stop:
         pending = last_turn
         # Just before the turn's FIRST piece, so a re-read gets all of it.
         pending_predecessor = (
             msgs[last_turn_start - 1]["id"] if last_turn_start > 0
             else str(int(msgs[last_turn_start]["id"]) - 1)
         )
+
+    # Someone who has never posted stops counting once whoever addressed them
+    # has moved on to a later turn (a mistyped `to=` that was then re-sent to
+    # the right peer) - so a typo doesn't leave a phantom in the room.
+    def _superseded(p: str) -> bool:
+        if p in posters or p == me_norm or (pending and p == pending["to"]):
+            return False
+        by, at = addressed_at.get(p, (None, -1))
+        return by is not None and last_turn_index_by.get(by, -1) > at
+    participants = [p for p in participants if not _superseded(p)]
 
     # Drop participants who have gone quiet: not seen within STALE_AFTER of the
     # room's latest chat message. Always kept: the caller, both ends of the owed
@@ -722,6 +810,11 @@ def compute_state(
         "_pending_predecessor": pending_predecessor,
         "_pending_text": last_text if pending else None,
         "_posters": posters,
+        "_open_run_predecessor": _before(msgs, min(
+            (i for w, i in run_start.items() if not same_handle(w, me_norm)), default=-1)),
+        "stop_reason": "human" if human_stop else (
+            {"end": "agreed", "impasse": "impasse"}.get(last_turn["status"])
+            if ended and last_turn else None),
     }
     if me_norm is not None:
         state["your_turn"] = bool(
@@ -729,6 +822,13 @@ def compute_state(
             and _targets(pending.get("to"), me_norm)
         )
     return state
+
+
+def _before(msgs: list[dict[str, Any]], i: int) -> Optional[str]:
+    """A cursor that re-reads ``msgs[i]`` onward (None if i < 0)."""
+    if i < 0:
+        return None
+    return msgs[i - 1]["id"] if i > 0 else str(int(msgs[i]["id"]) - 1)
 
 
 def _recently_working(st: dict[str, Any], me: str) -> bool:
@@ -788,6 +888,11 @@ def next_step(result: dict[str, Any]) -> str:
         return ("Finish YOUR turn: chat_say(<message>, status='over'). The others are "
                 "waiting on you; don't call chat_await until you have.")
     if result.get("from") == "human":
+        if not result.get("your_turn"):
+            holder = result.get("floor") or "the other side"
+            return (f"A human spoke in the chat, but it's not your turn: {holder} has "
+                    "the floor. Take their note into account (act on it if it's for "
+                    "you), then call chat_await to keep waiting - don't post a turn.")
         return ("A human spoke in the chat. Do what they ask; if the chat should "
                 "continue, reply with chat_say.")
     if result.get("your_turn"):

@@ -170,9 +170,14 @@ class LocalClient:
         path = self._room_path(channel_id)
         if not path.exists():
             return []
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
+        text = None
+        for _ in range(10):  # a prune/delete may be swapping the file in right now
+            try:
+                text = path.read_text(encoding="utf-8")
+                break
+            except OSError:
+                time.sleep(0.02)
+        if text is None:
             return []
         out: list[dict[str, Any]] = []
         for line in text.splitlines():
