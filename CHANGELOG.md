@@ -8,6 +8,11 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.28] - 2026-10-06
+A failed chat send can't strand a turn; local chats share file paths
+- If chat_say fails, the error says nothing was posted and that it is still your turn (works in 3+ party chats: only the floor holder is owed the turn)
+- Local chats: chat_say(files=...) adds the files' full paths to the message instead of copying them; no attachment opt-in needed
+
 ## [1.0.27] - 2026-10-06
 No more turns stranded on 'say'
 - chat_await called while your own turn is unfinished (last message was say/working, never yielded) returns immediately with unfinished_turn and a note to send status='over' — instead of both sides waiting forever; a newer message from someone else is still delivered first
