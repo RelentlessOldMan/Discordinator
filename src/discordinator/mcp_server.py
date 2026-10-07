@@ -19,6 +19,7 @@ config file, or by raw numeric channel ids.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Optional
 
 from mcp.server.mcpserver import MCPServer
@@ -39,6 +40,25 @@ def _client(mode: Optional[str] = None) -> Client:
     """Client for ``mode`` ("relay"/"chat"/None). Relay and chat may run on
     different transports, so each tool builds its client with its own mode."""
     return make_client(config.load(), mode)
+
+
+class ChatSendError(RuntimeError):
+    """A chat_say that didn't post its turn; the message says the turn is still yours."""
+
+
+def _local_paths(file_list: list[Any]) -> list[str]:
+    """Absolute paths of files to share in a local chat (both sides are on this
+    machine, so the path IS the attachment). Raises if any file is missing."""
+    if len(file_list) > chat.MAX_FILES_PER_MESSAGE:
+        raise ValueError(f"a chat turn can carry at most {chat.MAX_FILES_PER_MESSAGE} "
+                         f"files (got {len(file_list)}).")
+    paths = []
+    for f in file_list:
+        p = Path(str(f)).expanduser().resolve()
+        if not p.is_file():
+            raise FileNotFoundError(f"File not found: {f}")
+        paths.append(str(p))
+    return paths
 
 
 def _try_ack(client: Client, channel_id: str, messages: list[dict[str, Any]]) -> None:
@@ -453,19 +473,49 @@ def chat_say(
     `attachments`. GATED: needs this machine's send opt-in (off by default;
     `config set-attachments send on` / DISCORDINATOR_ALLOW_SEND=1) and, on
     Discord, the bot's Attach Files permission. At most 10 files per turn.
+    On a LOCAL chat (same machine, same disk) nothing is copied and no opt-in is
+    needed: the files' full paths are added to your message for the others to
+    open directly (returned as `files_shared`). You can also just write the
+    paths in `text` yourself.
+
+    If this call raises, the message was NOT posted (the error says so); if it
+    was your turn, it still is - fix the problem and call chat_say again.
     """
     cfg = config.load()
-    me = _chatter(chatter, cfg)
-    if status not in chat.STATUSES:
-        raise ValueError(f"status must be one of {chat.STATUSES}, got {status!r}")
-    target = chat.sanitize_handle(to) if to else None
-    file_list = None
-    if files:
-        config.require_send_attachments(cfg)  # raises if this machine hasn't opted in
-        file_list = [files] if isinstance(files, str) else list(files)
-    channel_id = config.resolve_chat_channel(cfg, channel)
-    with _client("chat") as client:
-        sent = chat.send_chat(client, channel_id, me, status, text, to=target, files=file_list)
+    try:
+        me = _chatter(chatter, cfg)
+        if status not in chat.STATUSES:
+            raise ValueError(f"status must be one of {chat.STATUSES}, got {status!r}")
+        target = chat.sanitize_handle(to) if to else None
+        file_list = None
+        shared: list[str] = []
+        if files:
+            file_list = [files] if isinstance(files, str) else list(files)
+            if config.is_local(cfg, "chat"):
+                # Same machine, same disk: share the paths, don't copy the files.
+                shared = _local_paths(file_list)
+                text = f"{text}\n\nFiles (on this machine):\n" + "\n".join(
+                    f"- {p}" for p in shared)
+                file_list = None
+            else:
+                config.require_send_attachments(cfg)  # raises if this machine hasn't opted in
+        channel_id = config.resolve_chat_channel(cfg, channel)
+        chat_client = _client("chat")
+    except Exception as e:
+        raise ChatSendError(
+            f"{e}\n\nNothing was posted, so nobody saw this message. If it was your "
+            "turn, it still is - the others are waiting on you. Fix this and send "
+            "it again with chat_say(...) before calling chat_await.") from e
+    with chat_client as client:
+        try:
+            sent = chat.send_chat(client, channel_id, me, status, text, to=target,
+                                  files=file_list)
+        except Exception as e:
+            raise ChatSendError(
+                f"{e}\n\nThis message did NOT go through (nothing, or only part of "
+                "it, was posted). If it was your turn, it still is - the others are "
+                "waiting on you. Fix this and send it again with chat_say(...) "
+                "before calling chat_await.") from e
         # `say`/`ask` don't complete a turn, so they don't count against the cap.
         took_turn = status not in chat.NON_TURN_STATUSES
         turns = chat.bump_turn(channel_id, me) if took_turn else chat.get_meta(channel_id, me)[0]
@@ -479,6 +529,8 @@ def chat_say(
             "cap_reached": turns >= cap,
             "ended": status in chat.TERMINAL_STATUSES,
         }
+        if shared:
+            out["files_shared"] = shared
         # After yielding in a multiparty room, tell the model who's waiting so it
         # can rotate fairly (address suggest_next next time to avoid starving).
         if status in chat.YIELD_STATUSES:
