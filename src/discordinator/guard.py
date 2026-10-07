@@ -8,7 +8,8 @@ that stop ONCE, with the exact next step, when:
 
   * the session called a chat tool (chat_begin/chat_say/chat_await) during the
     current turn (i.e. since the user's last message), and
-  * its last chat result doesn't show the chat as ended.
+  * its last chat result doesn't show the chat as ended (or its last chat_say
+    failed, so its turn probably never went out).
 
 It identifies the session from its own transcript (the hook payload's
 ``transcript_path``), so two sessions in the same directory are never
@@ -141,28 +142,37 @@ def evaluate(payload: dict) -> Optional[str]:
 
     # Already reminded during this continuation? Only remind again if the
     # session kept chatting since; a bare repeat stop means "I mean it".
+    # (Compared by the last chat call's id, not a count, so it doesn't matter
+    # how the reminder itself shows up in the transcript.)
     key = str(payload.get("session_id") or path)
     state = _load_state()
+    call_id, tool, args = calls[-1]
     if payload.get("stop_hook_active"):
-        prev = state.get(key, {}).get("calls")
-        if prev is None or len(calls) <= int(prev):
+        prev = state.get(key, {}).get("last")
+        if prev is None or prev == call_id:
             state.pop(key, None)
             _save_state(state)
             return None
 
-    call_id, tool, args = calls[-1]
     if tool == "chat_say" and args.get("status") in ("end", "impasse"):
         return None
     res = _result_obj(results.get(call_id))
     if res is None:
-        return None  # errored / unparseable: don't guess
-    reply = res.get("reply") if isinstance(res.get("reply"), dict) else {}
-    if res.get("ended") or reply.get("ended"):
-        return None
-
-    step = res.get("next") or reply.get("next") or (
-        "Call chat_await to keep waiting for the reply.")
-    state[key] = {"calls": len(calls), "ts": time.time()}
+        if tool != "chat_say" or call_id not in results:
+            return None  # errored / unparseable: don't guess
+        # A failed chat_say: usually nothing was posted, so if it was this
+        # session's turn the others are still waiting on it.
+        step = ("Your last chat_say returned an error. If the error says nothing was "
+                "posted, fix the problem and send it again; otherwise call chat_await. "
+                "If you can't continue, send chat_say(status='impasse') so the others "
+                "aren't left waiting.")
+    else:
+        reply = res.get("reply") if isinstance(res.get("reply"), dict) else {}
+        if res.get("ended") or reply.get("ended"):
+            return None
+        step = res.get("next") or reply.get("next") or (
+            "Call chat_await to keep waiting for the reply.")
+    state[key] = {"last": call_id, "ts": time.time()}
     _save_state(state)
     return ("You're in a live discordinator chat that hasn't ended, and ending your "
             "turn now would strand it (nothing can wake you when the reply arrives). "

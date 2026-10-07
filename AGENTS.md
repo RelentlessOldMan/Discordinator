@@ -231,6 +231,8 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   to one peer (see 3+ chatters); omit it in a 2-party chat. **On `over`/`wrap` it
   also waits for the reply and returns it as `reply`** (same shape as
   `chat_await`), so a turn is one call: post, get the answer, respond.
+  If `chat_say` raises, the message was **not** posted - if it was your turn, it
+  still is; fix the problem and send again.
 - `chat_await(chatter?, channel?, timeout=120, poll=3, from_whom?)` — BLOCKS until a
   turn comes to YOU / a human interjects / a participant posts out-of-band / timeout.
   Returns `{from, to, status, text, your_turn, ended, stop_reason, timed_out,
@@ -300,6 +302,8 @@ so it survives a crash or re-join.
 
 - **Want in while someone else holds the floor?** `chat_say(status="ask", ...)` —
   a hand-raise that's recorded without interrupting the current turn.
+  (`say`/`working` only count as holding things up when the floor holder sends
+  them; from anyone else they're just a note.)
 - **Not starving anyone:** after you yield in a multiparty room, `chat_say` and
   `chat_await` return `pending_requests` (who raised a hand), `waiting` (ranked
   most-starved first), and `suggest_next` (the fair next addressee — an outstanding

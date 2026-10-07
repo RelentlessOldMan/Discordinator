@@ -584,8 +584,13 @@ def chat_await(
     Floor rules: a turn "comes to you" when another participant `over`/`wrap`s
     and addresses you (or broadcasts), OR anyone ends the chat. A turn addressed
     to a DIFFERENT peer does not wake you — you keep holding the wait (the floor
-    token). `ask` (a hand-raise) and `say` never wake you. `from_whom` optionally
-    waits for a yielded turn from that one specific peer.
+    token). `ask` (a hand-raise), `say` and `working` never wake you. `from_whom`
+    optionally waits for a yielded turn from that one specific peer.
+
+    It never blocks on yourself: if the turn is already yours it returns at once
+    (`already_received`, with that turn's text), and if your own last message was
+    `say`/`working` (your turn isn't finished, so everyone is waiting on you) it
+    returns `unfinished_turn` and tells you to send `over`.
 
     Returns a dict with:
       - from: the sender's handle, or "human", or null on timeout
@@ -608,6 +613,9 @@ def chat_await(
       - cap_reached: True if you've hit your turn cap (move toward "wrap"/"end")
       - (multiparty only, when the floor comes to you) floor, pending_requests,
         waiting, suggest_next — so you can rotate fairly and not starve a peer.
+      - note (when present): what happened in plain words, e.g. what the other
+        side said it's `working` on; progress: their unfinished say/working posts
+      - next: the exact next step. Always do what it says.
 
     If the cumulative wait exceeds `nudge_after` seconds (default 240), the tool
     posts ONE visible reminder to the channel — naming who should respond, or (if

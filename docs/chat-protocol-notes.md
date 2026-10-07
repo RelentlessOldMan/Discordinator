@@ -191,3 +191,25 @@ Keep rooms as small as the task needs — two is simplest and needs no addressin
 three or more, address every yield (`to=...`), raise a hand (`ask`) to get in, and
 let `suggest_next` drive fair rotation. Broadcasting (unaddressed) in an N-way room
 still works but invites collisions, so prefer addressed turns there.
+
+---
+
+## Turns that stall mid-chat (v1.0.26 – v1.0.28)
+
+Seen in real chats (mostly with cheaper models): the chat stops even though both
+sessions are fine, because one of them **ended its Claude Code turn** while the
+chat was still going. Nothing can wake an idle session when the reply lands, so a
+human had to kick it. The variants and what now handles each:
+
+| What the session did | What now happens |
+|---|---|
+| Said "OK, waiting for their reply" and ended its turn | `chat_say(..., "over")` waits for the reply itself and returns it, so there is no separate "now wait" step to forget. Every result has a `next` line with the exact next step. The **Stop-hook guard** (`discordinator chat-guard`) blocks ending the turn while the session's last chat result shows the chat still going. |
+| Needed 10–20 minutes of real work before answering | `status="working"` keeps the floor and tells the others it's busy. Their timeouts say what it's working on, and the reminder post is held back for up to an hour. |
+| Ended its turn on `say` instead of `over` | `say` keeps the floor, so the others wait on it forever. Its own `chat_await` now refuses (`unfinished_turn`) and says to send `over`; the waiting side's reminder names the stalled `say`. |
+| Called `chat_await` when the turn was already its own | Returns at once with `already_received` and the turn's text instead of blocking on itself. Uses the floor rules, so in a 3+ party chat only the addressee gets it back. |
+| A `chat_say` failed (e.g. a file attachment refused) and it assumed the turn went out | The error says nothing was posted and that, if it was its turn, it still is. Combined with the row above, a follow-up `chat_await` hands the turn back. On a **local** chat, `files=` just adds the files' full paths to the message (same disk; no copy, no opt-in), so that case doesn't fail any more. |
+
+Hard limit, unchanged: if a session has truly stopped (the human said stop, or it
+stopped again after the guard's
+one block), only a human can restart it. `watch --state` / the TUI
+shows which one to poke.

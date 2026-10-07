@@ -105,6 +105,38 @@ def test_reminds_again_if_it_keeps_chatting() -> None:
           "another session's record is independent")
 
 
+def test_reminder_logged_as_user_message() -> None:
+    print("works even if the hook's reminder is logged as a user message:")
+    first = [user("chat with B"), call("chat_say", {"status": "over"}, WAITING)]
+    sid = {"session_id": "sess-feedback"}
+    check(json.loads(run(transcript(*first), **sid))["decision"] == "block", "first stop blocked")
+    after = first + [user("Stop hook feedback: You're in a live discordinator chat..."),
+                     call("chat_await", {}, {"timed_out": True, "ended": False,
+                                             "next": "Call chat_await again NOW."})]
+    p = transcript(*after)
+    out = run(p, stop_hook_active=True, **sid)
+    check(out and json.loads(out)["decision"] == "block",
+          "kept chatting after the reminder, stopped again -> blocked again")
+    check(run(p, stop_hook_active=True, **sid) == "", "then a bare repeat stop is allowed")
+
+
+def test_failed_chat_say() -> None:
+    print("a chat_say that errored (turn probably never went out) -> blocked once:")
+    p = transcript(user("chat"), call("chat_await", {}, {"from": "B", "your_turn": True,
+                                                         "ended": False}),
+                   call("chat_say", {"text": "see file", "status": "over"},
+                        "Error executing tool chat_say: File not found. Nothing was posted"))
+    sid = {"session_id": "sess-failed-say"}
+    out = json.loads(run(p, **sid))
+    check(out["decision"] == "block" and "returned an error" in out["reason"]
+          and "impasse" in out["reason"], "blocked with how to recover")
+    check(run(p, stop_hook_active=True, **sid) == "", "a repeat stop is allowed")
+    a = [user("chat"), {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_noresult", "name": "mcp__discordinator__chat_say",
+         "input": {"status": "over"}}]}}]
+    check(run(transcript(*a)) == "", "a chat_say with no result yet (interrupted) -> allowed")
+
+
 def test_blocks_when_its_your_turn() -> None:
     print("got the reply (your turn) but stops without answering -> blocked:")
     res = {"from": "B", "your_turn": True, "ended": False, "next": "It's YOUR turn. Reply with chat_say"}
@@ -166,6 +198,18 @@ def test_never_breaks() -> None:
     check(guard.main(json.dumps({"transcript_path": str(_TMP / "missing.jsonl")})) == "",
           "missing transcript -> allow")
     check(guard.main("[1,2]") == "", "non-object payload -> allow")
+    p = transcript(user("x"), {"type": "assistant", "message": {"role": "assistant", "content": [
+        "stray", {"type": "tool_use", "id": "t-bash", "name": "Bash", "input": {}}]}},
+        call("chat_say", {"status": "over"}, WAITING))
+    check(json.loads(run(p))["decision"] == "block", "stray blocks and non-MCP tools skipped")
+    orig = guard.config._atomic_write
+    def fail(*a, **k):
+        raise OSError("read-only")
+    guard.config._atomic_write = fail
+    try:
+        check(json.loads(run(p))["decision"] == "block", "unwritable state file -> still works")
+    finally:
+        guard.config._atomic_write = orig
     bad = _TMP / "torn.jsonl"
     bad.write_text("{torn\n" + json.dumps(user("x")) + "\n", encoding="utf-8")
     check(run(str(bad)) == "", "torn lines tolerated")
@@ -183,11 +227,23 @@ def test_cli_end_to_end() -> None:
     r2 = subprocess.run([sys.executable, "-m", "discordinator.cli", "chat-guard"],
                         input="{}", capture_output=True, text=True, env=env, timeout=60)
     check(r2.returncode == 0 and r2.stdout.strip() == "", "no-op prints nothing")
+    import io
+    from discordinator import cli
+    old_in, old_out = sys.stdin, sys.stdout
+    sys.stdin, sys.stdout = io.StringIO(json.dumps({"transcript_path": p})), io.StringIO()
+    try:
+        rc = cli.main(["chat-guard"])
+        printed = sys.stdout.getvalue()
+    finally:
+        sys.stdin, sys.stdout = old_in, old_out
+    check(rc == 0 and json.loads(printed)["decision"] == "block", "in-process cli entry too")
 
 
 def main() -> int:
     test_blocks_dropping_out_while_waiting()
     test_reminds_again_if_it_keeps_chatting()
+    test_reminder_logged_as_user_message()
+    test_failed_chat_say()
     test_blocks_when_its_your_turn()
     test_allows_when_ended()
     test_only_current_turn_counts()

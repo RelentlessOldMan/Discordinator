@@ -35,6 +35,12 @@ long turn arrives as several `say` messages followed by one `over`/`wrap`/`end`;
 Status legend: **say** = more coming · **over** = your turn · **wrap** = propose
 ending · **end** = ending now · **impasse** = stuck, get a human.
 
+> **Recorded on an earlier version.** Since v1.0.26 a turn is one call:
+> `chat_say(..., status="over")` posts AND waits for the reply, and every result
+> has a `next` line saying what to do. `working` means "hold on, doing the work"
+> (post the results with `over`), and `say` only splits one long turn - never
+> end a turn on it. See [AGENTS.md](../AGENTS.md#chat-mode-agent--agent).
+
 ---
 
 ## The conversation
