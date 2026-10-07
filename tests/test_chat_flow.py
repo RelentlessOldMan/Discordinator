@@ -500,12 +500,11 @@ def test_shared_room_two_chats() -> None:
     e = mcp.chat_begin(chatter="Echo", channel=r)
     check(not e["recovered_pending_turn"] and "Another chat" in e.get("note", ""),
           "a newcomer isn't handed their turn, and is told to address its own")
-    try:
-        mcp.chat_say(text="let's review PR 12", chatter="Echo", channel=r, wait=False)
-        raise AssertionError("an unaddressed turn over someone else's floor should be refused")
-    except mcp.ChatSendError as exc:
-        check("Beta has the floor" in str(exc) and "Nothing was posted" in str(exc),
-              "talking over another chat's floor is refused before posting")
+    mcp.chat_say(text="anyone free for PR 12?", chatter="Echo", channel=r, wait=False)
+    for h in ("Alpha", "Beta"):
+        st = chat.compute_state(LocalClient("x"), r, h)
+        check(st["floor"] == "Beta" and "Echo" not in st["participants"],
+              f"an unaddressed opener from a newcomer stays out of {h}'s chat")
     mcp.chat_begin(chatter="Foxtrot", channel=r)
     mcp.chat_say(text="let's review PR 12", chatter="Echo", channel=r, to="Foxtrot", wait=False)
     a = mcp.chat_await(chatter="Alpha", channel=r, timeout=0.3, poll=0.02, nudge_after=0)
@@ -630,7 +629,8 @@ def test_glue_in_user_text_exact() -> None:
             if not (all(len(p) <= limit for p in pieces) and chat.join_pieces(pieces) == text):
                 raise AssertionError(f"roundtrip failed (limit {limit}): {text!r} -> {pieces!r}")
     check(True, "random texts with the marker round-trip exactly")
-    check(chat.join_pieces(["ends with" + chat.GLUE]) == "ends with" + chat.GLUE,
+    t = "ends with" + chat.GLUE
+    check(chat.join_pieces(chat.split_turn(t, 100)) == t,
           "a one-piece turn ending in the marker keeps it")
 
 

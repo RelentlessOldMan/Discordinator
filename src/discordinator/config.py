@@ -23,13 +23,13 @@ _IO_RETRIES = 50
 _IO_PAUSE = 0.02
 
 
-def _replace(src: str, dst: Path) -> None:
-    for attempt in range(_IO_RETRIES):
+def _replace(src: str, dst: Path, retries: int = _IO_RETRIES) -> None:
+    for attempt in range(retries):
         try:
             os.replace(src, dst)
             return
         except PermissionError:
-            if attempt == _IO_RETRIES - 1:
+            if attempt == retries - 1:
                 raise
             time.sleep(_IO_PAUSE)
 
@@ -265,21 +265,29 @@ def load_dotenv() -> None:
             return
 
 
+def load_file() -> dict[str, Any]:
+    """Just what the config file says - no defaults, no env/.env overrides.
+    What `config set-*` edits and saves, so a setting meant for one shell or
+    session (an env var) is never written into the shared file."""
+    path = config_path()
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"Config file at {path} is not valid JSON: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise ConfigError(f"Config file at {path} must contain a JSON object.")
+    return loaded
+
+
 def load() -> dict[str, Any]:
     """Load config from disk merged with defaults and env overrides."""
     load_dotenv()
     data = dict(DEFAULTS)
     data["channels"] = {}
-    path = config_path()
-    if path.exists():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ConfigError(f"Config file at {path} is not valid JSON: {exc}") from exc
-        if not isinstance(loaded, dict):
-            raise ConfigError(f"Config file at {path} must contain a JSON object.")
-        data.update(loaded)
-        data.setdefault("channels", {})
+    data.update(load_file())
+    data.setdefault("channels", {})
 
     # Environment overrides win over the file.
     env_token = os.environ.get("DISCORD_BOT_TOKEN")
@@ -477,17 +485,35 @@ def update_state() -> Iterator[dict[str, Any]]:
         save_state(state)
 
 
-def get_cursor(channel_id: str) -> Optional[str]:
-    return (load_state().get("cursors") or {}).get(str(channel_id))
+# Each reader (a session's label) has its own position, so two sessions on one
+# machine relaying to each other don't consume each other's messages. A reader
+# with no position of its own yet starts from the old shared one ("cursors").
 
 
-def set_cursor(channel_id: str, message_id: str) -> None:
+def get_cursor(channel_id: str, reader: Optional[str] = None) -> Optional[str]:
+    state = load_state()
+    if reader:
+        mine = (state.get("relay_cursors") or {}).get(str(channel_id)) or {}
+        if reader in mine:
+            return mine[reader] or None  # None: reset, read from scratch
+    return (state.get("cursors") or {}).get(str(channel_id))
+
+
+def set_cursor(channel_id: str, message_id: str, reader: Optional[str] = None) -> None:
     with update_state() as state:
-        state.setdefault("cursors", {})[str(channel_id)] = str(message_id)
+        if reader:
+            state.setdefault("relay_cursors", {}).setdefault(
+                str(channel_id), {})[reader] = str(message_id)
+        else:
+            state.setdefault("cursors", {})[str(channel_id)] = str(message_id)
 
 
-def clear_cursor(channel_id: str) -> None:
+def clear_cursor(channel_id: str, reader: Optional[str] = None) -> None:
     with update_state() as state:
-        cursors = state.get("cursors") or {}
-        cursors.pop(str(channel_id), None)
-        state["cursors"] = cursors
+        if reader:
+            state.setdefault("relay_cursors", {}).setdefault(
+                str(channel_id), {})[reader] = None
+        else:
+            cursors = state.get("cursors") or {}
+            cursors.pop(str(channel_id), None)
+            state["cursors"] = cursors

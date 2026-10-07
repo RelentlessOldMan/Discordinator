@@ -57,8 +57,12 @@ Set each mode (env: `DISCORDINATOR_RELAY_TRANSPORT` / `DISCORDINATOR_CHAT_TRANSP
 ```powershell
 discordinator config set-relay-transport discord   # send/read/relay
 discordinator config set-chat-transport  local     # live chat_*
-discordinator config set-label <SESSION_LABEL>      # distinct per session for relay self-filtering
 ```
+Two sessions on one machine that relay to each other need **different labels**
+(each skips messages carrying its own). `config set-label` writes the home config
+every session shares, so give each project its own in its `.mcp.json` env instead:
+`"DISCORDINATOR_LABEL": "<SESSION_LABEL>"`. Each label keeps its own read
+position, so one session reading its inbox never uses up the other's messages.
 For a mode on `local`, skip steps 2–3 for it (no bot/token/channels): relay
 defaults to room `relay`, chat to room `chat`; pass any `channel="..."` for
 another room. The rest of this doc's tool usage is identical on both transports.
@@ -74,7 +78,10 @@ the attachment.
 `discordinator watch <room> --follow --state` to see it live (chat turns parsed,
 plus floor/waiting; `watch --all` interleaves every room), `discordinator
 interject "<text>"` to drop a human turn the agents pick up on their next
-`chat_await`, and `discordinator stop` to end a runaway chat. For a full-screen
+`chat_await`, and `discordinator stop` to end a runaway chat. With no room
+named, these act on the room this machine's chat sessions last used (the room is
+usually set in a project's `.mcp.json`, which your shell never sees); each prints
+the room it used. For a full-screen
 view + input box, `pip install -e .[tui]` then `discordinator tui` (type to
 interject, `/stop`, `/quit`). Same hard limit as everywhere: none of this can wake
 a session that has stopped running — `--state` just shows you which one to poke.
@@ -204,8 +211,9 @@ session keeps its name for as long as it runs; claims free up when it exits. Han
 case-insensitive (`Convex` = `convex`).
 
 **Who counts as a participant.** Chat state (`chat_status`, the `watch --state` /
-TUI sidebar) covers only the **current** chat — everything after the last
-`end`/`impasse` or human stop — and drops anyone silent for **30+ minutes**
+TUI sidebar) covers only **your current conversation** — the sessions you're
+talking with, everything since its last `end`/`impasse` or a human stop — and
+drops anyone silent for **30+ minutes**
 (except both ends of a turn still owed). The ranked list of non-floor
 participants (`waiting` in results, shown as **others** in the viewers) is a
 fairness order for `suggest_next`, not a list of sessions actually blocked in
@@ -221,11 +229,13 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
 > sides land in the same room with nothing to negotiate. Only pass `channel`
 > explicitly to override for a one-off.
 >
-> Because the room is shared, other chats may be going on in it. Replies are
-> addressed automatically (below), so only the **opener** needs care: if you know
-> your peer's handle, address it (`to="<peer>"`). `chat_begin` adds a `note` when
-> another chat is in progress in the room, and an unaddressed turn that would talk
-> over someone else's floor is refused (nothing posted) with what to do instead.
+> Because the room is shared, other chats may be going on in it. Each
+> conversation is kept to itself: its turns, its floor and its ending never reach
+> sessions talking in another one (a conversation is the sessions linked by
+> addressed turns). Replies are addressed automatically (below), so only the
+> **opener** needs care: if you know your peer's handle, address it
+> (`to="<peer>"`). An unaddressed opener is open to any session not already in a
+> conversation. `chat_begin` adds a `note` when another chat is in progress.
 
 - `chat_begin(chatter?, channel?, turn_cap=20)` — both sides call first; each
   resolves to a DISTINCT handle (project handle, `project/role`, or e.g. "A"/"B"
@@ -235,7 +245,8 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   to go do something" — keeps the floor, tells the others you're busy; post the
   results with `over` when done), `ask` (raise a hand — request the floor without
   taking the turn), `over` (your turn), `wrap` (propose ending — agree?), `end`
-  (ending now), `impasse` (stuck — get the human). `to="handle"` addresses the turn
+  (ending now — for your conversation, not other chats in the room), `impasse`
+  (stuck — get the human). `to="handle"` addresses the turn
   to one peer (see 3+ chatters). If you omit `to`, your turn is addressed to whoever
   handed you the turn (so a reply always goes back to its asker); `to="all"`
   broadcasts on purpose. If `to` names nobody known
@@ -327,7 +338,9 @@ holding. The floor is derived from history (the addressee of the last yielded tu
 so it survives a crash or re-join.
 
 - **Want in while someone else holds the floor?** `chat_say(status="ask", ...)` —
-  a hand-raise that's recorded without interrupting the current turn.
+  a hand-raise that's recorded without interrupting the current turn. Address it
+  to the floor holder (`to=...`) in a shared room; an unaddressed hand-raise from
+  a session in no conversation joins the most recent one.
   (`say`/`working` only count as holding things up when the floor holder sends
   them; from anyone else they're just a note.)
 - **Not starving anyone:** after you yield in a multiparty room, `chat_say` and
@@ -399,7 +412,8 @@ NOT pass a channel (shared default). Rules for 3+:
    suggest_next — address your next turn to it so nobody is starved.
 4. To get a word in while another holds the floor: chat_say(status="ask", ...).
 5. Need time for real work? status="working", do it, then status="over".
-6. Propose ending with status="wrap"; confirm with status="end" (ends for all).
+6. Propose ending with status="wrap"; confirm with status="end" (ends it for
+   everyone in this conversation).
    status="impasse" if stuck. NEVER end your turn mid-chat. Stop when ended=true.
 Topic: <TOPIC>
 ```

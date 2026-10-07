@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -217,7 +218,8 @@ def get_new_messages(
     channel — the relay primitive for two-way session handoff.
 
     A per-channel cursor is stored and advanced on each call, so repeated calls
-    return only fresh messages (not the whole history). By default your own
+    return only fresh messages (not the whole history). Each label has its own
+    cursor, so sessions with different labels never consume each other's. By default your own
     machine's messages (matched by the configured machine_label prefix) are
     filtered out, so you see just what the other session/machine said.
 
@@ -238,7 +240,7 @@ def get_new_messages(
     own_label = cfg.get("machine_label")
     if ack is None:
         ack = bool(cfg.get("ack_on_read"))
-    cursor = config.get_cursor(channel_id)
+    cursor = config.get_cursor(channel_id, own_label)
 
     capped = max(1, min(int(limit), 100))
     with _client("relay") as client:
@@ -250,7 +252,7 @@ def get_new_messages(
         messages.reverse()
 
         if messages:
-            config.set_cursor(channel_id, messages[-1]["id"])
+            config.set_cursor(channel_id, messages[-1]["id"], own_label)
 
         if not include_self and own_label:
             prefix = f"[{own_label}]"
@@ -323,10 +325,13 @@ def purge_messages(
                 "message_ids": [m["id"] for m in matched],
             }
 
-        deleted = 0
-        for m in matched:
-            client.delete_message(channel_id, m["id"])
-            deleted += 1
+        if hasattr(client, "delete_messages"):  # local: one rewrite for all of them
+            deleted = client.delete_messages(channel_id, [m["id"] for m in matched])
+        else:
+            deleted = 0
+            for m in matched:
+                client.delete_message(channel_id, m["id"])
+                deleted += 1
         return {"dry_run": False, "deleted": deleted}
 
 
@@ -403,6 +408,7 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         # silent stall; a long turn in progress arrives whole.
         cursor = chat.seed_cursor(client, channel_id, me)
     chat.reset(channel_id, me, cursor, turn_cap)
+    chat.note_room(channel_id)
     owed = bool(st.get("your_turn"))
     out = {
         "channel": channel_id, "chatter": me, "turn_cap": turn_cap,
@@ -414,11 +420,11 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
                       "chat_await(...))." if st.get("stop_reason") == "human"
                  else "initiator: chat_say(...); other: chat_await(...)"),
     }
-    others = [p for p in st.get("participants", []) if not chat.same_handle(p, me)]
+    others = st.get("_others_chatting", [])
     joined = any(chat.same_handle(p, me) for p in st.get("_posters", []))
-    if st.get("session_active") and others and not owed and not joined:
+    if others and not owed and not joined:
         busy = (f"Another chat is going on in this room ({', '.join(others)}). Address "
-                "every turn you send (to='<your peer>') so yours and theirs don't mix.")
+                "your opener (to='<your peer>') so it reaches the right session.")
         note = f"{note} {busy}" if note else busy
     if note:
         out["note"] = note
@@ -461,7 +467,8 @@ def chat_say(
       - "over"    I'm done — your turn (the normal handoff).
       - "wrap"    I think we can end this — do you agree? (yields your turn).
       - "end"     ending now (use to confirm after the other proposed "wrap",
-                  or to end unilaterally). Terminal.
+                  or to end unilaterally). Terminal - for your conversation,
+                  not other chats in the same room.
       - "impasse" we're stuck — stop and get the human. Terminal.
 
     `to`: address this turn to ONE participant by handle (e.g. to="C"). Required
@@ -522,30 +529,21 @@ def chat_say(
             "turn, it still is - the others are waiting on you. Fix this and send "
             "it again with chat_say(...) before calling chat_await.") from e
     with chat_client as client:
-        try:
-            target, auto_note = _check_turn(client, channel_id, me, status, target)
-        except Exception as e:
-            raise ChatSendError(
-                f"{e}\n\nNothing was posted, so nobody saw this message.") from e
-        to_note = _unknown_to_note(client, channel_id, me, target)
-        try:
-            sent = chat.send_chat(client, channel_id, me, status, text, to=target,
-                                  files=file_list)
-        except Exception as e:
-            done = getattr(e, "chat_pieces_sent", 0)
-            if done:
-                total = getattr(e, "chat_pieces_total", "?")
-                rest = getattr(e, "chat_rest", "")
+        # Check-then-post under a lock, so two sessions on this machine answering
+        # the same message at the same moment can't both get through the check.
+        with config.FileLock(_post_lock(channel_id), timeout=30):
+            try:
+                target, auto_note = _check_turn(client, channel_id, me, status, target)
+            except Exception as e:
                 raise ChatSendError(
-                    f"{e}\n\nOnly the first {done} of {total} pieces of this long "
-                    "message were posted (as status 'say', so the others are still "
-                    "waiting on you). Don't resend those: send just the rest, which "
-                    f"starts: \"{rest[:80]}\", with chat_say(..., status='{status}')."
-                ) from e
-            raise ChatSendError(
-                f"{e}\n\nNothing was posted, so nobody saw this message. If it was "
-                "your turn, it still is - the others are waiting on you. Fix this and "
-                "send it again with chat_say(...) before calling chat_await.") from e
+                    f"{e}\n\nNothing was posted, so nobody saw this message.") from e
+            chat.note_room(channel_id)
+            to_note = _unknown_to_note(client, channel_id, me, target)
+            try:
+                sent = chat.send_chat(client, channel_id, me, status, text, to=target,
+                                      files=file_list)
+            except Exception as e:
+                raise _send_failed(e, status) from e
         try:
             return _after_post(client, channel_id, me, status, target, sent, shared,
                                handle_note, auto_note, to_note, wait, timeout)
@@ -563,6 +561,29 @@ def chat_say(
             return out
 
 
+def _post_lock(channel_id: str) -> Path:
+    """The lock that serializes check-then-post in one room on this machine."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(channel_id))[:80]
+    return config.state_path().parent / "locks" / f"post-{safe}"
+
+
+def _send_failed(e: Exception, status: str) -> ChatSendError:
+    """What to tell the model when posting failed, part-way or before anything."""
+    done = getattr(e, "chat_pieces_sent", 0)
+    if done:
+        total = getattr(e, "chat_pieces_total", "?")
+        rest = getattr(e, "chat_rest", "")
+        return ChatSendError(
+            f"{e}\n\nOnly the first {done} of {total} pieces of this long "
+            "message were posted (as status 'say', so the others are still "
+            "waiting on you). Don't resend those: send just the rest, which "
+            f"starts: \"{rest[:80]}\", with chat_say(..., status='{status}').")
+    return ChatSendError(
+        f"{e}\n\nNothing was posted, so nobody saw this message. If it was "
+        "your turn, it still is - the others are waiting on you. Fix this and "
+        "send it again with chat_say(...) before calling chat_await.")
+
+
 def _check_turn(client: Client, channel_id: str, me: str, status: str,
                 target: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     """Checks before posting a turn. Returns the address to use (an unaddressed
@@ -571,7 +592,11 @@ def _check_turn(client: Client, channel_id: str, me: str, status: str,
     someone: something new for me arrived that I haven't read, or another
     participant holds the floor in a conversation I'm not part of."""
     if status in chat.TERMINAL_STATUSES or status == "ask":
-        return target, None  # ending or raising a hand is always allowed
+        # Ending or raising a hand is always allowed. An ending goes to the one
+        # I'm talking with, like a reply (it ends our conversation, not others').
+        if target is None and status in chat.TERMINAL_STATUSES:
+            target = chat.get_reply_to(channel_id, me)
+        return target, None
     if not chat.get_cursor(channel_id, me):
         # Never joined (no chat_begin) and speaking now: start reading from
         # here, so the reply wait doesn't pick up turns from an older chat.
@@ -670,7 +695,7 @@ def _unknown_to_note(client: Client, channel_id: str, me: str,
     if not target or chat._is_broadcast(target):
         return None
     st = chat.compute_state(client, channel_id, me)
-    known = [h for h in st.get("_posters", []) + handles.live_handles()
+    known = [h for h in st.get("_room_posters", []) + handles.live_handles()
              if not chat.same_handle(h, me)]
     if any(chat.same_handle(target, h) for h in known):
         return None
@@ -678,7 +703,7 @@ def _unknown_to_note(client: Client, channel_id: str, me: str,
     close = difflib.get_close_matches(target.casefold(),
                                       [h.casefold() for h in names], n=1, cutoff=0.6)
     hint = next((h for h in names if close and h.casefold() == close[0]), None)
-    return (f"Nobody called '{target}' has posted in this chat and no live session "
+    return (f"Nobody called '{target}' has posted in this room and no live session "
             f"on this machine has that name"
             + (f" - did you mean '{hint}'?" if hint else ".")
             + (f" Known: {', '.join(names)}." if names else "")
@@ -714,7 +739,8 @@ def chat_await(
     chat_begin, or omit it if you omitted it there.
 
     Floor rules: a turn "comes to you" when another participant `over`/`wrap`s
-    and addresses you (or broadcasts), OR anyone ends the chat. A turn addressed
+    and addresses you (or broadcasts), OR someone in your chat ends it. Other
+    conversations in the same room never wake you. A turn addressed
     to a DIFFERENT peer does not wake you — you keep holding the wait (the floor
     token). `ask` (a hand-raise), `say` and `working` never wake you. `from_whom`
     optionally waits for a yielded turn from that one specific peer.

@@ -75,6 +75,10 @@ def sanitize_room(name: str) -> str:
 # One lock implementation for every shared file (rooms, handles, state).
 _AppendLock = config.FileLock
 
+# A delete swaps in a rewritten room; Windows refuses while any session is
+# reading it, so a delete keeps trying for ~5s (0.02s apart).
+_DELETE_RETRIES = 250
+
 
 class LocalClient:
     """Filesystem-backed transport with the DiscordClient method surface."""
@@ -232,27 +236,32 @@ class LocalClient:
             with open(tmp, "w", encoding="utf-8") as fh:
                 for r in kept:
                     fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-            os.replace(tmp, path)
+            config._replace(tmp, path)
         except OSError:
             try:
                 os.remove(tmp)
             except OSError:
                 pass
             return 0
-        files_root = self._files_dir("x").parent.resolve()
         for r in dropped:  # their stored attachment copies go too
-            atts = r.get("attachments") or []
-            dirs = {self._files_dir(str(r["id"]))} if atts else set()
-            for a in atts:
-                folder = Path(str(a.get("url") or "")).parent
-                try:
-                    if folder.resolve().parent == files_root:
-                        dirs.add(folder)
-                except OSError:
-                    pass
-            for d in dirs:
+            for d in self._attachment_dirs(r):
                 shutil.rmtree(d, ignore_errors=True)
         return len(dropped)
+
+    def _attachment_dirs(self, record: dict[str, Any]) -> set[Path]:
+        """Folders holding a message's stored attachments: its id's folder, plus
+        wherever each attachment's url points under the files root (a file
+        stays where it was copied if the message's id moved on - see _append)."""
+        dirs = {self._files_dir(str(record["id"]))}
+        files_root = self._files_dir("x").parent.resolve()
+        for a in record.get("attachments") or []:
+            folder = Path(str(a.get("url") or "")).parent
+            try:
+                if folder.resolve().parent == files_root:
+                    dirs.add(folder)
+            except OSError:
+                pass
+        return dirs
 
     def _append(
         self,
@@ -406,20 +415,41 @@ class LocalClient:
         return dest
 
     def delete_message(self, channel_id: str, message_id: str) -> None:
+        self.delete_messages(channel_id, [message_id])
+
+    def delete_messages(self, channel_id: str, message_ids: list[str]) -> int:
+        """Delete several messages with ONE rewrite of the room (a purge would
+        otherwise rewrite the whole file once per message). Returns how many
+        were removed."""
         path = self._room_path(channel_id)
         if not path.exists():
-            return
+            return 0
+        ids = {str(i) for i in message_ids}
         with _AppendLock(path):
-            kept = [r for r in self._read_all(channel_id) if str(r["id"]) != str(message_id)]
+            records = self._read_all(channel_id)
+            gone = [r for r in records if str(r["id"]) in ids]
+            if not gone:
+                return 0
             tmp = str(path) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                for r in kept:
-                    fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-            os.replace(tmp, path)
-        # Drop any stored attachment files for the deleted message (hygiene).
-        fdir = self._files_dir(message_id)
-        if fdir.exists():
-            shutil.rmtree(fdir, ignore_errors=True)
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    for r in records:
+                        if str(r["id"]) not in ids:
+                            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+                # Windows refuses the swap while a reader has the room open
+                # (every session polls it): keep retrying for a few seconds.
+                config._replace(tmp, path, retries=_DELETE_RETRIES)
+            except BaseException:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
+        # Drop any stored attachment files for the deleted messages (hygiene).
+        for r in gone:
+            for d in self._attachment_dirs(r):
+                shutil.rmtree(d, ignore_errors=True)
+        return len(gone)
 
     def add_reaction(
         self, channel_id: str, message_id: str, emoji: str = "✅"
