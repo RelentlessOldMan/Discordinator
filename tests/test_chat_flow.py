@@ -245,6 +245,7 @@ def test_non_holder_working_3way() -> None:
           "B isn't told C holds the floor")
     st = chat.compute_state(LocalClient("B"), r, "B")
     check(st["floor"] == "A" and st["progress"] == [], "state: floor A, no turn in progress")
+    mcp.chat_await(chatter="A", channel=r, timeout=1, poll=0.02, nudge_after=0)
     mcp.chat_say(text="on it", chatter="A", channel=r, status="working", wait=False)
     st = chat.compute_state(LocalClient("B"), r, "B")
     check([x["from"] for x in st["progress"]] == ["A"], "the holder's `working` does count")
@@ -282,7 +283,7 @@ def test_long_turn_recovered_whole() -> None:
     check(again.get("already_received") and "PART1" in again["text"]
           and "PART2-END" in again["text"], "already_received hands back the whole turn")
     st = chat.compute_state(LocalClient("B"), r, "B")
-    check(st["_pending_text"].startswith("PART1"), "state's pending text is the whole turn")
+    check(st["_owed_text"].startswith("PART1"), "state's owed text is the whole turn")
 
 
 def test_timeout_mid_turn_keeps_first_half() -> None:
@@ -304,6 +305,7 @@ def test_unknown_to_warns_now() -> None:
     for h in ("Alpha", "Beta"):
         mcp.chat_begin(chatter=h, channel=r)
     mcp.chat_say(text="hi", chatter="Beta", channel=r, wait=False)
+    mcp.chat_await(chatter="Alpha", channel=r, timeout=1, poll=0.02, nudge_after=0)
     t0 = time.monotonic()
     out = mcp.chat_say(text="hello", chatter="Alpha", channel=r, to="Bet")
     check(time.monotonic() - t0 < 5 and "reply" not in out, "doesn't wait for a reply")
@@ -327,6 +329,7 @@ def test_human_stop_holds_on_rejoin() -> None:
     for h in ("A", "B"):
         mcp.chat_begin(chatter=h, channel=r)
     mcp.chat_say(text="hi", chatter="A", channel=r, wait=False)
+    mcp.chat_await(chatter="B", channel=r, timeout=1, poll=0.02, nudge_after=0)
     mcp.chat_say(text="your turn A", chatter="B", channel=r, wait=False)
     LocalClient("human").post_human(r, "stop")
     st = mcp.chat_status(chatter="A", channel=r)
@@ -412,8 +415,10 @@ def test_typo_leaves_no_phantom() -> None:
     for h in ("A", "B"):
         mcp.chat_begin(chatter=h, channel=r)
     mcp.chat_say(text="hi", chatter="B", channel=r, wait=False)
+    mcp.chat_await(chatter="A", channel=r, timeout=1, poll=0.02, nudge_after=0)
     mcp.chat_say(text="q", chatter="A", channel=r, to="Bobb", wait=False)
     mcp.chat_say(text="q", chatter="A", channel=r, to="B", wait=False)
+    mcp.chat_await(chatter="B", channel=r, timeout=1, poll=0.02, nudge_after=0)
     mcp.chat_say(text="answer", chatter="B", channel=r, wait=False)
     st = chat.compute_state(LocalClient("A"), r, "A")
     check(st["participants"] == ["B", "A"] or sorted(st["participants"]) == ["A", "B"],
@@ -436,6 +441,197 @@ def test_interjection_only_wakes_holder() -> None:
     check("not your turn" in b["next"] and "chat_await" in b["next"], "B is told to keep waiting")
     a = mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
     check(a["from"] in ("B", "human") and a["your_turn"], "A (owed the turn) still has it")
+
+
+def test_error_after_post_is_not_a_failed_send() -> None:
+    print("chat_say that fails AFTER posting says so (posted=True) instead of raising:")
+    r = "post-then-fail"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    real_bump, real_await = chat.bump_turn, chat.await_turn
+
+    def boom(*a, **k):
+        raise PermissionError("[WinError 5] Access is denied")
+
+    chat.bump_turn = boom
+    try:
+        out = mcp.chat_say(text="my only turn", chatter="A", channel=r, wait=False)
+    finally:
+        chat.bump_turn = real_bump
+    check(out["posted"] and "PermissionError" in out["error"]
+          and "don't send it again" in out["next"], "bookkeeping failure: posted, don't resend")
+    mcp.chat_await(chatter="B", channel=r, timeout=1, poll=0.02, nudge_after=0)
+
+    def lost(*a, **k):
+        raise chat.DiscordError("503 Service Unavailable")
+
+    chat.await_turn = lost
+    try:
+        out = mcp.chat_say(text="reply", chatter="B", channel=r)
+    finally:
+        chat.await_turn = real_await
+    check(out["posted"] and "chat_await" in out["next"], "a failed wait for the reply: posted, call chat_await")
+    msgs = [m["content"] for m in LocalClient("x").read_messages(r, limit=10)]
+    check(sum("my only turn" in c for c in msgs) == 1 and sum("reply" in c for c in msgs) == 1,
+          "each message is in the room exactly once")
+    mcp.chat_await(chatter="A", channel=r, timeout=1, poll=0.02, nudge_after=0)
+    chat.bump_turn = boom
+    try:
+        out = mcp.chat_say(text="bye", chatter="A", channel=r, status="end")
+    finally:
+        chat.bump_turn = real_bump
+    check(out["posted"] and out["ended"] and "ended" in out["next"],
+          "a posted `end` whose bookkeeping failed still reports the chat ended")
+
+
+def test_shared_room_two_chats() -> None:
+    print("two separate chats in one shared room don't cross:")
+    r = "shared-room"
+    for h in ("Alpha", "Beta"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="Beta, what's the schema?", chatter="Alpha", channel=r, to="Beta", wait=False)
+    mcp.chat_await(chatter="Beta", channel=r, timeout=1, poll=0.02, nudge_after=0)
+    reply = mcp.chat_say(text="it's in schema.sql", chatter="Beta", channel=r, wait=False)
+    check(reply["to"] == "Alpha", "an unaddressed reply goes back to who handed over the turn")
+    last = LocalClient("x").read_messages(r, limit=1)[0]["content"]
+    check(last.startswith("[Beta>Alpha|over]"), f"...and is addressed on the wire: {last[:20]}")
+    mcp.chat_await(chatter="Alpha", channel=r, timeout=1, poll=0.02, nudge_after=0)
+    mcp.chat_say(text="thanks - and table Y?", chatter="Alpha", channel=r, wait=False)
+    e = mcp.chat_begin(chatter="Echo", channel=r)
+    check(not e["recovered_pending_turn"] and "Another chat" in e.get("note", ""),
+          "a newcomer isn't handed their turn, and is told to address its own")
+    try:
+        mcp.chat_say(text="let's review PR 12", chatter="Echo", channel=r, wait=False)
+        raise AssertionError("an unaddressed turn over someone else's floor should be refused")
+    except mcp.ChatSendError as exc:
+        check("Beta has the floor" in str(exc) and "Nothing was posted" in str(exc),
+              "talking over another chat's floor is refused before posting")
+    mcp.chat_begin(chatter="Foxtrot", channel=r)
+    mcp.chat_say(text="let's review PR 12", chatter="Echo", channel=r, to="Foxtrot", wait=False)
+    a = mcp.chat_await(chatter="Alpha", channel=r, timeout=0.3, poll=0.02, nudge_after=0)
+    check(a["timed_out"], "Echo's opener to Foxtrot doesn't wake Alpha")
+    st = mcp.chat_status(chatter="Beta", channel=r)
+    check(st["your_turn"], "Beta is still owed Alpha's question, though Echo spoke since")
+    f = mcp.chat_await(chatter="Foxtrot", channel=r, timeout=1, poll=0.02, nudge_after=0)
+    check(f["from"] == "Echo" and f["your_turn"], "Foxtrot gets Echo's opener")
+    b = mcp.chat_await(chatter="Beta", channel=r, timeout=1, poll=0.02, nudge_after=0)
+    check(b["from"] == "Alpha" and "table Y" in b["text"], "and Beta gets Alpha's")
+
+
+def test_say_without_begin_ignores_old_chat() -> None:
+    print("chat_say from a session that never called chat_begin doesn't get old turns:")
+    r = "no-begin"
+    c = LocalClient("x")
+    chat.send_chat(c, r, "Old1", "over", "old question")
+    chat.send_chat(c, r, "Old2", "wrap", "think we're done")
+    out = mcp.chat_say(text="new topic", chatter="Fresh", channel=r, timeout=0.3)
+    check(out["reply"]["timed_out"] and "think we're done" not in out["reply"]["text"],
+          "the reply wait starts at its own message")
+
+
+def test_failed_read_keeps_partial() -> None:
+    print("a read error in the middle of someone's long turn doesn't lose its first part:")
+    r = "read-fail"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    c = LocalClient("x")
+    chat.send_chat(c, r, "B", "say", "PART ONE")
+    first = mcp.chat_await(chatter="A", channel=r, timeout=0.2, poll=0.02, nudge_after=0)
+    check(first["timed_out"], "only half the turn is in")
+    chat.send_chat(c, r, "B", "say", "PART TWO")
+    real = LocalClient.read_messages
+    calls = {"n": 0}
+
+    def flaky(self, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 4:  # the poll AFTER the piece was read and the cursor moved
+            raise chat.DiscordError("502 transient")
+        return real(self, *a, **k)
+
+    LocalClient.read_messages = flaky
+    try:
+        for _ in range(5):
+            try:
+                mcp.chat_await(chatter="A", channel=r, timeout=0.2, poll=0.02, nudge_after=0)
+            except chat.DiscordError:
+                break
+    finally:
+        LocalClient.read_messages = real
+    chat.send_chat(c, r, "B", "over", "PART THREE")
+    got = mcp.chat_await(chatter="A", channel=r, timeout=1, poll=0.02, nudge_after=0)
+    check(got["text"] == "PART ONE\nPART TWO\nPART THREE", f"whole turn: {got['text']!r}")
+
+
+def test_plain_reply_goes_to_asker() -> None:
+    print("a plain send_message reply goes to the side that asked, not back to its sender:")
+    r = "plain-mcp"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="which port?", chatter="A", channel=r, wait=False)
+    mcp.chat_await(chatter="B", channel=r, timeout=1, poll=0.02, nudge_after=0)
+    mcp.send_message(text="use 8080", channel=r)
+    b = mcp.chat_await(chatter="B", channel=r, timeout=0.3, poll=0.02, nudge_after=0)
+    check(b["timed_out"], "B isn't handed its own plain reply")
+    a = mcp.chat_await(chatter="A", channel=r, timeout=1, poll=0.02, nudge_after=0)
+    check(a["status"] == "plain" and a["your_turn"] and "8080" in a["text"], "A gets it as its turn")
+    check(not mcp.chat_status(chatter="B", channel=r)["your_turn"], "and B's state agrees")
+    r2 = "plain-then-say"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r2)
+    mcp.chat_say(text="q?", chatter="A", channel=r2, wait=False)
+    mcp.chat_await(chatter="B", channel=r2, timeout=1, poll=0.02, nudge_after=0)
+    mcp.send_message(text="(oops, wrong tool)", channel=r2)
+    out = mcp.chat_say(text="answer", chatter="B", channel=r2, wait=False)
+    check(out["sent_messages"] == 1, "a session's own plain message doesn't block its next chat_say")
+
+
+def test_first_reply_wins() -> None:
+    print("when several sessions could answer (a human kickoff), only the first reply goes out:")
+    r = "kickoff"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    LocalClient("human").post_human(r, "Please discuss dropping Python 3.9.")
+    for h in ("A", "B"):
+        got = mcp.chat_await(chatter=h, channel=r, timeout=1, poll=0.02, nudge_after=0)
+        check(got["from"] == "human" and got["your_turn"], f"{h} sees the kickoff")
+    mcp.chat_say(text="I say drop it", chatter="A", channel=r, wait=False)
+    try:
+        mcp.chat_say(text="me too", chatter="B", channel=r, wait=False)
+        raise AssertionError("B's reply should be refused: A answered first")
+    except mcp.ChatSendError as exc:
+        check("A posted something you haven't read" in str(exc) and "chat_await" in str(exc),
+              "B is told to read A's reply first; nothing posted")
+    got = mcp.chat_await(chatter="B", channel=r, timeout=1, poll=0.02, nudge_after=0)
+    check(got["from"] == "A" and got["your_turn"], "B then gets A's turn and answers that")
+    mcp.chat_say(text="ok", chatter="B", channel=r, wait=False)
+
+
+def test_finishing_own_turn_never_blocked() -> None:
+    print("finishing my own long turn isn't refused because a remark came in meanwhile:")
+    r = "own-turn"
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="go", chatter="A", channel=r, wait=False)
+    mcp.chat_await(chatter="B", channel=r, timeout=1, poll=0.02, nudge_after=0)
+    mcp.chat_say(text="running tests", chatter="B", channel=r, status="working", wait=False)
+    LocalClient("human").post_human(r, "fyi CI is slow today")
+    out = mcp.chat_say(text="tests pass", chatter="B", channel=r, wait=False)
+    check(out["sent_messages"] == 1, "B's results went out")
+
+
+def test_glue_in_user_text_exact() -> None:
+    print("text that itself contains the split marker still comes back exactly:")
+    import random
+    rnd = random.Random(11)
+    for limit in (5, 30):
+        for _ in range(2000):
+            text = "".join(rnd.choice("ab\n" + chat.GLUE) for _ in range(rnd.randint(0, limit * 4)))
+            pieces = chat.split_turn(text, limit)
+            if not (all(len(p) <= limit for p in pieces) and chat.join_pieces(pieces) == text):
+                raise AssertionError(f"roundtrip failed (limit {limit}): {text!r} -> {pieces!r}")
+    check(True, "random texts with the marker round-trip exactly")
+    check(chat.join_pieces(["ends with" + chat.GLUE]) == "ends with" + chat.GLUE,
+          "a one-piece turn ending in the marker keeps it")
 
 
 def main() -> int:
@@ -462,6 +658,14 @@ def main() -> int:
     test_long_lines_exact()
     test_typo_leaves_no_phantom()
     test_interjection_only_wakes_holder()
+    test_error_after_post_is_not_a_failed_send()
+    test_shared_room_two_chats()
+    test_say_without_begin_ignores_old_chat()
+    test_failed_read_keeps_partial()
+    test_plain_reply_goes_to_asker()
+    test_first_reply_wins()
+    test_finishing_own_turn_never_blocked()
+    test_glue_in_user_text_exact()
     print(f"\nALL {_passed} CHAT-FLOW CHECKS PASSED")
     return 0
 

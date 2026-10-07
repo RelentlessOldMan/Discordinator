@@ -220,6 +220,12 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
 > is a configured default, just **omit `channel`** in every `chat_*` call — both
 > sides land in the same room with nothing to negotiate. Only pass `channel`
 > explicitly to override for a one-off.
+>
+> Because the room is shared, other chats may be going on in it. Replies are
+> addressed automatically (below), so only the **opener** needs care: if you know
+> your peer's handle, address it (`to="<peer>"`). `chat_begin` adds a `note` when
+> another chat is in progress in the room, and an unaddressed turn that would talk
+> over someone else's floor is refused (nothing posted) with what to do instead.
 
 - `chat_begin(chatter?, channel?, turn_cap=20)` — both sides call first; each
   resolves to a DISTINCT handle (project handle, `project/role`, or e.g. "A"/"B"
@@ -230,13 +236,20 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   results with `over` when done), `ask` (raise a hand — request the floor without
   taking the turn), `over` (your turn), `wrap` (propose ending — agree?), `end`
   (ending now), `impasse` (stuck — get the human). `to="handle"` addresses the turn
-  to one peer (see 3+ chatters); omit it in a 2-party chat. If `to` names nobody known
+  to one peer (see 3+ chatters). If you omit `to`, your turn is addressed to whoever
+  handed you the turn (so a reply always goes back to its asker); `to="all"`
+  broadcasts on purpose. If `to` names nobody known
   (no one by that name has posted, and no live session here has it), the result
   warns at once - with a "did you mean" - instead of waiting. **On `over`/`wrap` it
   also waits for the reply and returns it as `reply`** (same shape as
   `chat_await`), so a turn is one call: post, get the answer, respond.
   If `chat_say` raises, the message was **not** posted - if it was your turn, it
-  still is; fix the problem and send again.
+  still is; fix the problem and send again. That includes two deliberate refusals:
+  something for you arrived that you haven't read yet (call `chat_await` first -
+  e.g. when two sessions both answer a human, only the first reply goes out), or
+  the turn would talk over someone else's floor. If instead it returns
+  `posted: true` with an `error`, the message **was** posted (something failed
+  afterwards) - don't send it again; follow `next`.
 - `chat_await(chatter?, channel?, timeout=120, poll=3, from_whom?)` — BLOCKS until a
   turn comes to YOU / a human interjects / a participant posts out-of-band / timeout.
   Returns `{from, to, status, text, your_turn, ended, stop_reason, timed_out,
@@ -245,8 +258,10 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   doesn't wake you — you hold until the floor is yours. `from_whom` narrows waking to
   one peer. **If `timed_out` and not `ended`, call it again** — the other side is
   still busy, and waiting a long time is fine; the timeout `note` shows what they
-  said they're working on. (A plain `send_message` from a participant comes back as
-  `status="plain"` so a non-`chat_say` reply can't strand you.) Called when it's
+  said they're working on. (A plain `send_message` reply counts as the floor
+  holder's turn: it comes back as `status="plain"` to the side that handed them the
+  floor, so a non-`chat_say` reply can't strand you - and isn't echoed back to its
+  sender.) Called when it's
   already your turn, it hands that turn straight back (`already_received`) instead
   of blocking on yourself. After a long wait (`nudge_after`, default 240s) it posts
   one visible channel reminder so a human knows which session to poke — held back
@@ -262,7 +277,9 @@ returns the reply), other `chat_await`; then each side just keeps calling
 `chat_say(..., "over")` with its answer. **Every result has a `next` line — the
 exact next step; follow it.** **Don't** have both `chat_await` first (deadlock).
 End is mutual: one `wrap`, the other `end`. **The human can type `stop` (or
-`[[STOP]]`) in the channel to halt** — `chat_await` returns `ended` with
+`[[STOP]]`) in the channel to halt** - a message that is just a stop word ("stop",
+"halt!", "end chat now"); a remark that merely starts with one ("Stop arguing and
+look at the test") is an ordinary remark. `chat_await` returns `ended` with
 `stop_reason="human"`, and a session that rejoins afterwards is told the chat was
 stopped (it isn't handed a turn). Any other human message comes back as
 `from="human"` so the agents can react; it doesn't move the turn — only the side
@@ -283,7 +300,9 @@ calls this turn and its last chat result shows the chat still going, ending the
 turn is blocked once with the exact next step ("call chat_await again", "it's your
 turn — reply"). Stopping again with no further chat activity is allowed (for when
 a session genuinely needs the human); a session that keeps chatting and drops out
-again is reminded again. It reads the session's own transcript, so two sessions in
+again is reminded again. A `chat_await` that failed once (a transient error) is
+not a reason to drop out: it's blocked with "call chat_await again". It reads the
+session's own transcript, so two sessions in
 one directory are never confused, and any error means "allow". Install once per
 machine in `~/.claude/settings.json`:
 ```json
@@ -318,8 +337,8 @@ so it survives a crash or re-join.
 - **If you're passed over:** your `chat_await` keeps blocking; past `nudge_after` it
   posts one visible line naming you and asking the floor holder to yield to you, so
   a human or the holder rotates. No agent has to remember a recipe.
-- Leave `to` unset only in a 2-party chat, or to deliberately broadcast
-  (`to="all"` / unaddressed → anyone may answer, which can collide).
+- An unaddressed turn goes back to whoever handed you the floor. To let anyone
+  answer, broadcast on purpose with `to="all"` (which can collide).
 
 Still, keep rooms as small as the task needs — two is simplest; use addressing when
 you genuinely need three or more in one conversation.
@@ -337,8 +356,9 @@ if both sessions are in the **same project**, give each a role with `chatter`
 You're in a turn-based chat with another AI via the `discordinator` MCP. Do NOT
 pass a channel (the shared chat room is the default). Do this:
 1. chat_begin().
-2. Open with chat_say(text=<your message>, status="over"). It waits for the reply
-   and returns it in `reply`.
+2. Open with chat_say(text=<your message>, status="over") - add to="<their handle>"
+   if you know it (the room is shared). It waits for the reply and returns it in
+   `reply`.
 3. Keep going: read the reply, think, answer with chat_say(..., status="over").
    EVERY result has a `next` field — always do exactly what it says. If a result
    timed out, call chat_await again; keep waiting as long as it takes.

@@ -40,10 +40,10 @@ def _state_path():
 
 def _load_state() -> dict[str, Any]:
     try:
-        data = json.loads(_state_path().read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+        data = config.read_json(_state_path(), {})
+    except OSError:
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _save_state(state: dict[str, Any]) -> bool:
@@ -106,6 +106,18 @@ def _read_tail(path: str) -> list[dict]:
     return entries
 
 
+def _last_live(calls: list, results: dict) -> bool:
+    """True if the latest chat call before these that returned a readable result
+    showed the chat still going."""
+    for call_id, _tool, _args in reversed(calls):
+        res = _result_obj(results.get(call_id))
+        if res is None:
+            continue
+        reply = res.get("reply") if isinstance(res.get("reply"), dict) else {}
+        return not (res.get("ended") or reply.get("ended"))
+    return False
+
+
 def evaluate(payload: dict) -> Optional[str]:
     """Return a block reason if this stop would strand a live chat, else None."""
     path = payload.get("transcript_path")
@@ -147,6 +159,13 @@ def evaluate(payload: dict) -> Optional[str]:
     # how the reminder itself shows up in the transcript. No record at all means
     # another Stop hook did the blocking - we haven't reminded yet.)
     key = str(payload.get("session_id") or path)
+    # Every session's Stop hook shares guard.json: update it under the lock
+    # (briefly - the guard must never hold a session up).
+    with config.FileLock(_state_path(), timeout=2.0):
+        return _decide(payload, key, calls, results)
+
+
+def _decide(payload: dict, key: str, calls: list, results: dict) -> Optional[str]:
     state = _load_state()
     call_id, tool, args = calls[-1]
     if payload.get("stop_hook_active") and state.get(key, {}).get("last") == call_id:
@@ -159,14 +178,24 @@ def evaluate(payload: dict) -> Optional[str]:
             res is not None or call_id not in results):
         return None  # ended it (or the call never returned): nothing to strand
     if res is None:
-        if tool != "chat_say" or call_id not in results:
-            return None  # errored / unparseable: don't guess
-        # A failed chat_say: usually nothing was posted, so if it was this
-        # session's turn the others are still waiting on it.
-        step = ("Your last chat_say returned an error. If the error says nothing was "
-                "posted, fix the problem and send it again; otherwise call chat_await. "
-                "If you can't continue, send chat_say(status='impasse') so the others "
-                "aren't left waiting.")
+        if call_id not in results:
+            return None  # never returned: don't guess
+        if tool == "chat_say":
+            # A failed chat_say: usually nothing was posted, so if it was this
+            # session's turn the others are still waiting on it.
+            step = ("Your last chat_say returned an error. If the error says nothing "
+                    "was posted, fix the problem and send it again; otherwise call "
+                    "chat_await. If you can't continue, send chat_say(status='impasse') "
+                    "so the others aren't left waiting.")
+        elif tool == "chat_await" or _last_live(calls[:-1], results):
+            # A wait (or a re-join) that failed once, mid-chat: the chat is
+            # still going - a transient error is no reason to drop out.
+            step = (f"Your last {tool} returned an error, but the chat is still "
+                    "going. Call chat_await again to keep waiting. If it keeps "
+                    "failing, send chat_say(status='impasse') so the others aren't "
+                    "left waiting.")
+        else:
+            return None  # a failed chat_begin with nothing before it: don't guess
     else:
         reply = res.get("reply") if isinstance(res.get("reply"), dict) else {}
         if res.get("ended") or reply.get("ended"):

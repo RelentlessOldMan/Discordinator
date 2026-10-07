@@ -213,3 +213,17 @@ Hard limit, unchanged: if a session has truly stopped (the human said stop, or i
 stopped again after the guard's
 one block), only a human can restart it. `watch --state` / the TUI
 shows which one to poke.
+
+## Several sessions, one machine, one room (v1.0.32)
+
+An independent review found ways sessions could trip over each other rather than
+over the protocol:
+
+| Situation | What now happens |
+|---|---|
+| Two sessions on one machine save their read positions at the same moment | `state.json` is updated under a cross-process lock, and a file Windows briefly refuses to open or replace is retried, so one session can't erase another's position (which used to hand it old turns) or crash with "Access is denied". |
+| Two separate chats share the room | An unaddressed reply goes to whoever handed you the turn. Whose turn it is gets worked out per session, so one pair's turn doesn't hide another's. A newcomer is told another chat is going on and to address its opener. An unaddressed turn that would talk over someone else's floor is refused before posting. |
+| Two sessions both answer a human's kickoff | The first reply goes out; the second `chat_say` is refused ("A posted something you haven't read") and the session reads that reply instead. |
+| A session answers with plain `send_message` | It counts as the floor holder's turn: delivered to the side that handed them the floor, not echoed back to its sender. |
+| `chat_say` fails after posting (or a Discord response is lost) | It returns `posted: true` with the error instead of raising, so it isn't sent twice. Discord posts carry a nonce, so a retried request returns the first message instead of posting a copy. |
+| A human remark starts with "Stop ..." or "End ..." | Only a message that is just a stop word ends the chat. |
