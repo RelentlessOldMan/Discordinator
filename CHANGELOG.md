@@ -8,6 +8,15 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.34] - 2026-10-07
+Loose ends from the fourth review: guard notifications, plain chat replies, same-label relay, relay chunking, stalled locks, local deletes
+- Stop-hook guard: a background-task notification or a compacted session continuing no longer counts as the human speaking, so a session woken by one mid-chat can't drop out
+- send_message to a chat room where you owe a reply posts it as your chat turn to that peer
+- Relay: each session skips only the messages it sent, and each project has its own read position - same-label sessions relay to each other
+- Long relay messages keep blank lines and indentation where they're cut
+- Locks record their holder: an exited holder's lock is taken at once; a waiter that times out errors instead of writing unlocked
+- Local deletes never fail while sessions read the room (a deletion record is appended instead)
+
 ## [1.0.33] - 2026-10-07
 Fourth review fixes: one conversation per session in a shared room, per-session relay, config and CLI room
 - Another chat's end, unaddressed turns, plain replies and members no longer reach your conversation in a shared room; an unaddressed end goes to your peer
