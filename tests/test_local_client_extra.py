@@ -213,6 +213,38 @@ def test_attachments_copied_outside_lock() -> None:
           "retention cleanup follows each url to remove the files")
 
 
+def test_delete_while_rooms_are_read() -> None:
+    print("deleting messages while other sessions read the room (Windows refuses the swap):")
+    import threading
+    c = LocalClient(label="del")
+    room = "delroom"
+    ids = [c.post(room, "x" * 1500)["id"] for _ in range(300)]
+    stop = threading.Event()
+
+    def reader() -> None:  # a session polling the room, flat out
+        while not stop.is_set():
+            c.read_messages(room, limit=100)
+
+    t = threading.Thread(target=reader)
+    t.start()
+    errors = []
+    try:
+        for mid in ids[:40]:
+            try:
+                c.delete_message(room, mid)
+            except OSError as e:
+                errors.append(e)
+        n = c.delete_messages(room, ids[40:140])
+    finally:
+        stop.set()
+        t.join()
+    check(not errors, f"single deletes all succeed ({len(errors)} failed)")
+    check(n == 100, "a bulk delete removes them all at once")
+    left = [m["id"] for m in c.read_messages(room, limit=100, after="0")]
+    check(len(c._read_all(room)) == 160 and ids[0] not in left, "exactly those are gone")
+    check(not list(c._dir.glob("*.tmp")), "no temp files left behind")
+
+
 def main() -> int:
     test_max_id_large_room_tail_read()
     test_torn_trailing_line_tolerated()
@@ -223,6 +255,7 @@ def main() -> int:
     test_append_lock_timeout_proceeds()
     test_surface_parity()
     test_attachments_copied_outside_lock()
+    test_delete_while_rooms_are_read()
     print(f"\nALL {_passed} LOCAL-CLIENT EDGE CHECKS PASSED")
     return 0
 

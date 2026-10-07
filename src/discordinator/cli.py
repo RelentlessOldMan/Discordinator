@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -169,7 +170,7 @@ def _relay_poll(
 ) -> list[dict[str, Any]]:
     """Fetch messages newer than the stored cursor, advance the cursor, and
     return the ones worth showing (others' messages, unless include_self)."""
-    cursor = config.get_cursor(channel_id)
+    cursor = config.get_cursor(channel_id, own_label)
     if cursor:
         raw = client.read_messages(channel_id, limit=100, after=cursor)
     else:
@@ -178,7 +179,7 @@ def _relay_poll(
     messages.reverse()  # chronological
 
     if messages:
-        config.set_cursor(channel_id, messages[-1]["id"])  # advance past all seen
+        config.set_cursor(channel_id, messages[-1]["id"], own_label)  # advance past all seen
 
     if not include_self and own_label:
         prefix = f"[{own_label}]"
@@ -194,7 +195,7 @@ def cmd_relay(args: argparse.Namespace) -> int:
     do_ack = _resolve_ack(args, cfg)
 
     if args.reset:
-        config.clear_cursor(channel_id)
+        config.clear_cursor(channel_id, own_label)
 
     with make_client(cfg, "relay") as client:
         if not args.watch:
@@ -323,7 +324,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return _watch_all(cfg, args, color)
 
     # Default to the chat room (the interesting one); any name/id also works.
-    room = config.resolve_channel(cfg, args.room, mode="chat") if args.room else config.resolve_chat_channel(cfg, None)
+    room = config.resolve_channel(cfg, args.room, mode="chat") if args.room else _chat_room(cfg, None)
 
     def show_state(client: Any) -> None:
         if args.state:
@@ -422,7 +423,7 @@ def cmd_tui(args: argparse.Namespace) -> int:
     guard = _require_local(cfg, "tui")
     if guard is not None:
         return guard
-    room = config.resolve_chat_channel(cfg, args.room)
+    room = _chat_room(cfg, args.room)
     try:
         from .tui import run_tui
     except ImportError:
@@ -433,6 +434,16 @@ def cmd_tui(args: argparse.Namespace) -> int:
     run_tui(room=room, poll=args.interval, limit=args.limit, label=cfg.get("machine_label"),
             retention_days=config.local_retention_days(cfg))
     return 0
+
+
+def _chat_room(cfg: dict[str, Any], room: Optional[str]) -> str:
+    """The chat room a human command acts on: the one named, else one set in
+    this shell (DISCORDINATOR_CHAT_CHANNEL), else the room this machine's chat
+    sessions last used - projects usually set it in .mcp.json, which a shell
+    never sees - else the configured default."""
+    if room is None and not os.environ.get("DISCORDINATOR_CHAT_CHANNEL"):
+        room = chat.last_room()
+    return config.resolve_chat_channel(cfg, room)
 
 
 def _require_local(cfg: dict[str, Any], action: str, mode: str = "chat") -> Optional[int]:
@@ -449,7 +460,7 @@ def cmd_interject(args: argparse.Namespace) -> int:
     guard = _require_local(cfg, "interject")
     if guard is not None:
         return guard
-    room = config.resolve_chat_channel(cfg, args.channel)
+    room = _chat_room(cfg, args.channel)
     text = _read_stdin_if_needed(args.text)
     if not text:
         return _err("nothing to interject (empty message).")
@@ -473,7 +484,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     guard = _require_local(cfg, "stop")
     if guard is not None:
         return guard
-    room = config.resolve_chat_channel(cfg, args.channel)
+    room = _chat_room(cfg, args.channel)
     with make_client(cfg, "chat") as client:
         client.post_human(room, "[[STOP]]")
     print(f"sent stop to #{room}. Any session waiting there will end the chat.")
@@ -539,12 +550,18 @@ def cmd_purge(args: argparse.Namespace) -> int:
                 return 0
 
         deleted = 0
-        for m in candidates:
+        if hasattr(client, "delete_messages"):  # local: one rewrite for all of them
             try:
-                client.delete_message(channel_id, m["id"])
-                deleted += 1
-            except DiscordError as exc:
-                print(f"warning: could not delete {m['id']}: {exc}", file=sys.stderr)
+                deleted = client.delete_messages(channel_id, [m["id"] for m in candidates])
+            except OSError as exc:
+                return _err(f"could not delete: {exc} (nothing was deleted; try again)")
+        else:
+            for m in candidates:
+                try:
+                    client.delete_message(channel_id, m["id"])
+                    deleted += 1
+                except DiscordError as exc:
+                    print(f"warning: could not delete {m['id']}: {exc}", file=sys.stderr)
         print(f"deleted {deleted} message(s).")
     return 0
 
@@ -646,7 +663,9 @@ def cmd_version(args: argparse.Namespace) -> int:
 
 def cmd_config(args: argparse.Namespace) -> int:
     action = args.config_action
-    cfg = config.load()
+    # `show` reports the effective settings; every set-* edits only the file
+    # (never saving env/.env overrides into it).
+    cfg = config.load() if action == "show" else config.load_file()
 
     if action == "set-token":
         cfg["token"] = args.token

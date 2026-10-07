@@ -29,8 +29,9 @@ the floor to B. The "floor holder" — who may speak next — is derived from hi
 (the addressee of the last yielded turn), not stored, so it stays correct after a
 crash or re-join. ``await_turn`` only wakes when a completed turn is addressed to
 you, is a broadcast (unaddressed, or ``to`` in {all, everyone, *, any, anyone}),
-or is terminal (which ends the chat for everyone). Two-party chats simply omit
-``to`` and behave exactly as before.
+or is terminal (which ends the chat for everyone in it). Two-party chats may
+omit ``to``. Several conversations can share one room: each sees only its own
+turns (see _conversation).
 
 Chat state lives under state.json ``["chat"][channel_id][handle_key]`` = {cursor, turns, cap},
 separate from the relay cursor so the two never collide.
@@ -53,7 +54,7 @@ from .discord_client import (
 )
 
 STATUSES = ("say", "working", "ask", "over", "wrap", "end", "impasse")
-TERMINAL_STATUSES = ("end", "impasse")     # ends the chat for everyone
+TERMINAL_STATUSES = ("end", "impasse")     # ends the chat for everyone in it
 YIELD_STATUSES = ("over", "wrap")          # completes a turn, passes the floor
 NON_TURN_STATUSES = ("say", "working", "ask")  # do NOT complete a turn / take the floor
 # Keep the floor and tell the others where things stand: `say` = more coming
@@ -105,34 +106,40 @@ GLUE = "\u2060"  # WORD JOINER
 def split_turn(text: str, limit: int) -> list[str]:
     """Split ``text`` into pieces of at most ``limit`` chars that join_pieces
     puts back together exactly: cut at the last newline that fits (consuming
-    just that one newline), else mid-line with a trailing GLUE."""
-    if len(text) <= limit:
-        return [text]
+    just that one newline), else mid-line with a trailing GLUE. No piece ends
+    in whitespace (Discord trims it off a message): such a piece is cut
+    mid-line instead, and a last piece ending in whitespace gets a GLUE."""
     pieces: list[str] = []
     rest = text
     while len(rest) > limit:
         cut = rest.rfind("\n", 0, limit + 1)
         # A piece that happens to end in GLUE itself would read as glued, so
         # such a line is cut mid-line instead (always unambiguous).
-        if cut > 0 and not rest[:cut].endswith(GLUE):
+        if cut > 0 and not rest[:cut].endswith(GLUE) and not rest[cut - 1].isspace():
             pieces.append(rest[:cut])
             rest = rest[cut + 1:]
         else:
             pieces.append(rest[:limit - 1] + GLUE)
             rest = rest[limit - 1:]
+    if rest[-1:].isspace() or rest.endswith(GLUE):
+        if len(rest) + 1 > limit:  # no room for the marker: one more cut
+            pieces.append(rest[:limit - 1] + GLUE)
+            rest = rest[limit - 1:]
+        rest += GLUE
     pieces.append(rest)
     return pieces
 
 
 def join_pieces(bodies: list[str]) -> str:
     """Rejoin a turn's pieces: newline between them, except after a GLUE piece.
-    (The last piece never carries the marker, so its text is kept as-is.)"""
+    A GLUE ending the last piece only protects trailing whitespace, so it's
+    dropped too."""
     out = []
     for i, b in enumerate(bodies):
-        if i == len(bodies) - 1:
-            out.append(b)
-        elif b.endswith(GLUE):
+        if b.endswith(GLUE):
             out.append(b[:-1])
+        elif i == len(bodies) - 1:
+            out.append(b)
         else:
             out.append(b + "\n")
     return "".join(out)
@@ -265,7 +272,7 @@ def send_chat(client: DiscordClient, channel_id: str, me: str, status: str, text
         except Exception as e:
             # Tell the caller how far it got, so a retry doesn't repeat pieces.
             e.chat_pieces_sent, e.chat_pieces_total = i, len(pieces)  # type: ignore[attr-defined]
-            e.chat_rest = "".join(pieces[i:])  # type: ignore[attr-defined]
+            e.chat_rest = join_pieces(pieces[i:])  # type: ignore[attr-defined]
             raise
     return sent
 
@@ -327,8 +334,9 @@ def seed_cursor(client: DiscordClient, channel_id: str, me: str) -> str:
 
 def unread_for_me(client: DiscordClient, channel_id: str, me: str) -> list[dict[str, Any]]:
     """Messages after my cursor that I'd be woken for and haven't read: a human
-    remark, an ending, or a yielded turn that targets me. (Not my own posts, a
-    plain bot message, a reminder, or someone's say/working/ask.)"""
+    remark, the end of my chat, or a yielded turn for me. (Not my own posts, a
+    plain bot message, a reminder, someone's say/working/ask, or another
+    conversation's turns.)"""
     cursor = get_cursor(channel_id, me)
     if not cursor:
         return []
@@ -337,9 +345,27 @@ def unread_for_me(client: DiscordClient, channel_id: str, me: str) -> list[dict[
         m = simplify_message(raw)
         if parse(m["content"]) is None and m.get("bot"):
             continue
-        if _would_wake(m, me):
+        if _wakes(client, channel_id, m, me):
             out.append(m)
     return list(reversed(out))
+
+
+def note_room(channel_id: str) -> None:
+    """Remember the room this machine's chat sessions are using, so the human's
+    `discordinator stop`/`interject`/`watch` find it without being told (the
+    room is usually set in a project's .mcp.json, which the shell never sees)."""
+    try:
+        if config.load_state().get("last_chat_room") == channel_id:
+            return
+        with config.update_state() as state:
+            state["last_chat_room"] = channel_id
+    except OSError:
+        pass  # only a convenience for the human's commands
+
+
+def last_room() -> Optional[str]:
+    room = config.load_state().get("last_chat_room")
+    return str(room) if room else None
 
 
 def _load_partial(channel_id: str, me: str) -> dict[str, list[dict[str, Any]]]:
@@ -434,8 +460,9 @@ def await_turn(
     elapses. Advances this handle's cursor.
 
     "Comes to me" means another participant completes a turn (``over``/``wrap``)
-    that is addressed to me or broadcast, OR any participant ends the chat
-    (``end``/``impasse``, which is terminal for everyone). A turn addressed to a
+    that is addressed to me or broadcast in my conversation, OR someone in it
+    ends the chat (``end``/``impasse``). Another conversation in the same room
+    never wakes me. A turn addressed to a
     different peer does NOT wake me — that's the floor token: I keep holding
     until the floor is mine. ``ask`` (a hand-raise) and ``say`` never wake me.
     ``from_whom`` optionally narrows waking to a yielded turn from that one peer.
@@ -463,7 +490,7 @@ def await_turn(
         cursor0 = seed_cursor(client, channel_id, me)
         set_cursor(channel_id, me, cursor0)
     fresh = any(
-        _would_wake(simplify_message(m), me, from_whom)
+        _wakes(client, channel_id, simplify_message(m), me, from_whom)
         for m in client.read_messages(channel_id, limit=50, after=cursor0))
     st0 = {} if fresh else compute_state(client, channel_id, me)
     # My own turn isn't finished (I sent `say`/`working` and never yielded)?
@@ -559,8 +586,7 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
                     # can never strand the awaiter (the stuck-chat footgun) -
                     # but only to the side it answers (whoever handed over the
                     # floor), not to its own sender or a bystander.
-                    st_p = compute_state(client, channel_id, me)
-                    if not (st_p.get("your_turn") or st_p.get("pending_turn") is None):
+                    if not _plain_for_me(client, channel_id, me, m):
                         continue
                     entry = [{"id": m["id"], "from": "participant", "to": None,
                               "status": "plain", "timestamp": m["timestamp"],
@@ -615,7 +641,9 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
             text = join_pieces([x["body"] for x in pieces])
             atts = [a for x in pieces for a in x.get("attachments", [])]
 
-            if status in TERMINAL_STATUSES:  # ends the chat for everyone
+            if status in TERMINAL_STATUSES:  # ends the chat for everyone in it
+                if not _ends_mine(client, channel_id, me, parsed, m["id"]):
+                    continue  # another conversation in this room ended
                 stop_reason = "agreed" if status == "end" else "impasse"
                 pending_by_sender.clear()
                 return done(_result(
@@ -628,6 +656,8 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
                 continue  # waiting specifically for a different peer
             if not _targets(to, me):
                 continue  # addressed to another peer — keep holding the wait
+            if _is_broadcast(to) and not _broadcast_for_me(client, channel_id, me, m["id"]):
+                continue  # open to all - but in a conversation I'm not part of
 
             result = _result(
                 me, channel_id, sender=sender, status=status, text=text,
@@ -667,7 +697,8 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
 
 
 def compute_state(
-    client: DiscordClient, channel_id: str, me: Optional[str] = None, scan: int = 100
+    client: DiscordClient, channel_id: str, me: Optional[str] = None, scan: int = 100,
+    upto: Optional[str] = None,
 ) -> dict[str, Any]:
     """Derive the current chat state purely from recent channel history — no
     reliance on shared mutable turn state. Used by chat_status and chat_begin so
@@ -683,10 +714,17 @@ def compute_state(
     worked out for `me` alone (the turn owed to me, which in a shared room need
     not be the room's latest); `_owed_turn`/`_owed_text`/`_owed_predecessor`
     describe it (the last is a cursor that re-reads all of it).
+
+    With `me`, everything is about `me`'s own conversation: the room is shared,
+    so other pairs chatting there (their turns, their ending, their members)
+    are left out - see _conversation. Without `me` (a viewer) it's the room's
+    latest chat. ``upto`` stops at that message id, as if nothing came after.
     """
-    raw = client.read_messages(channel_id, limit=max(1, min(scan, 100)))
+    raw = _history(client, channel_id, me, scan, upto)
     msgs = list(reversed([simplify_message(m) for m in raw]))  # chronological
     parsed_list = [parse(m["content"]) for m in msgs]
+    plain_as = _attribute_plain(msgs, parsed_list)
+    scope, room_others = _conversation(msgs, parsed_list, plain_as, me)
 
     # Scope to the CURRENT chat. A terminal turn (end/impasse) or a human stop
     # that is followed by more chat traffic closed the previous chat, so its
@@ -694,7 +732,7 @@ def compute_state(
     # the latest chat message stays in scope, so `ended` can report it.)
     start = 0
     chat_after = False
-    for i in range(len(msgs) - 1, -1, -1):
+    for i in reversed(scope):
         p = parsed_list[i]
         closes = (p is not None and p["status"] in TERMINAL_STATUSES) or (
             p is None and not msgs[i].get("bot") and is_human_stop(msgs[i]["content"]))
@@ -703,6 +741,7 @@ def compute_state(
             break
         if p is not None:
             chat_after = True
+    scope = [i for i in scope if i >= start]
 
     # Handles are case-insensitive identities; each is shown with the spelling
     # first seen, so "Convex" and "convex" are one participant.
@@ -726,16 +765,16 @@ def compute_state(
     run_bodies: dict[str, list[str]] = {}  # who -> bodies of those pieces
     last_text = ""
     turns: list[dict[str, Any]] = []  # every completed turn, in order
-    for i in range(start, len(msgs)):
+    for i in scope:
         m, p = msgs[i], parsed_list[i]
         if not p:
             # A participant answering with a plain send_message instead of
             # chat_say: count it as the reply of whoever had the floor, so the
-            # turn goes back to the one who handed it to them.
-            responder = _plain_responder(m, last_turn, turn_authors)
-            if responder:
-                responder = canon(responder)
-                to_back = last_turn["from"]
+            # turn goes back to the one who handed it to them. (Worked out
+            # over the whole room, so it's the same answer in every chat.)
+            if i in plain_as:
+                responder = canon(plain_as[i][0])
+                to_back = canon(plain_as[i][1])
                 turn_authors.append(responder)
                 last_turn_index_by[responder] = i
                 last_significant[responder] = {"status": "over", "i": i}
@@ -788,10 +827,10 @@ def compute_state(
         participants.append(me_norm)
 
     # A human stop after the last chat message ends the chat right there.
-    last_chat_i = max((i for i in range(start, len(msgs)) if parsed_list[i]), default=-1)
+    last_chat_i = max((i for i in scope if parsed_list[i]), default=-1)
     human_stop = any(
         parsed_list[i] is None and not msgs[i].get("bot") and is_human_stop(msgs[i]["content"])
-        for i in range(max(start, last_chat_i + 1), len(msgs)))
+        for i in scope if i > last_chat_i)
     if human_stop:
         progress.clear()
         run_start.clear()
@@ -889,6 +928,12 @@ def compute_state(
         "progress": [v for k, v in progress.items()
                      if k in participants and (floor is None or k == floor)],
         "_posters": posters,
+        # Everyone who has posted in the room, and who is chatting in it now
+        # outside my conversation.
+        "_room_posters": sorted({handle_key(p["participant"]): p["participant"]
+                                 for p in parsed_list if p}.values()),
+        "_others_chatting": room_others,
+        "_plain_ids": [msgs[i]["id"] for i in plain_as],
         "_open_run_predecessor": _before(msgs, min(
             (i for w, i in run_start.items() if not same_handle(w, me_norm)), default=-1)),
         "stop_reason": "human" if human_stop else (
@@ -919,6 +964,195 @@ def _plain_responder(m: dict[str, Any], last_turn: Optional[dict[str, Any]],
         return last_turn["to"]
     return next((w for w in reversed(turn_authors)
                  if not same_handle(w, last_turn["from"])), "participant")
+
+
+# How far back compute_state pages to reach a session's read position, so a
+# turn owed to it isn't lost just because a busy room moved on past one page.
+HISTORY_CAP = 500
+
+
+def _history(client: DiscordClient, channel_id: str, me: Optional[str], scan: int,
+             upto: Optional[str]) -> list[dict[str, Any]]:
+    """Recent messages, newest first: one page, plus older pages back to my read
+    position if more than a page has arrived since (whatever is owed to me lies
+    after it). ``upto`` reads as if that message were the latest."""
+    kw = {"before": str(int(upto) + 1)} if upto is not None else {}
+    page = client.read_messages(channel_id, limit=max(1, min(scan, 100)), **kw)
+    out = list(page)
+    try:
+        mark = get_cursor(channel_id, me) if me else None
+        cursor = int(mark) if mark is not None else None
+    except ValueError:
+        cursor = None
+    while (cursor is not None and len(page) == 100 and len(out) < HISTORY_CAP
+           and int(page[-1]["id"]) > cursor):
+        page = client.read_messages(channel_id, limit=100, before=page[-1]["id"])
+        out.extend(page)
+    return out
+
+
+def _attribute_plain(msgs: list[dict[str, Any]],
+                     parsed_list: list[Optional[dict[str, Any]]]) -> dict[int, tuple[str, str]]:
+    """For each plain (untagged) bot message that answers a turn: index ->
+    (who it's the reply of, who it goes back to). See _plain_responder."""
+    out: dict[int, tuple[str, str]] = {}
+    last: Optional[dict[str, Any]] = None
+    authors: list[str] = []
+    for i, (m, p) in enumerate(zip(msgs, parsed_list)):
+        if p is None:
+            responder = _plain_responder(m, last, authors)
+            if responder and last:
+                out[i] = (responder, last["from"])
+                authors.append(responder)
+                last = {"from": responder, "to": last["from"], "status": "over"}
+            continue
+        if p["status"] in YIELD_STATUSES + TERMINAL_STATUSES:
+            authors.append(p["participant"])
+            last = {"from": p["participant"], "to": p["to"], "status": p["status"]}
+    return out
+
+
+def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[str, Any]]],
+                  plain_as: dict[int, tuple[str, str]],
+                  me: Optional[str]) -> tuple[list[int], list[str]]:
+    """Which messages belong to ``me``'s conversation, and who else is chatting
+    in the room right now.
+
+    The room is shared, so several chats can run in it at once. A conversation
+    is the people linked by addressed turns (A>B joins A and B; replies are
+    addressed automatically). An end/impasse closes the conversation it was
+    sent in (its members start afresh), a human stop closes every one. Mine
+    is every turn of my conversation, the human's messages, and - only while
+    I'm in no conversation yet - unaddressed turns from others who aren't in
+    one either (an opener, or an old-style unaddressed two-party chat).
+    Without ``me``: the whole room."""
+    if me is None:
+        return list(range(len(msgs))), []
+    comp: dict[str, set[str]] = {}
+    epoch: dict[str, int] = {}  # handle -> where its current conversation starts
+    room_stop = 0
+    recent: Optional[str] = None  # who sent the latest addressed turn
+
+    def grp(k: str) -> set[str]:
+        if k not in comp:
+            comp[k] = {k}
+        return comp[k]
+
+    def link(a: str, b: str) -> None:
+        sa, sb = grp(a), grp(b)
+        if sa is not sb:
+            sa |= sb
+            for k in sb:
+                comp[k] = sa
+
+    def close(keys: list[str], i: int) -> None:
+        for k in keys:
+            comp[k] = {k}
+            epoch[k] = i
+
+    for i, m in enumerate(msgs):
+        p = parsed_list[i]
+        if p is None:
+            if i in plain_as:
+                link(handle_key(plain_as[i][0]), handle_key(plain_as[i][1]))
+            elif not m.get("bot") and is_human_stop(m.get("content") or ""):
+                close(list(comp), i)
+                room_stop = i
+            continue
+        k = handle_key(p["participant"])
+        grp(k)
+        if not _is_broadcast(p["to"]):
+            link(k, handle_key(p["to"]))
+            recent = k
+        elif (p["status"] in ("ask", "working") and len(grp(k)) == 1
+              and recent and len(grp(recent)) > 1):
+            # Someone in no conversation raising a hand / saying they're on it
+            # wants into the one going on (the most recent).
+            link(k, recent)
+        if p["status"] in TERMINAL_STATUSES:
+            if len(grp(k)) == 1:  # an unaddressed chat: everyone not in a conversation
+                close([h for h, s in comp.items() if len(s) == 1], i)
+            else:
+                close(list(grp(k)), i)
+
+    my = handle_key(me)
+    mine = grp(my)
+    alone = len(mine) == 1
+
+    def ep(k: str) -> int:
+        return max(epoch.get(k, 0), room_stop)
+
+    scope: list[int] = []
+    others: dict[str, tuple[str, Optional[datetime]]] = {}
+    latest: Optional[datetime] = None
+    for i, m in enumerate(msgs):
+        p = parsed_list[i]
+        if p is None:
+            if i in plain_as:
+                r, t = handle_key(plain_as[i][0]), handle_key(plain_as[i][1])
+                if (r in mine or t in mine) and i >= ep(r if r in mine else t):
+                    scope.append(i)
+            elif not m.get("bot"):
+                scope.append(i)  # a human speaks to the whole room
+            continue
+        k = handle_key(p["participant"])
+        ts = _parse_ts(m["timestamp"])
+        if ts is not None:
+            latest = ts if latest is None else max(latest, ts)
+        if i == epoch.get(my):
+            scope.append(i)  # what closed my last conversation (so `ended` shows)
+        elif i < ep(k):
+            continue
+        elif k in mine or (alone and _is_broadcast(p["to"]) and len(grp(k)) == 1):
+            scope.append(i)
+        else:
+            others[k] = (p["participant"], ts)
+    busy = [name for name, ts in others.values()
+            if ts is None or latest is None or ts >= latest - STALE_AFTER]
+    return scope, busy
+
+
+def _ends_mine(client: DiscordClient, channel_id: str, me: str,
+               p: dict[str, Any], message_id: str) -> bool:
+    """Does this end/impasse end MY conversation (not another one in the room)?"""
+    if same_handle(p.get("to"), me):
+        return True
+    return bool(compute_state(client, channel_id, me, upto=message_id).get("ended"))
+
+
+def _broadcast_for_me(client: DiscordClient, channel_id: str, me: str,
+                      message_id: str) -> bool:
+    """Is this unaddressed turn one I'm meant to answer (my conversation's, or
+    an opener while I'm in none) rather than another conversation's?"""
+    owed = compute_state(client, channel_id, me, upto=message_id).get("_owed_turn")
+    return bool(owed) and str(owed["id"]) == str(message_id)
+
+
+def _plain_for_me(client: DiscordClient, channel_id: str, me: str,
+                  m: dict[str, Any]) -> bool:
+    """Is this plain (untagged) bot message a reply to me? Yes if it answers a
+    turn I handed over, or if it answers nothing and nothing is pending."""
+    st = compute_state(client, channel_id, me, upto=m["id"])
+    owed = st.get("_owed_turn")
+    if owed:
+        return str(owed["id"]) == str(m["id"])
+    return m["id"] not in st.get("_plain_ids", []) and st.get("pending_turn") is None
+
+
+def _wakes(client: DiscordClient, channel_id: str, m: dict[str, Any], me: str,
+           from_whom: Optional[str] = None) -> bool:
+    """_would_wake, plus the checks that need the room: an ending or an
+    unaddressed turn only counts if it's from my conversation."""
+    if not _would_wake(m, me, from_whom):
+        return False
+    p = parse(m.get("content") or "")
+    if p is None:
+        return not m.get("bot") or _plain_for_me(client, channel_id, me, m)
+    if p["status"] in TERMINAL_STATUSES:
+        return _ends_mine(client, channel_id, me, p, m["id"])
+    if _is_broadcast(p["to"]):
+        return _broadcast_for_me(client, channel_id, me, m["id"])
+    return True
 
 
 def _owed_to(turns: list[dict[str, Any]], me: str,

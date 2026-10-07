@@ -235,7 +235,18 @@ def current(chatter: Optional[str], cfg: dict[str, Any]) -> Optional[str]:
         desired = compose(chatter, cfg.get("chat_handle"))
     except config.ConfigError:
         return None
-    return _resolved.get(chat.handle_key(desired), desired)
+    held = _resolved.get(chat.handle_key(desired))
+    if held is not None:
+        return held
+    # Not claimed yet: the name chat_begin would give, so a second session of
+    # the project isn't answered for its sibling (which holds the bare name).
+    reg = _load(registry_path())
+    me, now = os.getpid(), time.time()
+    handle, n = desired, 1
+    while _held_by_other(reg.get(chat.handle_key(handle)), me, now):
+        n += 1
+        handle = _with_suffix(desired, n)
+    return handle
 
 
 def live_handles() -> list[str]:

@@ -227,3 +227,24 @@ over the protocol:
 | A session answers with plain `send_message` | It counts as the floor holder's turn: delivered to the side that handed them the floor, not echoed back to its sender. |
 | `chat_say` fails after posting (or a Discord response is lost) | It returns `posted: true` with the error instead of raising, so it isn't sent twice. Discord posts carry a nonce, so a retried request returns the first message instead of posting a copy. |
 | A human remark starts with "Stop ..." or "End ..." | Only a message that is just a stop word ends the chat. |
+
+## One conversation at a time per session, many per room (v1.0.33)
+
+The fourth review found that chat state was still worked out for the whole room,
+though the room is shared. Now each session sees only its own conversation: the
+sessions linked by addressed turns (A>B joins A and B). An `end` or `impasse`
+closes the conversation it was sent in, and a human stop closes all of them.
+
+| Situation | What now happens |
+|---|---|
+| C ends its chat with D while A and B are mid-chat in the same room | Only C and D's chat ends. B keeps waiting for A; the Stop hook doesn't let B drop out. An unaddressed `end` is addressed to the peer, like a reply. |
+| Two separate pairs chat in one room | Each is a two-person chat: no `multiparty`, no `suggest_next` naming someone from the other pair, and a group's `to="all"` turn wakes only that group. |
+| A responder joins after another chat's turn landed on top of the opener | An unaddressed opener stays open to any session not yet in a conversation, so `chat_begin` still finds it. |
+| More than 100 messages from other chats pass while a turn is owed to an idle session | State is read back as far as the session's read position (up to 500 messages), so `chat_status` and `chat_begin` still find the turn. |
+| A second session of a project calls `chat_status` before `chat_begin` | It answers for the name `chat_begin` would give it (`CodeCarver-2`), not its sibling's. |
+| Two sessions answer the same message at the same instant | Checking for unread messages and posting happen under a per-room lock, so the second is refused. |
+| A long turn is split exactly at a blank line or trailing spaces | No piece ends in whitespace (Discord trims it), so the turn still reassembles exactly. |
+| The human runs `discordinator stop` with no room | It goes to the room this machine's chat sessions last used, not the shell's default. |
+| Two sessions relay to each other on one machine | Each label has its own read position. Give each project its own label with `DISCORDINATOR_LABEL` in `.mcp.json`. |
+| `discordinator config set-...` in a shell with env settings | Only the setting being changed is saved; env overrides like `DISCORDINATOR_ALLOW_SEND=1` stay in that shell. |
+| A purge on the local transport while sessions read the room | The room is rewritten once for the whole purge, retrying for a few seconds while Windows refuses. |

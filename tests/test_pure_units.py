@@ -188,6 +188,29 @@ def test_parse_header_roundtrip() -> None:
     check(chat.parse("") is None, "empty content parses to None")
 
 
+def test_split_turn_survives_trimming() -> None:
+    print("split turns come back exactly even if the transport trims each message:")
+    import random
+    rnd = random.Random(7)
+    words = ["a", "bb", " ", "  ", "\n", "\n\n", "x" * 30, "\t", chat.GLUE]
+    for _ in range(3000):
+        text = "".join(rnd.choice(words) for _ in range(rnd.randint(1, 60)))
+        limit = rnd.randint(4, 40)
+        pieces = chat.split_turn(text, limit)
+        if any(len(p) > limit for p in pieces):
+            raise AssertionError(f"piece over the limit: {text!r} {limit} -> {pieces!r}")
+        # Discord trims whitespace off the ends of a message. The header always
+        # comes first, so only the end of a piece is at risk.
+        sent = [chat.parse(("[A|say] " + p).strip()) for p in pieces]
+        if chat.join_pieces([s["body"] for s in sent]) != text:
+            raise AssertionError(f"lost text: {text!r} {limit} -> {pieces!r}")
+    check(True, "no piece ends in whitespace that a trim could take off")
+    t = "para one\n\npara two  "
+    sent = [chat.parse(("[A|say] " + p).strip()) for p in chat.split_turn(t, 12)]
+    check(chat.join_pieces([s["body"] for s in sent]) == t,
+          "blank lines and trailing spaces survive")
+
+
 def main() -> int:
     test_chunk_content()
     test_simplify_message()
@@ -196,6 +219,7 @@ def main() -> int:
     test_sanitize_handle()
     test_is_human_stop()
     test_parse_header_roundtrip()
+    test_split_turn_survives_trimming()
     print(f"\nALL {_passed} PURE-UNIT CHECKS PASSED")
     return 0
 
