@@ -635,6 +635,51 @@ def test_glue_in_user_text_exact() -> None:
           "a one-piece turn ending in the marker keeps it")
 
 
+def test_wrap_says_confirm_with_end() -> None:
+    print("a peer's wrap comes with a next that says how to confirm it:")
+    c = LocalClient()
+    room = "wrapn"
+    chat.reset(room, "B", _latest(c, room), 20)
+    chat.send_chat(c, room, "A", "wrap", "all done?", to="B")
+    r = mcp.chat_await(chatter="B", channel=room, timeout=2, poll=0.05)
+    check(r["status"] == "wrap" and "status='end'" in r["next"], f"next: {r['next'][:50]}")
+
+
+def test_left_out_waiter_is_told_how_to_join() -> None:
+    print("a session waiting while others chat without it is told how to join:")
+    c = LocalClient()
+    room = "leftout"
+    chat.send_chat(c, room, "P1", "over", "hi P2", to="P2")
+    chat.send_chat(c, room, "P2", "over", "hi P1", to="P1")
+    mcp.chat_begin(chatter="P3", channel=room)
+    r = mcp.chat_await(chatter="P3", channel=room, timeout=0.3, poll=0.05, nudge_after=0)
+    check(r["timed_out"] and "status='ask'" in r["next"], f"next: {r['next'][:60]}")
+
+
+def test_relay_position_per_session_and_forward_only() -> None:
+    print("each chatting session has its own relay position, and it never moves back:")
+    from discordinator import config, handles
+    cfg = {"machine_label": "laptop", "chat_handle": "ProjA"}
+    check(config.relay_reader(cfg, "ProjA/ui") == "laptop|ProjA/ui", "keyed by the session's handle")
+    config.set_cursor("relayp", "500", "laptop|ProjA")
+    check(config.get_cursor("relayp", "laptop|ProjA/ui") == "500",
+          "a session's first read starts where its project left off")
+    config.set_cursor("relayp", "900", "laptop|ProjA/ui")
+    config.set_cursor("relayp", "700", "laptop|ProjA/ui")  # a slower reader finishing late
+    check(config.get_cursor("relayp", "laptop|ProjA/ui") == "900", "never moves backwards")
+    check(config.get_cursor("relayp", "laptop|ProjA/api") == "500", "a sibling role is separate")
+    del handles  # (imported for symmetry with the server's use)
+
+
+def test_purge_floor() -> None:
+    print("purge_messages refuses to touch messages under a day old:")
+    try:
+        mcp.purge_messages(channel="anything", older_than_days=0, dry_run=False)
+        check(False, "older_than_days=0 must be refused")
+    except ValueError as e:
+        check("at least 1" in str(e), "refused with the reason")
+
+
 def test_errors_reach_the_model() -> None:
     print("a tool's error text reaches the model through MCP, not just its name:")
     import asyncio
@@ -697,6 +742,10 @@ def main() -> int:
     test_first_reply_wins()
     test_finishing_own_turn_never_blocked()
     test_glue_in_user_text_exact()
+    test_wrap_says_confirm_with_end()
+    test_left_out_waiter_is_told_how_to_join()
+    test_relay_position_per_session_and_forward_only()
+    test_purge_floor()
     test_errors_reach_the_model()
     print(f"\nALL {_passed} CHAT-FLOW CHECKS PASSED")
     return 0

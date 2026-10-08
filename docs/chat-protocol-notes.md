@@ -259,3 +259,25 @@ closes the conversation it was sent in, and a human stop closes all of them.
 | A long relay message is cut | Each cut drops at most the one newline it falls on, and never leaves whitespace Discord would trim; blank lines and indentation survive. |
 | A session holding a shared file's lock stalls | Waiters no longer go ahead unlocked after 15s (which could lose an update). The lock holds its holder's pid: an exited holder's lock is taken at once, a live one's only after 2 minutes, and a waiter that runs out of time gets an error ("nothing was posted - try again"). |
 | A local delete while sessions read the room nonstop | If Windows won't allow the room to be rewritten, a deletion record is appended instead; reads skip those messages and the next rewrite drops them. A delete no longer fails. |
+
+## A session is its Claude Code process (v1.0.36)
+
+Real stalls kept coming from one cause: a session's identity lived only in its
+MCP server's memory. Claude Code was found leaving the old server running after
+an `/mcp` reconnect (servers from two days earlier were still alive next to
+their replacements), holding the session's name, so the new server became
+`Name-2` and never saw the turns sent to `Name`. Tests hadn't caught it because
+they ran every "session" inside one Python process; `tests/test_real_sessions.py`
+now drives real server processes over stdio.
+
+| What happened | Now |
+|---|---|
+| A server restarts (reconnect) | It picks up its session's role and name (recorded per Claude Code process) and takes over a claim its old server still holds. |
+| The client disconnects mid-`chat_await` | The server exits at once, without reading the reply meant for its successor. |
+| A brand-new session (quit and resumed) whose role-name has a chat going | It takes the name back if exactly one unheld `<project>/<role>` is owed a turn or waiting on its own; otherwise `next` (not just a note) says how. |
+| An untagged bot post (relay note, CLI send) lands in the chat room | It's nobody's turn and wakes nobody. It used to be credited as the floor holder's reply, leaving the other side "waiting for a reply" it never sent. |
+| A conversation is dropped without `end` | After 30 quiet minutes it no longer blocks its members from hearing a new opener; a turn owed to a session expires after 4 hours. |
+| Two sessions of one project relay | Each chatting session has its own read position (by handle), and a position never moves backwards. |
+| A peer proposes `wrap` / others chat without you | `next` says to confirm with `end` / to raise a hand with `ask`. |
+| `purge_messages(older_than_days=0)` | Refused: under a day old may be live chat turns. |
+| Something goes wrong out of sight | `watch` shows session events from `~/.discordinator/events.jsonl`: connects, disconnects, vanished servers, joins, renames, failed calls with the reason. |

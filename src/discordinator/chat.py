@@ -40,6 +40,7 @@ separate from the relay cursor so the two never collide.
 from __future__ import annotations
 
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -66,6 +67,14 @@ DEFAULT_TURN_CAP = 20
 # room's latest chat message has left the conversation: they drop out of the
 # participant list so stale handles don't linger in the rotation.
 STALE_AFTER = timedelta(minutes=30)
+# A turn owed to a session expires after this long: a session joining later
+# (days on, under the same name) isn't handed a long-dead conversation's turn.
+OWED_EXPIRY = timedelta(hours=4)
+
+# Set when this MCP server's client has disconnected: a wait in progress stops
+# at once, without reading (and so using up) anything meant for the session's
+# next server.
+SHUTDOWN = threading.Event()
 
 # While someone has said they're `working`, the waiting side's channel reminder
 # is held back - but only this long, so a session that died mid-task still
@@ -480,7 +489,7 @@ def await_turn(
     # Already my turn? (e.g. the reply came back from a waiting chat_say and the
     # model called chat_await anyway.) Waiting now would block on myself, so
     # hand the owed turn straight back instead of a silent wait.
-    # Anything newer than my cursor (a human, a plain reply) wins: let the
+    # Anything newer than my cursor (a human, a turn for me) wins: let the
     # normal loop deliver it.
     cursor0 = get_cursor(channel_id, me)
     if not cursor0:
@@ -567,6 +576,9 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
                 pending_by_sender: dict[str, list[dict[str, Any]]], done: Any,
                 since: float, nudged: bool) -> dict[str, Any]:
     while True:
+        if SHUTDOWN.is_set():
+            return _result(me, channel_id, sender=None, status=None, text="", messages=[],
+                           ended=False, stop_reason=None, your_turn=False, timed_out=True)
         cursor = get_cursor(channel_id, me)
         raw = client.read_messages(channel_id, limit=100, after=cursor)
         messages = list(reversed([simplify_message(m) for m in raw]))
@@ -581,20 +593,11 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
                     continue  # system "waiting" reminder — not a turn
                 atts = m.get("attachments", [])
                 if m.get("bot"):
-                    # A participant replied OUT-OF-BAND via send_message (not
-                    # chat_say). Surface it as a `plain` turn so a plain reply
-                    # can never strand the awaiter (the stuck-chat footgun) -
-                    # but only to the side it answers (whoever handed over the
-                    # floor), not to its own sender or a bystander.
-                    if not _plain_for_me(client, channel_id, me, m):
-                        continue
-                    entry = [{"id": m["id"], "from": "participant", "to": None,
-                              "status": "plain", "timestamp": m["timestamp"],
-                              "attachments": atts}]
-                    return done(_result(
-                        me, channel_id, sender="participant", status="plain",
-                        text=text, messages=entry, ended=False,
-                        stop_reason=None, your_turn=True, attachments=atts))
+                    # Relay traffic (a send_message, a CLI send, another bot),
+                    # not a chat turn: it never answers for anyone. (A session
+                    # owing a reply that uses send_message has it posted as a
+                    # proper chat turn instead - see mcp_server.send_message.)
+                    continue
                 # A real human (non-bot author) typed in the channel.
                 human_entry = [{"id": m["id"], "from": "human", "to": None,
                                 "status": None, "timestamp": m["timestamp"],
@@ -684,6 +687,9 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
             result["nudged"] = nudged
             result["progress"] = [x for x in st.get("progress", [])
                                   if not same_handle(x["from"], me)]
+            if st.get("_others_chatting") and all(  # nobody in my conversation but me
+                    same_handle(p, me) for p in st.get("participants", [])):
+                result["not_in_chat"] = st["_others_chatting"]
             result["note"] = (
                 (working + " " if working else
                  "No complete turn yet - the other side is still thinking. ")
@@ -693,7 +699,7 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
                 + (" (A channel reminder was posted so a human can poke the other "
                    "session.)" if nudged else ""))
             return result
-        time.sleep(poll)
+        SHUTDOWN.wait(poll)
 
 
 def compute_state(
@@ -723,8 +729,7 @@ def compute_state(
     raw = _history(client, channel_id, me, scan, upto)
     msgs = list(reversed([simplify_message(m) for m in raw]))  # chronological
     parsed_list = [parse(m["content"]) for m in msgs]
-    plain_as = _attribute_plain(msgs, parsed_list)
-    scope, room_others = _conversation(msgs, parsed_list, plain_as, me)
+    scope, room_others = _conversation(msgs, parsed_list, me)
 
     # Scope to the CURRENT chat. A terminal turn (end/impasse) or a human stop
     # that is followed by more chat traffic closed the previous chat, so its
@@ -768,24 +773,7 @@ def compute_state(
     for i in scope:
         m, p = msgs[i], parsed_list[i]
         if not p:
-            # A participant answering with a plain send_message instead of
-            # chat_say: count it as the reply of whoever had the floor, so the
-            # turn goes back to the one who handed it to them. (Worked out
-            # over the whole room, so it's the same answer in every chat.)
-            if i in plain_as:
-                responder = canon(plain_as[i][0])
-                to_back = canon(plain_as[i][1])
-                turn_authors.append(responder)
-                last_turn_index_by[responder] = i
-                last_significant[responder] = {"status": "over", "i": i}
-                progress.pop(responder, None)
-                run_start.pop(responder, None)
-                run_bodies.pop(responder, None)
-                last_turn = {"from": responder, "to": to_back, "status": "over",
-                             "id": m["id"], "ts": m["timestamp"], "plain": True}
-                last_text = m["content"]
-                turns.append({**last_turn, "i": i, "first": i, "text": last_text})
-            continue
+            continue  # a human remark or relay traffic: not a turn
         ts = _parse_ts(m["timestamp"])
         if ts is not None:
             latest_ts = ts if latest_ts is None else max(latest_ts, ts)
@@ -933,7 +921,6 @@ def compute_state(
         "_room_posters": sorted({handle_key(p["participant"]): p["participant"]
                                  for p in parsed_list if p}.values()),
         "_others_chatting": room_others,
-        "_plain_ids": [msgs[i]["id"] for i in plain_as],
         "_open_run_predecessor": _before(msgs, min(
             (i for w, i in run_start.items() if not same_handle(w, me_norm)), default=-1)),
         "stop_reason": "human" if human_stop else (
@@ -948,22 +935,6 @@ def compute_state(
         state["_owed_text"] = owed["text"] if owed else None
         state["_owed_predecessor"] = _before(msgs, owed["first"]) if owed else None
     return state
-
-
-def _plain_responder(m: dict[str, Any], last_turn: Optional[dict[str, Any]],
-                     turn_authors: list[str]) -> Optional[str]:
-    """Who a plain (untagged) bot message is the reply of: whoever held the floor
-    after the last yielded turn - its addressee, or in an unaddressed exchange
-    the previous speaker (``participant`` if nobody else has spoken yet). None
-    if it isn't a reply (a human, a reminder, or no turn to answer)."""
-    if not m.get("bot") or (m.get("content") or "").lstrip().startswith(NUDGE_MARK):
-        return None
-    if not last_turn or last_turn["status"] not in YIELD_STATUSES:
-        return None
-    if last_turn["to"] and not _is_broadcast(last_turn["to"]):
-        return last_turn["to"]
-    return next((w for w in reversed(turn_authors)
-                 if not same_handle(w, last_turn["from"])), "participant")
 
 
 # How far back compute_state pages to reach a session's read position, so a
@@ -991,29 +962,7 @@ def _history(client: DiscordClient, channel_id: str, me: Optional[str], scan: in
     return out
 
 
-def _attribute_plain(msgs: list[dict[str, Any]],
-                     parsed_list: list[Optional[dict[str, Any]]]) -> dict[int, tuple[str, str]]:
-    """For each plain (untagged) bot message that answers a turn: index ->
-    (who it's the reply of, who it goes back to). See _plain_responder."""
-    out: dict[int, tuple[str, str]] = {}
-    last: Optional[dict[str, Any]] = None
-    authors: list[str] = []
-    for i, (m, p) in enumerate(zip(msgs, parsed_list)):
-        if p is None:
-            responder = _plain_responder(m, last, authors)
-            if responder and last:
-                out[i] = (responder, last["from"])
-                authors.append(responder)
-                last = {"from": responder, "to": last["from"], "status": "over"}
-            continue
-        if p["status"] in YIELD_STATUSES + TERMINAL_STATUSES:
-            authors.append(p["participant"])
-            last = {"from": p["participant"], "to": p["to"], "status": p["status"]}
-    return out
-
-
 def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[str, Any]]],
-                  plain_as: dict[int, tuple[str, str]],
                   me: Optional[str]) -> tuple[list[int], list[str]]:
     """Which messages belong to ``me``'s conversation, and who else is chatting
     in the room right now.
@@ -1053,9 +1002,7 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
     for i, m in enumerate(msgs):
         p = parsed_list[i]
         if p is None:
-            if i in plain_as:
-                link(handle_key(plain_as[i][0]), handle_key(plain_as[i][1]))
-            elif not m.get("bot") and is_human_stop(m.get("content") or ""):
+            if not m.get("bot") and is_human_stop(m.get("content") or ""):
                 close(list(comp), i)
                 room_stop = i
             continue
@@ -1078,6 +1025,18 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
     my = handle_key(me)
     mine = grp(my)
     alone = len(mine) == 1
+    if not alone:
+        # A conversation nobody has spoken in for STALE_AFTER (dropped without
+        # an `end`) doesn't keep its members from hearing a new opener.
+        stamps = [_parse_ts(msgs[i]["timestamp"]) for i, p in enumerate(parsed_list)
+                  if p is not None]
+        stamps = [t for t in stamps if t is not None]
+        mine_stamps = [_parse_ts(msgs[i]["timestamp"]) for i, p in enumerate(parsed_list)
+                       if p is not None and (handle_key(p["participant"]) in mine or (
+                           not _is_broadcast(p["to"]) and handle_key(p["to"]) in mine))]
+        mine_stamps = [t for t in mine_stamps if t is not None]
+        if stamps and mine_stamps and max(mine_stamps) < max(stamps) - STALE_AFTER:
+            alone = True
 
     def ep(k: str) -> int:
         return max(epoch.get(k, 0), room_stop)
@@ -1088,11 +1047,7 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
     for i, m in enumerate(msgs):
         p = parsed_list[i]
         if p is None:
-            if i in plain_as:
-                r, t = handle_key(plain_as[i][0]), handle_key(plain_as[i][1])
-                if (r in mine or t in mine) and i >= ep(r if r in mine else t):
-                    scope.append(i)
-            elif not m.get("bot"):
+            if not m.get("bot"):
                 scope.append(i)  # a human speaks to the whole room
             continue
         k = handle_key(p["participant"])
@@ -1128,17 +1083,6 @@ def _broadcast_for_me(client: DiscordClient, channel_id: str, me: str,
     return bool(owed) and str(owed["id"]) == str(message_id)
 
 
-def _plain_for_me(client: DiscordClient, channel_id: str, me: str,
-                  m: dict[str, Any]) -> bool:
-    """Is this plain (untagged) bot message a reply to me? Yes if it answers a
-    turn I handed over, or if it answers nothing and nothing is pending."""
-    st = compute_state(client, channel_id, me, upto=m["id"])
-    owed = st.get("_owed_turn")
-    if owed:
-        return str(owed["id"]) == str(m["id"])
-    return m["id"] not in st.get("_plain_ids", []) and st.get("pending_turn") is None
-
-
 def _wakes(client: DiscordClient, channel_id: str, m: dict[str, Any], me: str,
            from_whom: Optional[str] = None) -> bool:
     """_would_wake, plus the checks that need the room: an ending or an
@@ -1147,7 +1091,7 @@ def _wakes(client: DiscordClient, channel_id: str, m: dict[str, Any], me: str,
         return False
     p = parse(m.get("content") or "")
     if p is None:
-        return not m.get("bot") or _plain_for_me(client, channel_id, me, m)
+        return not m.get("bot")  # a human; relay traffic never wakes anyone
     if p["status"] in TERMINAL_STATUSES:
         return _ends_mine(client, channel_id, me, p, m["id"])
     if _is_broadcast(p["to"]):
@@ -1163,9 +1107,13 @@ def _owed_to(turns: list[dict[str, Any]], me: str,
     conversations sharing one room don't hide each other's owed turns. An
     unaddressed turn counts as answered once anyone else replies to it."""
     mine = last_by.get(me, -1)
+    horizon = datetime.now(timezone.utc) - OWED_EXPIRY
     for t in reversed(turns):
         if t["i"] <= mine:
             return None
+        ts = _parse_ts(t.get("ts"))
+        if ts is not None and ts < horizon:
+            return None  # long dead: nothing older is owed either
         if same_handle(t["from"], me) or t["status"] not in YIELD_STATUSES:
             continue
         if not _targets(t["to"], me) or last_by.get(t["from"]) != t["i"]:
@@ -1197,7 +1145,7 @@ def _recently_working(st: dict[str, Any], me: str) -> bool:
 
 
 def _would_wake(m: dict[str, Any], me: str, from_whom: Optional[str] = None) -> bool:
-    """Would the await loop deliver this message to ``me``? (A human or plain
+    """Would the await loop deliver this message to ``me``? (A human's
     post, an ending, or a yielded turn that targets me - not my own posts, a
     reminder, or someone's say/working/ask, which wake nobody.)"""
     content = m.get("content") or ""
@@ -1205,7 +1153,7 @@ def _would_wake(m: dict[str, Any], me: str, from_whom: Optional[str] = None) -> 
         return False
     p = parse(content)
     if p is None:
-        return True
+        return not m.get("bot")  # a human, not relay traffic
     if same_handle(p["participant"], me) or p["status"] in PROGRESS_STATUSES + ("ask",):
         return False
     if p["status"] in TERMINAL_STATUSES:
@@ -1248,10 +1196,19 @@ def next_step(result: dict[str, Any]) -> str:
                     "you), then call chat_await to keep waiting - don't post a turn.")
         return ("A human spoke in the chat. Do what they ask; if the chat should "
                 "continue, reply with chat_say.")
+    if result.get("your_turn") and result.get("status") == "wrap":
+        return ("They propose ending the chat. If you agree, confirm with "
+                "chat_say(<closing words>, status='end'); if there's more to settle, "
+                "reply with status='over' instead. Don't end your turn without replying.")
     if result.get("your_turn"):
         return ("It's YOUR turn. Reply with chat_say (status='over' to hand back, "
                 "'working' if you need time to go do something first, 'wrap' to "
                 "propose ending). Don't end your turn without replying.")
+    if result.get("timed_out") and result.get("not_in_chat"):
+        others = ", ".join(result["not_in_chat"])
+        return (f"Others are chatting in this room ({others}) and nobody has addressed "
+                "you. If you're meant to join them, raise a hand: chat_say(<why>, "
+                "status='ask', to='<one of them>'). Otherwise call chat_await again.")
     if result.get("timed_out"):
         return ("Call chat_await again NOW. Keep waiting as long as it takes - do NOT "
                 "end your turn, or nobody can wake you when the reply arrives.")

@@ -313,7 +313,12 @@ def test_restart_takes_its_role_back() -> None:
         check(c.read_messages(room, limit=1)[0]["content"].startswith("[ProjectB/convex>CodeCarver|over]"),
               "the answer goes out under the same name")
         _restart()
-        b = mcp.chat_begin(channel=room)  # nothing owed now
+        b = mcp.chat_begin(channel=room)  # its own answer is out, waiting for CodeCarver
+        check(b["chatter"] == "ProjectB/convex" and "taken that name back" in b["note"],
+              "restarted while waiting for a reply: it rejoins under its name too")
+        chat.send_chat(c, room, "CodeCarver", "end", "thanks", to="ProjectB/convex")
+        _restart()
+        b = mcp.chat_begin(channel=room)  # nothing owed or waiting now
         check(b["chatter"] == "ProjectB",
               "with nothing owed, a fresh session is just the project handle")
     finally:
