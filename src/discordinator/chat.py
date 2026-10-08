@@ -188,10 +188,65 @@ def _is_broadcast(to: Optional[str]) -> bool:
 
 def _targets(to: Optional[str], me: str) -> bool:
     """True if a turn addressed ``to`` should wake participant ``me`` — i.e. it's
-    a broadcast, or names ``me`` (case-insensitive)."""
+    a broadcast, or names ``me`` (case-insensitive). (A bare project handle that
+    stands for ``me`` is resolved against the room first - see bare_aliases.)"""
     if _is_broadcast(to):
         return True
     return same_handle(to, me)
+
+
+def _project_of(handle: Optional[str]) -> Optional[str]:
+    """"projectb" for "ProjectB/convex"; None for a handle with no role."""
+    k = handle_key(handle)
+    return k.split("/", 1)[0] if "/" in k else None
+
+
+def bare_aliases(parsed: list[Optional[dict[str, Any]]],
+                 me: Optional[str] = None) -> dict[str, str]:
+    """Bare project handles that stand for one session's `<project>/<role>`
+    handle in this room: a peer that only knows the project's name ("ProjectB")
+    still reaches the session talking as "ProjectB/convex". Only when nobody
+    posts under the bare name itself and exactly one role of that project is
+    around (posted, or is ``me``) - with two roles a bare address stays
+    ambiguous and wakes neither."""
+    keys = {handle_key(p["participant"]): p["participant"] for p in parsed if p}
+    if me:
+        keys.setdefault(handle_key(me), me)
+    roles: dict[str, list[str]] = {}
+    for k, h in keys.items():
+        base = _project_of(k)
+        if base and base not in keys:
+            roles.setdefault(base, []).append(h)
+    return {b: hs[0] for b, hs in roles.items() if len(hs) == 1}
+
+
+def resolve_bare(parsed: list[Optional[dict[str, Any]]],
+                 me: Optional[str] = None) -> list[Optional[dict[str, Any]]]:
+    """``parsed`` with each turn addressed to a bare project handle readdressed
+    to the role it stands for (see bare_aliases)."""
+    aliases = bare_aliases(parsed, me)
+    if not aliases:
+        return parsed
+    return [{**p, "to": aliases[handle_key(p["to"])]}
+            if p and not _is_broadcast(p["to"]) and handle_key(p["to"]) in aliases
+            else p for p in parsed]
+
+
+def _could_mean(to: Optional[str], me: str) -> bool:
+    """Is ``to`` my project's bare handle (it may stand for me - see bare_aliases)?"""
+    return not _is_broadcast(to) and _project_of(me) == handle_key(to)
+
+
+def _means_me(client: DiscordClient, channel_id: str, to: Optional[str], me: str) -> bool:
+    """Does a turn addressed ``to`` (not a broadcast) name me, counting my
+    project's bare handle when in this room it can only mean me?"""
+    if same_handle(to, me):
+        return True
+    if not _could_mean(to, me):
+        return False
+    parsed = [parse(m.get("content") or "")
+              for m in client.read_messages(channel_id, limit=100)]
+    return same_handle(bare_aliases(parsed, me).get(handle_key(to)), me)
 
 
 _STOP_RE = re.compile(
@@ -657,7 +712,7 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
             # A yielded turn (over/wrap). Does the floor actually come to me?
             if want is not None and not same_handle(sender, want):
                 continue  # waiting specifically for a different peer
-            if not _targets(to, me):
+            if not _targets(to, me) and not _means_me(client, channel_id, to, me):
                 continue  # addressed to another peer — keep holding the wait
             if _is_broadcast(to) and not _broadcast_for_me(client, channel_id, me, m["id"]):
                 continue  # open to all - but in a conversation I'm not part of
@@ -728,7 +783,7 @@ def compute_state(
     """
     raw = _history(client, channel_id, me, scan, upto)
     msgs = list(reversed([simplify_message(m) for m in raw]))  # chronological
-    parsed_list = [parse(m["content"]) for m in msgs]
+    parsed_list = resolve_bare([parse(m["content"]) for m in msgs], me)
     scope, room_others = _conversation(msgs, parsed_list, me)
 
     # Scope to the CURRENT chat. A terminal turn (end/impasse) or a human stop
@@ -1070,7 +1125,7 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
 def _ends_mine(client: DiscordClient, channel_id: str, me: str,
                p: dict[str, Any], message_id: str) -> bool:
     """Does this end/impasse end MY conversation (not another one in the room)?"""
-    if same_handle(p.get("to"), me):
+    if not _is_broadcast(p.get("to")) and _means_me(client, channel_id, p.get("to"), me):
         return True
     return bool(compute_state(client, channel_id, me, upto=message_id).get("ended"))
 
@@ -1096,7 +1151,7 @@ def _wakes(client: DiscordClient, channel_id: str, m: dict[str, Any], me: str,
         return _ends_mine(client, channel_id, me, p, m["id"])
     if _is_broadcast(p["to"]):
         return _broadcast_for_me(client, channel_id, me, m["id"])
-    return True
+    return _means_me(client, channel_id, p["to"], me)
 
 
 def _owed_to(turns: list[dict[str, Any]], me: str,
@@ -1160,7 +1215,7 @@ def _would_wake(m: dict[str, Any], me: str, from_whom: Optional[str] = None) -> 
         return True
     if from_whom is not None and not same_handle(p["participant"], from_whom):
         return False
-    return _targets(p["to"], me)
+    return _targets(p["to"], me) or _could_mean(p["to"], me)  # _wakes checks the room
 
 
 def _working_note(st: dict[str, Any], me: str) -> Optional[str]:
