@@ -158,6 +158,7 @@ def test_status_for_second_session() -> None:
     print("a second session's chat_status answers for itself, not its sibling:")
     os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CodeCarver"
     handles._resolved.clear()  # a fresh session: no name used yet
+    handles._since.clear()
     handles._last_chatter = None
     try:
         r = "sibling-room"
@@ -175,6 +176,7 @@ def test_status_for_second_session() -> None:
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
         handles._resolved.clear()
+        handles._since.clear()
         handles._last_chatter = None
 
 

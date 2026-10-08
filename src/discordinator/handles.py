@@ -52,8 +52,14 @@ _resolved: dict[str, str] = {}
 _last_chatter: Optional[str] = None
 _restored = False  # this process has looked up its session's earlier identity
 _current: Optional[str] = None  # the handle this session's last chat call used
+# When this session first took each of its names (handle key -> unix time), so
+# a turn sent before it was running isn't counted as possibly meant for it.
+_since: dict[str, float] = {}
 
 SESSION_TTL = 7 * 24 * 3600.0  # forget a session record after a week unused
+# A session named by DISCORDINATOR_SESSION_ID has no process to watch: its name
+# is held for it while its server runs, and this long after (a restart).
+RESTART_GRACE = 120.0
 
 
 def registry_path():
@@ -93,8 +99,9 @@ def _is_launcher(name: Optional[str], pid: Optional[int] = None) -> bool:
     (discordinator-mcp.exe) or a Python launcher/venv shim (python.exe, py.exe)
     running it - a new one each time the server starts, so never the session
     itself. A Python process running anything else (a Python MCP host, a test
-    harness) is the session. With no ``pid`` (or its command line unreadable)
-    the name decides."""
+    harness) is the session - and so is one whose command line can't be read
+    (its restarts then come back under a new name, but two such hosts never
+    share one)."""
     n = (name or "").casefold()
     if n.endswith(".exe"):
         n = n[:-4]
@@ -103,8 +110,8 @@ def _is_launcher(name: Optional[str], pid: Optional[int] = None) -> bool:
     if not (n.startswith("python") or n in ("py", "pyw")):
         return False
     cmd = process_cmdline(pid) if pid else None
-    return cmd is None or any(s in cmd.casefold()
-                              for s in ("discordinator.mcp_server", "discordinator-mcp"))
+    return cmd is not None and any(s in cmd.casefold()
+                                   for s in ("discordinator.mcp_server", "discordinator-mcp"))
 
 
 def session_pid(ppid: int) -> int:
@@ -241,6 +248,10 @@ def restore() -> None:
     if isinstance(resolved, dict):
         _resolved.update({k: v for k, v in resolved.items()
                           if isinstance(k, str) and isinstance(v, str)})
+    since = entry.get("since")
+    if isinstance(since, dict):
+        _since.update({k: float(v) for k, v in since.items()
+                       if isinstance(k, str) and isinstance(v, (int, float))})
 
 
 def _remember() -> None:
@@ -255,7 +266,8 @@ def _remember() -> None:
             data = _load(path)
             data = {k: v for k, v in data.items() if _session_alive(k, now, v)}
             data[key] = {"chatter": _last_chatter, "resolved": dict(_resolved),
-                         "handle": _current, "ts": now}
+                         "handle": _current, "since": dict(_since), "ts": now,
+                         "pid": os.getpid(), "started": _my_start()}
             config._atomic_write(path, json.dumps(data, indent=2, sort_keys=True))
     except OSError:
         pass  # only a convenience for the next restart
@@ -342,20 +354,38 @@ def _reserved(now: float) -> dict[str, str]:
     their session records: held for them while their server restarts, so a
     new session can't take the name - and the turns sent to it - in the gap
     before their next server claims it again."""
+    return {k: h for k, (h, _) in _reserved_since(now).items()}
+
+
+def _reserved_since(now: float) -> dict[str, tuple[str, Optional[float]]]:
+    """_reserved, with when each session took the name (None if unknown)."""
     mine = session_key()
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, Optional[float]]] = {}
     for key, entry in _load(sessions_path()).items():
         if key == mine or not _session_alive(key, now, entry):
             continue
-        pid = key.split(":", 1)[0]
-        if pid.isdigit() and _is_launcher(process_parent(int(pid))[1], int(pid)):
-            continue  # keyed by a launcher (before v1.0.39): not a session
+        if key.startswith("id:"):
+            # No session process to watch: held while its server runs, and
+            # briefly after (a restart) - not for the week the record is kept.
+            pid, started = entry.get("pid"), entry.get("started")
+            running = (isinstance(pid, int) and started is not None
+                       and process_started(pid) == started)
+            if not running and now - float(entry.get("ts", 0) or 0) > RESTART_GRACE:
+                continue
+        elif not isinstance(entry.get("handle"), str):
+            # A record from before v1.0.40 may be keyed by a launcher (before
+            # v1.0.39), which is not a session. (Newer ones never are.)
+            pid = key.split(":", 1)[0]
+            if pid.isdigit() and _is_launcher(process_parent(int(pid))[1], int(pid)):
+                continue
         # The name it goes by now (older records: every name it has used).
         names = ([entry["handle"]] if isinstance(entry.get("handle"), str)
                  else (entry.get("resolved") or {}).values())
+        since = entry.get("since") if isinstance(entry.get("since"), dict) else {}
         for h in names:
             if isinstance(h, str):
-                out[chat.handle_key(h)] = h
+                t = since.get(chat.handle_key(h))
+                out[chat.handle_key(h)] = (h, float(t) if isinstance(t, (int, float)) else None)
     return out
 
 
@@ -398,11 +428,20 @@ def claim(desired: str) -> str:
                or chat.handle_key(handle) in reserved):
             n += 1
             handle = _with_suffix(desired, n)
+        key = chat.handle_key(handle)
+        prev = reg.get(key)
+        if key not in _since:
+            # Since when this session has had the name: its own earlier claim
+            # (or its previous server's, still winding down), else now.
+            same = isinstance(prev, dict) and (prev.get("pid") == me or (
+                prev.get("session") and prev.get("session") == session_key()))
+            t = prev.get("since") if same else None
+            _since[key] = float(t) if isinstance(t, (int, float)) else now
         # Prune dead/expired claims while we hold the lock.
         reg = {k: v for k, v in reg.items()
                if isinstance(v, dict) and (v.get("pid") == me or _held_by_other(v, me, now))}
-        reg[chat.handle_key(handle)] = {"handle": handle, "pid": me, "ts": now,
-                                        "started": _my_start(), "session": session_key()}
+        reg[key] = {"handle": handle, "pid": me, "ts": now, "since": _since[key],
+                    "started": _my_start(), "session": session_key()}
         config._atomic_write(path, json.dumps(reg, indent=2, sort_keys=True))
     return handle
 
@@ -484,13 +523,23 @@ def current(chatter: Optional[str], cfg: dict[str, Any]) -> Optional[str]:
 def live_handles() -> list[str]:
     """Handles currently held by live sessions on this machine (including a
     running session's names while its server restarts)."""
+    return [h for h, _ in live_claims()]
+
+
+def live_claims() -> list[tuple[str, Optional[float]]]:
+    """live_handles, each with when its session took it (unix time; None if
+    unknown)."""
     reg = _load(registry_path())
     me, now = os.getpid(), time.time()
-    out = {chat.handle_key(v["handle"]): v["handle"] for v in reg.values()
-           if isinstance(v, dict) and isinstance(v.get("handle"), str)
-           and (v.get("pid") == me or _held_by_other(v, me, now))}
-    for k, h in _reserved(now).items():
-        out.setdefault(k, h)
+    out: dict[str, tuple[str, Optional[float]]] = {}
+    for v in reg.values():
+        if (isinstance(v, dict) and isinstance(v.get("handle"), str)
+                and (v.get("pid") == me or _held_by_other(v, me, now))):
+            t = v.get("since")
+            out[chat.handle_key(v["handle"])] = (
+                v["handle"], float(t) if isinstance(t, (int, float)) else None)
+    for k, hs in _reserved_since(now).items():
+        out.setdefault(k, hs)
     return list(out.values())
 
 

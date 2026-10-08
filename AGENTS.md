@@ -222,12 +222,16 @@ two sessions can never silently share a name and ignore each other's turns. A
 session keeps its name for as long as it runs; claims free up when it exits. Handles are
 case-insensitive (`Convex` = `convex`). A turn addressed to a project's bare
 handle (`to="ProjectB"`) reaches the session talking as `ProjectB/<role>` when
-it's the only session of that project in a chat still going in the room (or
-running on this machine) and nobody posts as plain `ProjectB`; with two roles
-around (in chats or running here), address the role. A turn keeps the role it
-meant when it was sent: once that role's chat ends, a newer role of the project
-isn't handed its turns. `chat_say` spells such an address out as the full role
-name.
+it's the only session of that project around and nobody posts as plain
+`ProjectB`; with two roles around, address the role. Around means in a chat
+in the room (one that spoke in the last 30 minutes - failing that, one whose
+chat never ended) or running on this machine. A turn keeps the role it meant
+when it was sent: once that role's chat ends, a newer role of the project
+isn't handed its turns, and a session started later doesn't make it
+ambiguous. If two roles take the same one (one on another machine, where
+neither can see the other running), it was for the one that answered first:
+the other's `chat_say` reply is refused and says so. `chat_say` spells such
+an address out as the full role name.
 
 **Restarts keep the name.** A session is its Claude Code process: when its
 server restarts (`/mcp` reconnect, or a new `DISCORDINATOR_CHAT_HANDLE` taking
@@ -237,7 +241,8 @@ so the session never turns into `CodeCarver-2` and misses the turns sent to it.
 This works when the server is started directly (`python -m ...`) or through
 the `discordinator-mcp` launcher, a venv's python or `py`: the session is the
 process above those. (Any other wrapper in between - `cmd /c`, `uvx` - counts
-as the session itself, so a restart there starts over under a new name.)
+as the session itself, so a restart there starts over under a new name. So
+does a python whose command line can't be read, e.g. on Windows before 8.1.)
 While it restarts, the name it goes by stays its own - another session
 starting in that moment gets `-2` instead of taking it (and the replies meant
 for it).
