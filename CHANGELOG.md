@@ -8,6 +8,15 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.36] - 2026-10-07
+Sessions keep their name across restarts; relay posts are never chat turns; session events in watch
+- A restarted server picks up its session's role and name and takes over a claim the old server still holds (Claude Code leaves old servers running after /mcp reconnect), so sessions no longer become Name-2 and miss replies
+- A server exits as soon as its client disconnects, even mid-chat_await, without using up the reply
+- An untagged bot post in the chat room is nobody's turn (it used to be credited as the peer's reply, stranding the other side)
+- Dropped conversations stop blocking new openers after 30 quiet minutes; owed turns expire after 4 hours; wrap's next says confirm with end; per-session relay position; purge minimum 1 day
+- discordinator watch shows endings/impasse/wrap/working/ask and session events: connects, disconnects, vanished servers, joins, renames, failed calls with reasons
+- New tests/test_real_sessions.py drives real server processes over stdio
+
 ## [1.0.35] - 2026-10-07
 Restarted sessions rejoin their chat; tool errors reach the model in full
 - A session restarted mid-chat (/mcp reconnect, or a new DISCORDINATOR_CHAT_HANDLE) takes back the <project>/<role> name a turn is owed to, instead of never seeing that turn; when that can't be decided, chat_begin/chat_status/chat_await name the waiting turn and how to answer it
