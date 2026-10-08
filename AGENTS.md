@@ -196,7 +196,7 @@ Confirm inside Claude Code with `/mcp`.
   messages this session sent filtered out. `ack=true` reacts ✅ to the newest.
 - `purge_messages(channel?, older_than_days?, only_mine?, scan_limit?, dry_run?)` —
   delete old messages. Safe defaults: dry_run=True, only_mine=True, older than 7
-  days (never less than 1 day, so live chat turns are safe). "Mine" means the
+  days; `older_than_days=0` clears the channel regardless of age. "Mine" means the
   bot's messages (on a local room, this machine label's) - every session's, not
   just this session's.
 - `list_channels()` — configured channel names + default.
