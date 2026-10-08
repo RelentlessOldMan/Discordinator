@@ -173,6 +173,38 @@ def test_project_handle_no_false_lost_turn() -> None:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE", None)
 
 
+def test_old_role_from_an_ended_chat_doesnt_block() -> None:
+    print("an older role from a chat that ended doesn't make the bare name ambiguous:")
+    _fresh()
+    r = "bare-old"
+    c = LocalClient()
+    chat.send_chat(c, r, "ProjB/api", "over", "earlier question", to="Peer")
+    chat.send_chat(c, r, "Peer", "wrap", "done?", to="ProjB/api")
+    chat.send_chat(c, r, "ProjB/api", "end", "done", to="Peer")
+    mcp.chat_begin(chatter="ProjB/convex", channel=r)
+    mcp.chat_say(text="new question", chatter="ProjB/convex", channel=r, to="Peer", wait=False)
+    chat.send_chat(c, r, "Peer", "over", "answer", to="ProjB")  # Peer only knows "ProjB"
+    b = wait("ProjB/convex", r)
+    check(b["your_turn"] and b["text"] == "answer", f"convex wakes: {b.get('timed_out')}")
+    two = [{"participant": "ProjB/api", "to": "Peer", "status": "over"},
+           {"participant": "ProjB/convex", "to": "Peer", "status": "over"}]
+    check(chat.bare_aliases(two) == {}, "two roles both still chatting: still ambiguous")
+
+
+def test_error_event_names_the_room() -> None:
+    print("a failed call's event names the room it acted on:")
+    from discordinator import events
+    os.environ["DISCORDINATOR_CHAT_CHANNEL"] = "the-chat-room"
+    try:
+        mcp._log_error("chat_say", ValueError("boom"), {})  # channel omitted: the default room
+        mcp._log_error("chat_say", ValueError("boom2"), {"channel": "elsewhere"})
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_CHANNEL", None)
+    evs = {e.get("message"): e for e in events.read(0)[0] if e.get("kind") == "error"}
+    check(evs["boom"].get("room") == "the-chat-room", f"default room: {evs['boom'].get('room')}")
+    check(evs["boom2"].get("room") == "elsewhere", "an explicit room")
+
+
 def main() -> int:
     test_aliases_unit()
     test_bare_opener_wakes_the_role()
@@ -181,6 +213,8 @@ def main() -> int:
     test_two_roles_stay_ambiguous()
     test_real_bare_session_keeps_its_turns()
     test_project_handle_no_false_lost_turn()
+    test_old_role_from_an_ended_chat_doesnt_block()
+    test_error_event_names_the_room()
     print(f"\nALL {_passed} BARE-HANDLE CHECKS PASSED")
     return 0
 

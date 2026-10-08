@@ -9,7 +9,8 @@ of those, most of them taken from real stalls.
 
 DISCORDINATOR_SESSION_ID stands in for the Claude Code process that owns a
 server (normally its parent process): two servers with the same id are one
-session restarting; different ids are different sessions.
+session restarting; different ids are different sessions. One check runs
+without it, through a launcher process, to cover the real lookup.
 Run:  python tests/test_real_sessions.py
 """
 
@@ -55,17 +56,26 @@ def check(cond: bool, msg: str) -> None:
 class Session:
     """One real MCP server process, as a Claude Code session would run it."""
 
-    def __init__(self, session_id: str, handle: str | None = None, **env: str):
-        self.env = {**os.environ, "DISCORDINATOR_SESSION_ID": session_id, **env}
+    def __init__(self, session_id: str | None, handle: str | None = None,
+                 launcher: bool = False, **env: str):
+        self.env = {**os.environ, **env}
+        if session_id is not None:  # None: the real thing - the parent process
+            self.env["DISCORDINATOR_SESSION_ID"] = session_id
         if handle:
             self.env["DISCORDINATOR_CHAT_HANDLE"] = handle
+        self.launcher = launcher
         self.stack = AsyncExitStack()
 
     async def start(self) -> "Session":
         from mcp.client.session import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
-        params = StdioServerParameters(command=sys.executable,
-                                       args=["-m", "discordinator.mcp_server"],
+        args = ["-m", "discordinator.mcp_server"]
+        if self.launcher:
+            # Like discordinator-mcp.exe or a venv's python.exe on Windows: a
+            # process (a new one each start) that runs the server as its child.
+            args = ["-c", "import subprocess, sys; sys.exit(subprocess.call("
+                    "[sys.executable, '-m', 'discordinator.mcp_server']))"]
+        params = StdioServerParameters(command=sys.executable, args=args,
                                        env=self.env, cwd=str(_TMP))
         r, w = await self.stack.enter_async_context(stdio_client(params))
         self.s = await self.stack.enter_async_context(ClientSession(r, w))
@@ -278,6 +288,53 @@ def test_abandoned_conversation_hears_a_new_opener() -> None:
     run(go())
 
 
+def test_launcher_restart_keeps_the_name() -> None:
+    print("a server started through a launcher keeps its name across a restart:")
+
+    async def go():
+        # No DISCORDINATOR_SESSION_ID: the session is found from the real
+        # process tree, past the launcher (a new one on every reconnect).
+        l1 = await Session(None, handle="ProjL", launcher=True).start()
+        check((await l1.call("chat_begin", chatter="ui", channel="r10"))["chatter"] == "ProjL/ui",
+              "before: ProjL/ui")
+        await l1.stop()
+        l2 = await Session(None, handle="ProjL", launcher=True).start()
+        b = await l2.call("chat_begin", channel="r10")  # chatter omitted, as models do
+        check(b.get("chatter") == "ProjL/ui",
+              f"after the restart it's still ProjL/ui, not the bare name: {b.get('chatter')}")
+        await l2.stop()
+    run(go())
+
+
+def test_restart_gap_doesnt_hand_the_name_to_a_newcomer() -> None:
+    print("a new session can't take a restarting session's name (and its reply):")
+
+    async def go(explicit: bool):
+        room, P = ("r11e", "ProjR") if explicit else ("r11", "ProjQ")
+        kw = {"chatter": f"{P}/ui" if explicit else "ui"}
+        x1 = await Session("sess-x" + room, handle=P).start()
+        await x1.call("chat_begin", channel=room, **kw)
+        await x1.call("chat_say", text="please review", channel=room, to="Peer", wait=False, **kw)
+        await x1.stop()  # reconnect: the old server is gone, the new one not yet started
+        await asyncio.sleep(1.5)
+        y = await Session("sess-y" + room, handle=P).start()  # another session of ProjQ
+        yb = await y.call("chat_begin", channel=room)
+        check(yb.get("chatter") != f"{P}/ui", f"the newcomer isn't {P}/ui: {yb.get('chatter')}")
+        x2 = await Session("sess-x" + room, handle=P).start()
+        chat.send_chat(LocalClient(), room, "Peer", "over", "reviewed: fine", to=f"{P}/ui")
+        a = await x2.call("chat_await", channel=room, timeout=5, poll=0.2,
+                          **({"chatter": f"{P}/ui"} if explicit else {}))
+        check(a.get("text") == "reviewed: fine" and not a.get("handle_note"),
+              f"the restarted session, still {P}/ui, gets the reply: {str(a)[:80]}")
+        ya = await y.call("chat_await", channel=room, timeout=0.5, poll=0.1)
+        check(ya.get("timed_out"), "the newcomer doesn't")
+        await x2.stop()
+        await y.stop()
+    run(go(False))
+    print(" ...and when the session passes its full name as chatter:")
+    run(go(True))
+
+
 def test_session_events_are_logged() -> None:
     print("session events land in the machine's event log:")
     seen = [e["kind"] for e in events.read(0)[0]]
@@ -294,6 +351,8 @@ def main() -> int:
     test_errors_reach_the_model_over_stdio()
     test_old_turns_expire()
     test_abandoned_conversation_hears_a_new_opener()
+    test_launcher_restart_keeps_the_name()
+    test_restart_gap_doesnt_hand_the_name_to_a_newcomer()
     test_session_events_are_logged()
     print(f"\nALL {_passed} REAL-SESSION CHECKS PASSED")
     return 0

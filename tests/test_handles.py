@@ -374,6 +374,59 @@ def test_turn_owed_to_the_name_before_a_project_handle() -> None:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
 
 
+def test_name_taken_meanwhile_isnt_shared() -> None:
+    print("a session passing its full name back never shares it with another:")
+    _fresh()
+    cfg = {"chat_handle": "ProjQ"}
+    h, _ = handles.resolve("ProjQ/ui", cfg)
+    check(h == "ProjQ/ui", "first: ProjQ/ui")
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _plant("ProjQ/ui", other.pid)  # someone else got it (e.g. while this one restarted)
+        h2, note = handles.resolve("ProjQ/ui", cfg)
+        check(h2 == "ProjQ/ui-2", f"this session moves to ProjQ/ui-2, not a shared name: {h2}")
+        check(note and "ProjQ/ui-2" in note, "and is told so")
+        check("/ui/ui" not in note and "'ProjQ/ui'" in note.split("e.g.")[1],
+              f"the note's example is a real handle: {note.split('e.g.')[1]}")
+        again, _ = handles.resolve("ProjQ/ui-2", cfg)
+        check(again == "ProjQ/ui-2", "and it keeps that name")
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_running_sessions_names_are_reserved() -> None:
+    print("a running session's names stay its own while its server restarts:")
+    _fresh()
+    path = handles.sessions_path()
+    path.write_text(json.dumps({"id:other-session": {
+        "chatter": "ui", "resolved": {"projq/ui": "ProjQ/ui"}, "ts": time.time()}}),
+        encoding="utf-8")
+    try:
+        check("ProjQ/ui" in handles.live_handles(), "listed as held (nobody claims it right now)")
+        h, note = handles.resolve("ui", {"chat_handle": "ProjQ"})
+        check(h == "ProjQ/ui-2" and note, f"another session asking for it gets -2: {h}")
+        check(handles.current("ui", {"chat_handle": "ProjQ"}) == "ProjQ/ui-2",
+              "chat_status agrees")
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_session_is_found_past_launchers() -> None:
+    print("the session is the process above any launcher:")
+    for name in ("discordinator-mcp.exe", "python.exe", "Python3.12", "pythonw.exe", "py.exe",
+                 "python3"):
+        check(handles._is_launcher(name), f"{name} is a launcher")
+    for name in ("claude.exe", "node", "claude", "bash.exe", None):
+        check(not handles._is_launcher(name), f"{name} is not")
+    me, name = handles.process_parent(os.getpid())
+    check(me == os.getppid() and handles._is_launcher(name),
+          f"process_parent reads this process: {me} {name}")
+    top = handles.session_pid(os.getpid())  # this python is a launcher-like hop
+    check(top != os.getpid() and not handles._is_launcher(handles.process_parent(top)[1]),
+          f"walks up to a non-Python process: {handles.process_parent(top)[1]}")
+
+
 def main() -> int:
     test_compose()
     test_pid_alive()
@@ -389,6 +442,9 @@ def main() -> int:
     test_restart_takes_its_role_back()
     test_lost_role_not_stolen_or_guessed()
     test_turn_owed_to_the_name_before_a_project_handle()
+    test_name_taken_meanwhile_isnt_shared()
+    test_running_sessions_names_are_reserved()
+    test_session_is_found_past_launchers()
     print(f"\nALL {_passed} HANDLE CHECKS PASSED")
     return 0
 

@@ -222,8 +222,9 @@ two sessions can never silently share a name and ignore each other's turns. A
 session keeps its name for as long as it runs; claims free up when it exits. Handles are
 case-insensitive (`Convex` = `convex`). A turn addressed to a project's bare
 handle (`to="ProjectB"`) reaches the session talking as `ProjectB/<role>` when
-it's the only session of that project in the room and nobody posts as plain
-`ProjectB`; with two roles around, address the role. `chat_say` spells such an
+it's the only session of that project in a chat still going in the room (or
+running on this machine) and nobody posts as plain `ProjectB`; with two roles
+around, address the role. `chat_say` spells such an
 address out as the full role name.
 
 **Restarts keep the name.** A session is its Claude Code process: when its
@@ -231,6 +232,11 @@ server restarts (`/mcp` reconnect, or a new `DISCORDINATOR_CHAT_HANDLE` taking
 effect), the new server picks up the session's role and name, and takes over a
 claim the old server still holds (Claude Code can leave the old one running) -
 so the session never turns into `CodeCarver-2` and misses the turns sent to it.
+This works however the server is started (`python -m ...`, the
+`discordinator-mcp` launcher, a venv's python): the session is the process
+above any launcher. While it restarts, its names stay its own - another
+session starting in that moment gets `-2` instead of taking them (and the
+replies meant for them).
 A server whose client disconnects exits at once, even mid-`chat_await`, without
 reading anything meant for the session's next server.
 A brand-new session (quit and resumed) that omits `chatter` takes back a
@@ -245,7 +251,8 @@ talking with, everything since its last `end`/`impasse` or a human stop — and
 drops anyone silent for **30+ minutes**
 (except both ends of a turn still owed). A conversation nobody has spoken in for
 30 minutes (dropped without an `end`) no longer keeps its members from hearing a
-new unaddressed opener, and a turn owed to you expires after **4 hours** (a
+new unaddressed opener (except a member that still owes the last turn an answer:
+a reply after a long piece of work goes back to whoever asked), and a turn owed to you expires after **4 hours** (a
 session joining days later isn't handed a dead conversation's turn). A session
 waiting in a room where others chat without addressing it is told how to join
 (`status="ask"`). The ranked list of non-floor
@@ -525,6 +532,10 @@ per-channel rate limit (~5 messages / 5s; the client auto-retries on 429).
    - **CLI** — nothing to do; each command is a fresh process.
    - **MCP** — a running server is on old code until restarted. In Claude Code,
      `/mcp` → reconnect the `discordinator` server, or start a fresh session.
+   Restart **every** session's server after an update, not just some: sessions
+   on different versions can disagree about what counts as a turn (e.g. before
+   v1.0.36 a `send_message` reply in the chat room was a turn; since then only a
+   session that owes a turn has it posted as one).
 3. Confirm: `discordinator version` should match the repo's latest tag
    (`git -C C:\Playground\Discordinator describe --tags`).
 
