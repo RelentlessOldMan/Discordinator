@@ -66,6 +66,19 @@ def _image_dimensions(path: Path) -> Optional[tuple[int, int]]:
         return None
 
 
+def _append_line(path: Path, rec: dict[str, Any]) -> None:
+    """Append one record to a room file (caller holds the room lock). A writer
+    killed mid-line leaves no newline at the end: start on a fresh line so this
+    record isn't glued onto the torn one and lost with it."""
+    line = json.dumps(rec, ensure_ascii=False) + "\n"
+    with open(path, "ab+") as fh:
+        if fh.seek(0, os.SEEK_END):
+            fh.seek(-1, os.SEEK_END)
+            if fh.read(1) != b"\n":
+                line = "\n" + line
+        fh.write(line.encode("utf-8"))
+
+
 def sanitize_room(name: str) -> str:
     """Map a room name to a safe filename stem (alnum/dash/underscore)."""
     safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in str(name))
@@ -259,10 +272,11 @@ class LocalClient:
         return len(dropped)
 
     def _attachment_dirs(self, record: dict[str, Any]) -> set[Path]:
-        """Folders holding a message's stored attachments: its id's folder, plus
-        wherever each attachment's url points under the files root (a file
-        stays where it was copied if the message's id moved on - see _append)."""
-        dirs = {self._files_dir(str(record["id"]))}
+        """Folders holding a message's stored attachments: wherever each
+        attachment's url points under the files root. Never just the folder
+        named for the message's id - ids are only unique per room, and another
+        message's files can sit in a folder with that name (see _append)."""
+        dirs: set[Path] = set()
         files_root = self._files_dir("x").parent.resolve()
         for a in record.get("attachments") or []:
             folder = Path(str(a.get("url") or "")).parent
@@ -323,8 +337,7 @@ class LocalClient:
                 "content": content,
                 "attachments": attachments,
             }
-            with open(path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            _append_line(path, rec)
         return rec
 
     def post_human(self, channel_id: str, content: str, author: str = "human") -> dict[str, Any]:
@@ -474,8 +487,7 @@ class LocalClient:
             "attachments": [],
             "deletes": ids,
         }
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        _append_line(path, rec)
 
     def add_reaction(
         self, channel_id: str, message_id: str, emoji: str = "✅"

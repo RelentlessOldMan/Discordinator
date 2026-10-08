@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import __version__, chat, config, events, use_system_certs
-from .client_factory import make_client
+from .client_factory import make_client, read_new
 from .discord_client import DiscordClient, DiscordError, simplify_message
 from .local_client import local_dir
 
@@ -170,17 +170,7 @@ def _relay_poll(
 ) -> list[dict[str, Any]]:
     """Fetch messages newer than the stored cursor, advance the cursor, and
     return the ones worth showing (others' messages, unless include_self)."""
-    cursor = config.get_cursor(channel_id, own_label)
-    if cursor:
-        raw = client.read_messages(channel_id, limit=100, after=cursor)
-    else:
-        raw = client.read_messages(channel_id, limit=backfill_limit)
-    messages = [simplify_message(m) for m in raw]
-    messages.reverse()  # chronological
-
-    if messages:
-        config.set_cursor(channel_id, messages[-1]["id"], own_label)  # advance past all seen
-
+    messages = read_new(client, channel_id, own_label, backfill_limit)
     if not include_self and own_label:
         prefix = f"[{own_label}]"
         messages = [m for m in messages if not m["content"].startswith(prefix)]
@@ -257,7 +247,7 @@ def _fmt_watch(m: dict[str, Any], color: bool, room: Optional[str] = None) -> st
         rc, rr = _color_for(f"#{room}", color)
         tag = f"{rc}{room[:10]:<11}{rr} "
         tag_w = 12
-    parsed = chat.parse(m["content"])
+    parsed = chat.parse_msg(m)
     if parsed:  # a chat turn: [from>to|status] body
         handle, to = parsed["participant"], parsed["to"]
         status, body = parsed["status"], parsed["body"] or ""
@@ -406,13 +396,13 @@ def _dim(text: str, color: bool) -> str:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    cfg = config.load()
+    cfg = _local_cfg()
     color = sys.stdout.isatty() and not args.no_color
     if args.all:
         return _watch_all(cfg, args, color)
 
     # Default to the chat room (the interesting one); any name/id also works.
-    room = config.resolve_channel(cfg, args.room, mode="chat") if args.room else _chat_room(cfg, None)
+    room = _chat_room(cfg, args.room)
 
     def show_state(client: Any) -> None:
         if args.state:
@@ -472,10 +462,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 def _watch_all(cfg: dict[str, Any], args: argparse.Namespace, color: bool) -> int:
     """Interleave every local room into one merged, time-ordered stream. Cross-
     room ordering works because ids are time-based, so sorting by id ≈ wall
-    clock. Local-only (needs the room list on disk)."""
-    if not config.is_local(cfg, "chat"):
-        return _err("watch --all is only supported on the local transport "
-                    "(in Discord mode, watch a specific channel).")
+    clock."""
 
     def rooms_now(client: Any) -> list[str]:
         return [c["id"] for c in client.list_guild_channels()]
@@ -538,10 +525,7 @@ def _watch_all(cfg: dict[str, Any], args: argparse.Namespace, color: bool) -> in
 
 
 def cmd_tui(args: argparse.Namespace) -> int:
-    cfg = config.load()
-    guard = _require_local(cfg, "tui")
-    if guard is not None:
-        return guard
+    cfg = _local_cfg()
     room = _chat_room(cfg, args.room)
     try:
         from .tui import run_tui
@@ -555,31 +539,50 @@ def cmd_tui(args: argparse.Namespace) -> int:
     return 0
 
 
+def _runs_local(mode: str) -> bool:
+    """True when ``mode`` runs on the local transport, where any name is a room."""
+    try:
+        return config.is_local(config.load(), mode)
+    except config.ConfigError:
+        return False
+
+
+def _local_cfg() -> dict[str, Any]:
+    """Config for the human's local-chat commands (watch, tui, interject,
+    stop). They always act on local rooms, whatever chat transport this shell's
+    config names: a chat on Discord is watched and steered in Discord itself,
+    and sessions often set their transport in .mcp.json, which a shell never
+    sees."""
+    return {**config.load(), "chat_transport": "local"}
+
+
 def _chat_room(cfg: dict[str, Any], room: Optional[str]) -> str:
-    """The chat room a human command acts on: the one named, else one set in
-    this shell (DISCORDINATOR_CHAT_CHANNEL), else the room this machine's chat
-    sessions last used - projects usually set it in .mcp.json, which a shell
-    never sees - else the configured default."""
+    """The local room a human command acts on: the one named, else one set in
+    this shell (DISCORDINATOR_CHAT_CHANNEL), else the local room this machine's
+    chat sessions last used - projects usually set it in .mcp.json, which a
+    shell never sees - else the configured chat room, else `chat`."""
     if room is None and not os.environ.get("DISCORDINATOR_CHAT_CHANNEL"):
         room = chat.last_room()
     return config.resolve_chat_channel(cfg, room)
 
 
-def _require_local(cfg: dict[str, Any], action: str, mode: str = "chat") -> Optional[int]:
-    if not config.is_local(cfg, mode):
-        return _err(
-            f"{action} only applies to the local transport. In Discord mode, "
-            "just type in the channel yourself."
-        )
-    return None
+def _no_local_room(room: str) -> Optional[int]:
+    """An error if there's no local room by this name: nobody is chatting in
+    it, so a stop or remark there would reach no one (a chat on Discord is
+    steered by typing in Discord)."""
+    from .local_client import LocalClient
+    if LocalClient()._room_path(room).exists():
+        return None
+    return _err(f"no local chat room '{room}' - nobody is chatting there. Name the "
+                "room (-c <room>), or, for a chat on Discord, type in the channel itself.")
 
 
 def cmd_interject(args: argparse.Namespace) -> int:
-    cfg = config.load()
-    guard = _require_local(cfg, "interject")
-    if guard is not None:
-        return guard
+    cfg = _local_cfg()
     room = _chat_room(cfg, args.channel)
+    missing = _no_local_room(room)
+    if missing is not None:
+        return missing
     text = _read_stdin_if_needed(args.text)
     if not text:
         return _err("nothing to interject (empty message).")
@@ -599,11 +602,11 @@ def cmd_chat_guard(args: argparse.Namespace) -> int:
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
-    cfg = config.load()
-    guard = _require_local(cfg, "stop")
-    if guard is not None:
-        return guard
+    cfg = _local_cfg()
     room = _chat_room(cfg, args.channel)
+    missing = _no_local_room(room)
+    if missing is not None:
+        return missing
     with make_client(cfg, "chat") as client:
         client.post_human(room, "[[STOP]]")
     print(f"sent stop to #{room}. Any session waiting there will end the chat.")
@@ -749,7 +752,7 @@ def cmd_version(args: argparse.Namespace) -> int:
                 t = config.transport(cfg, m)
                 any_local = any_local or (t == "local")
             except config.ConfigError:
-                t = "(unset)"
+                t = f"(invalid: {cfg[config._TRANSPORT_KEYS[m]]!r})" if cfg.get(config._TRANSPORT_KEYS[m]) else "(unset)"
             print(f"{m} transport: {t}")
         if any_local:
             print(f"local dir:   {local_dir()}")
@@ -807,14 +810,14 @@ def cmd_config(args: argparse.Namespace) -> int:
         print(f"removed channel '{args.name}'")
     elif action == "set-default":
         channels = cfg.get("channels") or {}
-        if args.name not in channels:
+        if args.name not in channels and not _runs_local("relay"):
             return _err(f"no channel named '{args.name}'. Add it first.")
         cfg["default_channel"] = args.name
         config.save(cfg)
         print(f"default channel set to '{args.name}'")
     elif action == "set-chat-channel":
         channels = cfg.get("channels") or {}
-        if not args.name.isdigit() and args.name not in channels:
+        if not args.name.isdigit() and args.name not in channels and not _runs_local("chat"):
             return _err(f"no channel named '{args.name}'. Add it first.")
         cfg["chat_channel"] = args.name
         config.save(cfg)
@@ -914,7 +917,7 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--json", action="store_true", help="print messages as JSON")
     lp.set_defaults(func=cmd_relay)
 
-    wc = sub.add_parser("watch", help="live-view a room (parses chat turns; great for local mode)")
+    wc = sub.add_parser("watch", help="live-view a local chat room (parses chat turns; a Discord chat is watched in Discord)")
     wc.add_argument("room", nargs="?", help="room name/id (default: the chat room)")
     wc.add_argument("--all", action="store_true", help="interleave ALL local rooms into one stream (local only)")
     wc.add_argument("-f", "--follow", action="store_true", help="keep streaming new messages")
@@ -944,7 +947,7 @@ def build_parser() -> argparse.ArgumentParser:
     tp.add_argument("-n", "--limit", type=int, default=200, help="how many recent messages to load first (default 200)")
     tp.set_defaults(func=cmd_tui)
 
-    pp = sub.add_parser("purge", help="delete old messages (on request; safe defaults)")
+    pp = sub.add_parser("purge", help="delete the bot's messages (all of them in the last --limit unless --older-than; asks first unless --yes)")
     pp.add_argument("-c", "--channel", help="channel name (from config) or raw id")
     pp.add_argument("--older-than", help="only delete messages older than this (e.g. 7d, 24h, 30m)")
     pp.add_argument("--all", action="store_true", help="delete everyone's messages, not just the bot's (needs Manage Messages)")

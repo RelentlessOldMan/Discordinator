@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -29,6 +31,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-real-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
 os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
@@ -36,7 +41,6 @@ for _k in ("DISCORD_BOT_TOKEN", "DISCORDINATOR_CHAT_HANDLE", "DISCORDINATOR_CHAT
            "DISCORDINATOR_LABEL", "DISCORDINATOR_RELAY_CHANNEL", "DISCORDINATOR_SESSION_ID"):
     os.environ.pop(_k, None)
 os.environ["PYTHONPATH"] = SRC + os.pathsep + os.environ.get("PYTHONPATH", "")
-os.chdir(_TMP)  # never the repo: a .env there would be picked up
 sys.path.insert(0, SRC)
 
 from discordinator import chat, events  # noqa: E402

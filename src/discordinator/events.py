@@ -4,25 +4,34 @@ taking its name back, a chat call refused or failing. `discordinator watch`
 merges these into its view, so a human can see why a chat went quiet.
 
 One JSON line per event in ~/.discordinator/events.jsonl. Writing is best
-effort (it must never break a tool call), and old lines are dropped once the
-file grows, like local rooms (7 days).
+effort (it must never break a tool call). Once the log grows past ``ROTATE_AT``
+it becomes events.1.jsonl (replacing the one before) and a new log starts, so
+an append never rewrites the file and a follower never loses its place.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from . import config
 
-KEEP = timedelta(days=7)
-TRIM_AT = 512 * 1024  # bytes: prune old lines once the log is this big
+ROTATE_AT = 512 * 1024  # bytes: start a new log once this one is this big
+
+# Where a follower is: the first line of the log it's reading (which names that
+# log, since every line is unique) and the byte offset it read up to.
+Cursor = tuple[Optional[bytes], int]
 
 
-def log_path():
+def log_path() -> Path:
     return config.config_path().parent / "events.jsonl"
+
+
+def _rotated() -> Path:
+    return log_path().with_name("events.1.jsonl")
 
 
 def record(kind: str, **fields: Any) -> None:
@@ -32,53 +41,36 @@ def record(kind: str, **fields: Any) -> None:
     try:
         path = log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        if path.stat().st_size > TRIM_AT:
-            _trim(path)
+        line = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
+        try:  # so a rotation can't move the file away mid-append
+            lock: Optional[config.FileLock] = config.FileLock(path, timeout=1.0).__enter__()
+        except config.LockTimeout:
+            lock = None  # a stuck lock mustn't cost the event
+        try:
+            if lock is not None and path.exists() and path.stat().st_size > ROTATE_AT:
+                try:
+                    os.replace(path, _rotated())  # once: Windows refuses while it's open
+                except OSError:
+                    pass  # rotate on a later event; this one is appended regardless
+            with open(path, "ab") as fh:
+                fh.write(line)
+        finally:
+            if lock is not None:
+                lock.__exit__(None, None, None)
     except Exception:  # noqa: BLE001 - the log is a convenience
         pass
 
 
-def _trim(path) -> None:
-    horizon = datetime.now(timezone.utc) - KEEP
-    with config.FileLock(path, timeout=1.0):
-        kept = [line for line, e in _lines(path) if (_ts(e) or horizon) >= horizon]
-        config._atomic_write(path, "".join(kept))
-
-
-def _lines(path):
+def _first_line(path: Path) -> Optional[bytes]:
     try:
-        with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    e = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(e, dict):
-                    yield line, e
+        with open(path, "rb") as fh:
+            return fh.readline() or None
     except OSError:
-        return
-
-
-def _ts(e: dict[str, Any]) -> Optional[datetime]:
-    try:
-        t = datetime.fromisoformat(str(e.get("ts")))
-    except ValueError:
         return None
-    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
-def read(offset: int = 0) -> tuple[list[dict[str, Any]], int]:
-    """Events from byte ``offset`` on, and the offset to continue from."""
-    path = log_path()
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return [], 0
-    if size < offset:
-        offset = 0  # trimmed since: start over
-    out = []
+def _tail(path: Path, offset: int) -> tuple[list[dict[str, Any]], int]:
+    """Whole-line events in ``path`` from byte ``offset``, and where they end."""
     try:
         with open(path, "rb") as fh:
             fh.seek(offset)
@@ -86,6 +78,7 @@ def read(offset: int = 0) -> tuple[list[dict[str, Any]], int]:
     except OSError:
         return [], offset
     end = data.rfind(b"\n") + 1  # only whole lines; a half-written one waits
+    out = []
     for line in data[:end].splitlines():
         try:
             e = json.loads(line)
@@ -96,10 +89,40 @@ def read(offset: int = 0) -> tuple[list[dict[str, Any]], int]:
     return out, offset + end
 
 
-def recent(since: datetime) -> tuple[list[dict[str, Any]], int]:
-    """Events at or after ``since``, and the offset to follow on from."""
-    events, offset = read(0)
-    return [e for e in events if (_ts(e) or since) >= since], offset
+def read(cursor: Any = 0) -> tuple[list[dict[str, Any]], Cursor]:
+    """Events after ``cursor`` (0: every event kept, oldest first), and the
+    cursor to continue from. A log rotated since is read to its end first."""
+    path = log_path()
+    current = _first_line(path)
+    if not cursor:
+        older, _ = _tail(_rotated(), 0)
+        newer, offset = _tail(path, 0)
+        return older + newer, (current, offset)
+    mark, offset = cursor
+    if current is None:
+        return [], (mark, offset)
+    if current == mark:
+        evs, offset = _tail(path, offset)
+        return evs, (current, offset)
+    rest: list[dict[str, Any]] = []
+    if mark is not None and _first_line(_rotated()) == mark:
+        rest, _ = _tail(_rotated(), offset)  # the rest of the log we were following
+    newer, offset = _tail(path, 0)
+    return rest + newer, (current, offset)
+
+
+def recent(since: datetime) -> tuple[list[dict[str, Any]], Cursor]:
+    """Events at or after ``since``, and the cursor to follow on from."""
+    events, cursor = read(0)
+    return [e for e in events if (_ts(e) or since) >= since], cursor
+
+
+def _ts(e: dict[str, Any]) -> Optional[datetime]:
+    try:
+        t = datetime.fromisoformat(str(e.get("ts")))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
 def describe(e: dict[str, Any]) -> str:
@@ -124,4 +147,3 @@ def describe(e: dict[str, Any]) -> str:
     if kind == "lost_turn":
         return f"? {who}{room}: {e.get('note', '')}"
     return f"· {who}{room}: {kind}"
-

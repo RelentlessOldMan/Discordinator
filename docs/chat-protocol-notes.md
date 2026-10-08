@@ -56,7 +56,9 @@ so it's correct even after an end, a crash, or an out-of-band reply.
    participant (bot-authored, untagged) now returns as `status="plain"` instead of
    being ignored — a non-`chat_say` reply can no longer strand the awaiter. (Real
    humans, i.e. non-bot authors, still come back as `from="human"`, and `stop`
-   still ends the chat.)
+   still ends the chat.) *Superseded in v1.0.36: there is no `plain` status any
+   more. An untagged bot post is nobody's turn; a session that owes a reply and
+   uses `send_message` has it posted as its chat turn (v1.0.34).*
 
 2. **`chat_status(chatter?, channel?)` — a structured state query.** Returns
    `{session_active, ended, participants, multiparty, last_turn, pending_turn,
@@ -100,9 +102,9 @@ so it's correct even after an end, a crash, or an out-of-band reply.
 - **No push to dormant sessions.** Discordinator can't wake a session that isn't
   running; the design accepts that and makes the "turn owed" signal *pullable*
   (`chat_status`) rather than pretending to push.
-- **No auto-`chat_say` on plain replies.** A plain reply is surfaced as `plain`;
-  the model decides whether to treat it as the other side's turn. We don't silently
-  convert `send_message` into a chat turn.
+- ~~**No auto-`chat_say` on plain replies.**~~ *Reversed in v1.0.34: a
+  `send_message` to the chat room from a session that owes a reply is posted as
+  its chat turn to whoever asked. Any other untagged post is nobody's turn.*
 
 ## A second failure: chatting on a relay channel (v1.0.11)
 
@@ -224,7 +226,7 @@ over the protocol:
 | Two sessions on one machine save their read positions at the same moment | `state.json` is updated under a cross-process lock, and a file Windows briefly refuses to open or replace is retried, so one session can't erase another's position (which used to hand it old turns) or crash with "Access is denied". |
 | Two separate chats share the room | An unaddressed reply goes to whoever handed you the turn. Whose turn it is gets worked out per session, so one pair's turn doesn't hide another's. A newcomer is told another chat is going on and to address its opener. An unaddressed turn that would talk over someone else's floor is refused before posting. |
 | Two sessions both answer a human's kickoff | The first reply goes out; the second `chat_say` is refused ("A posted something you haven't read") and the session reads that reply instead. |
-| A session answers with plain `send_message` | It counts as the floor holder's turn: delivered to the side that handed them the floor, not echoed back to its sender. |
+| A session answers with plain `send_message` | It counts as the floor holder's turn: delivered to the side that handed them the floor, not echoed back to its sender. *(Changed in v1.0.34/v1.0.36: such a reply is posted as a proper chat turn; an untagged post is nobody's turn.)* |
 | `chat_say` fails after posting (or a Discord response is lost) | It returns `posted: true` with the error instead of raising, so it isn't sent twice. Discord posts carry a nonce, so a retried request returns the first message instead of posting a copy. |
 | A human remark starts with "Stop ..." or "End ..." | Only a message that is just a stop word ends the chat. |
 
@@ -280,3 +282,20 @@ now drives real server processes over stdio.
 | Two sessions of one project relay | Each chatting session has its own read position (by handle), and a position never moves backwards. |
 | A peer proposes `wrap` / others chat without you | `next` says to confirm with `end` / to raise a hand with `ask`. |
 | Something goes wrong out of sight | `watch` shows session events from `~/.discordinator/events.jsonl`: connects, disconnects, vanished servers, joins, renames, failed calls with the reason. |
+
+## A broad review of the whole codebase (v1.0.42)
+
+| What happened | Now |
+|---|---|
+| A session waiting on a long job while 100+ messages from other chats pass | State reads back to the session's own latest post too, so its conversation (and the peer's `working`) stays in view: no reminder despite `working`, no turn handed over by a human remark, no pull into a newcomer's opener. |
+| A peer said `working` 35 minutes ago | Its conversation is kept for the 60 minutes reminders hold off for it, not dropped at 30. |
+| `chat_await(from_whom=B)` while C sends you a turn | C's turn is kept and your next `chat_await` returns it, instead of being skipped for good. |
+| The server stops mid-`chat_await` with part of a long turn read | The pieces are kept, and the next server delivers the turn whole. |
+| A session in no chat sends an unaddressed `end` | It ends nothing for sessions that haven't said anything yet (still waiting for an opener). |
+| A wait reads many messages in a busy room | Its read position is written once per batch, not once per message. |
+| A reminder fired during one wait | A new turn starts a fresh wait: no stale "a reminder was posted", and the next reminder can fire. |
+| A human types something like `[URGENT\|fyi] prod is down` | Only the bot posts chat turns, with a real status: it's a human remark. |
+| A session asks to be called `human` or `all` | Refused - nobody could address it, or its turns would read as the human's. |
+| Addressing a peer whose last post is 100+ messages back | No "nobody called that" warning. |
+| The client disconnects while a long `chat_say` is posting | The server lets calls in progress finish (up to 20s) before it exits. |
+| `watch` / `tui` / `interject` / `stop` with this shell's chat on Discord | They always act on local rooms (a Discord chat is watched in Discord), defaulting to the local room this machine's sessions last used. |

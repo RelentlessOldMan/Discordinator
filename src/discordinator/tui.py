@@ -95,7 +95,7 @@ class ChatTUI(App):
         ts = (m.get("timestamp") or "")[11:19]
         t = Text("\n")  # blank line before each timestamped message
         t.append(f"{ts} ", style="dim")
-        parsed = chat.parse(m["content"])
+        parsed = chat.parse_msg(m)
         if parsed:  # a chat turn
             handle, to = parsed["participant"], parsed["to"]
             status, body = parsed["status"], parsed["body"] or ""

@@ -12,7 +12,9 @@ Run:  python tests/test_handles.py
 from __future__ import annotations
 
 import json
+import atexit
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,6 +22,9 @@ import time
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-handles-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
 os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
@@ -225,7 +230,8 @@ def test_status_uses_session_name_without_claiming() -> None:
         check(st["your_turn"] is True, "answered for CC/ui (the turn is owed to it)")
         reg = json.loads(handles.registry_path().read_text(encoding="utf-8"))
         check("cc" not in reg and "cc/ui" in reg, f"bare 'CC' not claimed: {sorted(reg)}")
-        check(handles.current(None, {}) is None or True, "current() never raises")
+        check(handles.current(None, {}) == "ui",
+              "with no project handle in the config, current() gives the bare role (no raise)")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
     _fresh()
@@ -389,8 +395,8 @@ def test_name_taken_meanwhile_isnt_shared() -> None:
         h2, note = handles.resolve("ProjQ/ui", cfg)
         check(h2 == "ProjQ/ui-2", f"this session moves to ProjQ/ui-2, not a shared name: {h2}")
         check(note and "ProjQ/ui-2" in note, "and is told so")
-        check("/ui/ui" not in note and "'ProjQ/ui'" in note.split("e.g.")[1],
-              f"the note's example is a real handle: {note.split('e.g.')[1]}")
+        check("/ui/ui" not in note and "'ProjQ/api'" in note.split("e.g.")[1],
+              f"the note's example is a real handle nobody holds: {note.split('e.g.')[1]}")
         again, _ = handles.resolve("ProjQ/ui-2", cfg)
         check(again == "ProjQ/ui-2", "and it keeps that name")
     finally:
@@ -537,6 +543,69 @@ def test_claims_say_since_when() -> None:
     check(handles._since.get("projq/ui") == first, "and a restart picks it back up")
 
 
+def test_two_live_servers_of_one_session_dont_share() -> None:
+    print("two live servers with one session key (a shared DISCORDINATOR_SESSION_ID) get two names:")
+    _fresh()
+    handles._SESSION_KEY = "id:shared"
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        time.sleep(0.3)
+        path = handles.registry_path()
+
+        def plant(started) -> None:
+            path.write_text(json.dumps({"projq": {
+                "handle": "ProjQ", "pid": other.pid, "ts": time.time(), "since": time.time(),
+                "started": started, "session": "id:shared"}}), encoding="utf-8")
+
+        plant(handles.process_started(other.pid))  # started after this server
+        h, _ = handles.resolve(None, {"chat_handle": "ProjQ"}, fresh=True)
+        check(h == "ProjQ-2", f"a newer live server with the same key keeps its name: {h}")
+        _fresh()
+        handles._SESSION_KEY = "id:shared"
+        plant(handles._my_start() - 10_000_000)  # an older one: this session's previous server
+        h, _ = handles.resolve(None, {"chat_handle": "ProjQ"}, fresh=True)
+        check(h == "ProjQ", f"the session's previous server's name is taken over: {h}")
+    finally:
+        other.kill()
+        handles._SESSION_KEY = None
+        handles.sessions_path().unlink(missing_ok=True)
+
+
+def test_plain_name_freed_when_a_role_is_taken() -> None:
+    print("a session that takes a role frees the plain project name it had:")
+    _fresh()
+    cfg = {"chat_handle": "ProjQ"}
+    check(handles.resolve(None, cfg)[0] == "ProjQ", "first the plain name")
+    check(handles.resolve("ui", cfg)[0] == "ProjQ/ui", "then a role")
+    held = handles.live_handles()
+    check("ProjQ" not in held and "ProjQ/ui" in held, f"only the role is held now: {held}")
+
+
+def test_process_info_without_proc() -> None:
+    print("with no /proc (macOS), process info comes from ps:")
+    if os.name == "nt":
+        print("  skip: Windows has its own API")
+        return
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    real = handles._HAS_PROC
+    try:
+        time.sleep(0.3)
+        handles._HAS_PROC = False
+        started = handles.process_started(child.pid)
+        check(isinstance(started, int) and started == handles.process_started(child.pid),
+              f"a stable start stamp: {started}")
+        parent, name = handles.process_parent(child.pid)
+        check(parent == os.getpid() and name and "python" in name.lower(),
+              f"its parent and name: {parent}, {name}")
+        check("time.sleep(30)" in (handles.process_cmdline(child.pid) or ""), "its command line")
+        child.kill()
+        child.wait()
+        check(handles.process_started(child.pid) is None, "nothing for a process that's gone")
+    finally:
+        handles._HAS_PROC = real
+        child.kill()
+
+
 def main() -> int:
     test_compose()
     test_pid_alive()
@@ -559,6 +628,9 @@ def main() -> int:
     test_id_session_names_free_up_when_its_server_is_gone()
     test_reserved_names_dont_walk_the_process_table()
     test_claims_say_since_when()
+    test_two_live_servers_of_one_session_dont_share()
+    test_plain_name_freed_when_a_role_is_taken()
+    test_process_info_without_proc()
     print(f"\nALL {_passed} HANDLE CHECKS PASSED")
     return 0
 

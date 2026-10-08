@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 import secrets
 import time
 from pathlib import Path
@@ -50,8 +51,11 @@ def chunk_content(content: str, limit: int = MAX_MESSAGE_LEN,
                   prefixed: bool = False) -> list[str]:
     """Split ``content`` into pieces that respect Discord's per-message limit,
     preferring to break on newline boundaries. ``prefixed``: each piece will be
-    sent after a label (``[laptop] ...``), so it may start with whitespace."""
-    return [c for c, _sep in split_chunks(content, limit, prefixed)]
+    sent after a label (``[laptop] ...``), so it may start with whitespace.
+    A piece of nothing but whitespace (a long blank run with no label) is
+    dropped: Discord would refuse it as empty, failing the send midway."""
+    pieces = [c for c, _sep in split_chunks(content, limit, prefixed)]
+    return [c for c in pieces if prefixed or c.strip()] or pieces[:1]
 
 
 def split_chunks(content: str, limit: int = MAX_MESSAGE_LEN,
@@ -68,6 +72,9 @@ def split_chunks(content: str, limit: int = MAX_MESSAGE_LEN,
     at the limit."""
     if len(content) <= limit:
         return [(content, "")]
+    if limit < 1:  # a label as long as a whole message leaves no room
+        raise ValueError(f"no room for text in a {MAX_MESSAGE_LEN}-character message "
+                         "after the label - use a shorter label")
 
     def ws(i: int) -> bool:
         return 0 <= i < len(rest) and rest[i].isspace()
@@ -213,7 +220,8 @@ class DiscordClient:
         missing files raise a ``DiscordError`` *before* anything is sent. Discord
         caps a message at ``MAX_FILES_PER_MESSAGE`` attachments, so larger lists
         are split across several messages (the text ``content`` rides only the
-        first). ``label`` is prefixed to the content, as with
+        first; text too long for one message goes out ahead of it, split as
+        :meth:`send_message` does). ``label`` is prefixed to the content, as with
         :meth:`send_message`, so relay self-filtering still works. Returns the
         created message object(s).
 
@@ -233,9 +241,14 @@ class DiscordClient:
                     "per-file upload limit (Discord, non-boosted server)."
                 )
         prefix = f"[{label}] " if label else ""
-        full = f"{prefix}{content}" if content else prefix.strip()
-
         sent: list[dict[str, Any]] = []
+        # Text past one message goes out first; its last piece rides with the files.
+        pieces = chunk_content(content, MAX_MESSAGE_LEN - len(prefix),
+                               prefixed=bool(prefix)) if content else [""]
+        for piece in pieces[:-1]:
+            sent += self.send_message(channel_id, piece, label=label)
+        full = f"{prefix}{pieces[-1]}" if pieces[-1] else prefix.strip()
+
         for start in range(0, len(paths), MAX_FILES_PER_MESSAGE):
             batch = paths[start : start + MAX_FILES_PER_MESSAGE]
             files_payload = [
@@ -369,7 +382,10 @@ def _filename_from_url(url: str) -> str:
     last path segment, percent-decoded. Falls back to 'attachment'."""
     path = urlparse(url).path
     name = unquote(path.rsplit("/", 1)[-1]) if path else ""
-    return name or "attachment"
+    # Decoding can bring back separators ("..%2F", "C%3A%5C..."): keep only the
+    # final component so the file always lands inside the chosen directory.
+    name = re.split(r"[/\\]", name)[-1].rsplit(":", 1)[-1].strip()
+    return name if name not in ("", ".", "..") else "attachment"
 
 
 def _unique_in_dir(directory: Path, name: str) -> Path:

@@ -11,7 +11,9 @@ Run:  python tests/test_shared_room.py
 from __future__ import annotations
 
 import json
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -19,6 +21,9 @@ import time
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-shared-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
 os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
@@ -214,6 +219,7 @@ def test_relay_between_two_sessions() -> None:
         mcp._sent_ids.update(sent.get(label, set()))
         current["label"] = label
         os.environ["DISCORDINATOR_LABEL"] = label
+        handles._SESSION_KEY = "id:" + label  # its own Claude Code session
 
     try:
         as_session("sessA")
@@ -231,6 +237,7 @@ def test_relay_between_two_sessions() -> None:
     finally:
         os.environ.pop("DISCORDINATOR_LABEL", None)
         mcp._sent_ids.clear()
+        handles._SESSION_KEY = None
 
 
 def test_config_set_saves_only_the_setting() -> None:
@@ -290,6 +297,30 @@ def test_two_answers_at_once() -> None:
     check(sorted(results.values()) == ["posted", "refused"], f"one posts, one is refused: {results}")
 
 
+def test_relay_after_restart_and_transport_switch() -> None:
+    print("a restarted server doesn't return its own messages; a position from the other transport heals:")
+    os.environ["DISCORDINATOR_LABEL"] = "restarter"
+    try:
+        mcp.send_message("mine, before the restart", channel="restart-room")
+        mcp._sent_ids.clear()  # a new server process after /mcp reconnect
+        check(mcp.get_new_messages(channel="restart-room") == [],
+              "its own message isn't handed back after a restart")
+        # A read position far past anything in the room - e.g. kept from the
+        # local transport (time_ns ids) after switching the channel to Discord.
+        reader = mcp._reader(config.load())
+        config.set_cursor("restart-room", str(10 ** 30), reader)
+        LocalClient("other").send_message("restart-room", "from the other side", label="peer")
+        got = mcp.get_new_messages(channel="restart-room")
+        check([m["content"] for m in got] == ["[peer] from the other side"],
+              "a position past the newest message starts over instead of hiding everything")
+        LocalClient("other").send_message("restart-room", "and again", label="peer")
+        got = mcp.get_new_messages(channel="restart-room")
+        check([m["content"] for m in got] == ["[peer] and again"], "and reads go on from there")
+    finally:
+        os.environ.pop("DISCORDINATOR_LABEL")
+        mcp._sent_ids.clear()
+
+
 def test_same_label_sessions_relay() -> None:
     print("two sessions with the SAME label relay to each other:")
     a_sent = set()
@@ -299,6 +330,7 @@ def test_same_label_sessions_relay() -> None:
         os.environ["DISCORDINATOR_CHAT_HANDLE"] = handle
         mcp._sent_ids.clear()
         mcp._sent_ids.update(sent)
+        handles._SESSION_KEY = "id:" + handle  # its own Claude Code session
 
     os.environ["DISCORDINATOR_LABEL"] = "laptop"  # shared, e.g. from `config set-label`
     try:
@@ -321,6 +353,7 @@ def test_same_label_sessions_relay() -> None:
         os.environ.pop("DISCORDINATOR_LABEL")
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
         mcp._sent_ids.clear()
+        handles._SESSION_KEY = None
 
 
 def test_plain_reply_reaches_its_peer() -> None:
@@ -371,6 +404,24 @@ def test_long_work_reply_goes_to_its_asker() -> None:
     check(st["your_turn"], "and it's A's turn")
 
 
+def test_disconnect_lets_a_post_finish() -> None:
+    print("a server whose client hangs up lets a call in progress finish before exiting:")
+    exited = threading.Event()
+    real_exit = os._exit
+    os._exit = lambda code: exited.set()  # type: ignore[assignment]
+    try:
+        with mcp._running_lock:
+            mcp._running += 1  # a long chat_say still posting its pieces
+        mcp._disconnected()
+        check(not exited.wait(2.0), "it doesn't exit while the call is still going")
+        with mcp._running_lock:
+            mcp._running -= 1
+        check(exited.wait(3.0), "and exits once it's done")
+    finally:
+        os._exit = real_exit  # type: ignore[assignment]
+        chat.SHUTDOWN.clear()
+
+
 def main() -> int:
     test_other_chats_end_isnt_mine()
     test_two_pairs_not_multiparty()
@@ -382,9 +433,11 @@ def main() -> int:
     test_relay_between_two_sessions()
     test_config_set_saves_only_the_setting()
     test_two_answers_at_once()
+    test_relay_after_restart_and_transport_switch()
     test_same_label_sessions_relay()
     test_plain_reply_reaches_its_peer()
     test_long_work_reply_goes_to_its_asker()
+    test_disconnect_lets_a_post_finish()
     print(f"\nALL {_passed} SHARED-ROOM CHECKS PASSED")
     return 0
 

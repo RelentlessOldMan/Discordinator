@@ -9,12 +9,17 @@ its own config into a throwaway tree. Run:  python tests/test_config.py
 from __future__ import annotations
 
 import json
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-cfgtest-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -174,6 +179,25 @@ def test_dotenv_parsing() -> None:
     _clear_env()
 
 
+def test_other_projects_dotenv_is_ignored() -> None:
+    print("another project's .env never supplies the token:")
+    _clear_env()
+    proj = _TMP / "someproject" / "sub"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj.parent / ".env").write_text("DISCORD_BOT_TOKEN=other-bots-token\n", encoding="utf-8")
+    _write_config({"token": "home-token"})
+    here = os.getcwd()
+    os.chdir(proj)
+    try:
+        cfg = config.load()
+    finally:
+        os.chdir(here)
+    check(cfg.get("token") == "home-token" and "DISCORD_BOT_TOKEN" not in os.environ,
+          "a session started in another project keeps the home config's token")
+    _rm_config()
+    _clear_env()
+
+
 def test_cursor_state() -> None:
     print("relay cursor state (get/set/clear roundtrip):")
     config.set_cursor("chan-1", "1000")
@@ -217,6 +241,7 @@ def main() -> int:
     test_load_env_precedence()
     test_load_malformed()
     test_dotenv_parsing()
+    test_other_projects_dotenv_is_ignored()
     test_cursor_state()
     test_client_factory()
     print(f"\nALL {_passed} CONFIG CHECKS PASSED")

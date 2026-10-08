@@ -147,6 +147,7 @@ def evaluate(payload: dict) -> Optional[str]:
 
     calls: list[tuple[str, str, dict]] = []  # (tool_use_id, tool, input)
     results: dict[str, Any] = {}
+    unreadable: set[Any] = set()  # results that came back but aren't errors
     for e in entries[start:]:
         if e.get("isSidechain"):
             continue  # a subagent's tools aren't this session's chat
@@ -162,6 +163,8 @@ def evaluate(payload: dict) -> Optional[str]:
                     calls.append((b.get("id"), tool, b.get("input") or {}))
             elif b.get("type") == "tool_result":
                 results[b.get("tool_use_id")] = b.get("content")
+                if _unreadable(b):
+                    unreadable.add(b.get("tool_use_id"))
 
     if not calls:
         return None  # no chat activity this turn: not our business
@@ -175,10 +178,27 @@ def evaluate(payload: dict) -> Optional[str]:
     # Every session's Stop hook shares guard.json: update it under the lock
     # (briefly - the guard must never hold a session up).
     with config.FileLock(_state_path(), timeout=2.0):
-        return _decide(payload, key, calls, results)
+        return _decide(payload, key, calls, results, unreadable)
 
 
-def _decide(payload: dict, key: str, calls: list, results: dict) -> Optional[str]:
+def _unreadable(block: dict) -> bool:
+    """A result that isn't an error but can't be read as the tool's dict - e.g.
+    a long one Claude Code cut short. Whether the chat is still going is then
+    unknown, so it's not a reason to block."""
+    if block.get("is_error") is True:
+        return False
+    if _result_obj(block.get("content")) is not None:
+        return False
+    if block.get("is_error") is False:
+        return True
+    content = block.get("content")
+    if isinstance(content, list):
+        content = "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return isinstance(content, str) and content.lstrip().startswith("{")
+
+
+def _decide(payload: dict, key: str, calls: list, results: dict,
+            unreadable: Optional[set] = None) -> Optional[str]:
     state = _load_state()
     call_id, tool, args = calls[-1]
     if payload.get("stop_hook_active") and state.get(key, {}).get("last") == call_id:
@@ -191,8 +211,8 @@ def _decide(payload: dict, key: str, calls: list, results: dict) -> Optional[str
             res is not None or call_id not in results):
         return None  # ended it (or the call never returned): nothing to strand
     if res is None:
-        if call_id not in results:
-            return None  # never returned: don't guess
+        if call_id not in results or call_id in (unreadable or ()):
+            return None  # never returned, or can't be read: don't guess
         if tool == "chat_say":
             # A failed chat_say: usually nothing was posted, so if it was this
             # session's turn the others are still waiting on it.

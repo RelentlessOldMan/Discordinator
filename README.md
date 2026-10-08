@@ -239,7 +239,9 @@ discordinator version
 discordinator relay --ack
 discordinator read --ack
 
-# PURGE old messages (on request; safe by default). Preview first:
+# PURGE old messages (on request). Only the bot's own messages unless --all; with no
+# --older-than it takes every one in the last --limit (200) scanned, whatever its age.
+# It always asks first (unless --yes). Preview first:
 discordinator purge --channel test --older-than 7d --dry-run
 discordinator purge --channel test --older-than 7d          # prompts, then deletes
 discordinator purge --channel test --older-than 7d --yes    # no prompt
@@ -273,7 +275,9 @@ discordinator purge --channel test --older-than 7d --all    # everyone's (needs 
   messages, paced by Discord's per-channel rate limit.
 - **Plain messages count too.** If you just type a message in the channel
   yourself (no `[label]`), agents still read it — `read_messages` returns
-  everything and `get_new_messages` only filters the bot's own labeled messages.
+  everything, and `get_new_messages` filters out only the messages this session
+  sent (remembered across server restarts), so another session's - even with the
+  same label - and a human's come through.
 
 ---
 
@@ -288,14 +292,19 @@ The MCP server speaks stdio. Register it with your MCP client.
   "mcpServers": {
     "discordinator": {
       "command": "discordinator-mcp",
-      "env": { "DISCORD_BOT_TOKEN": "<YOUR_BOT_TOKEN>" }
+      "env": {
+        "DISCORD_BOT_TOKEN": "<YOUR_BOT_TOKEN>",
+        "DISCORDINATOR_RELAY_TRANSPORT": "discord",
+        "DISCORDINATOR_CHAT_TRANSPORT": "discord"
+      }
     }
   }
 }
 ```
 
-If you already ran `discordinator config set-token`, you can omit the `env`
-block — the server reads the same config file.
+If you already ran `discordinator config set-token` and set both transports
+(`config set-relay-transport` / `set-chat-transport` - there is no default),
+you can omit the `env` block — the server reads the same config file.
 
 ### Tools exposed
 

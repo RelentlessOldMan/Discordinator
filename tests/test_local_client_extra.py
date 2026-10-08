@@ -11,13 +11,18 @@ Run:  python tests/test_local_client_extra.py
 from __future__ import annotations
 
 import json
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 import time
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-lcx-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
 os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
@@ -71,6 +76,26 @@ def test_torn_trailing_line_tolerated() -> None:
     # The next append must not crash and must produce a larger id than the good one.
     after = int(c.post(room, "recovered")["id"])
     check(after > int(good["id"]), "append after a torn line succeeds with a monotonic id")
+    check([m["content"] for m in c.read_messages(room, limit=100)] == ["recovered", "intact record"],
+          "the message appended after the torn line isn't glued onto it and lost")
+
+
+def test_deleting_a_message_keeps_others_files() -> None:
+    print("deleting a message never removes files another message holds:")
+    src = _TMP / "keep.txt"
+    src.write_text("keep me", encoding="utf-8")
+    c = LocalClient(label="files")
+    rec = c.send_files("roomB", "file here", [src])[0]
+    url = Path(rec["attachments"][0]["url"])
+    # Ids are only unique per room: a message in another room (or one with no
+    # attachments) can have the id that names this file's folder.
+    path = c._room_path("roomA")
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"id": url.parent.name, "author": {"id": "files", "bot": True},
+                             "timestamp": "2099-01-01T00:00:00+00:00", "content": "plain note",
+                             "attachments": []}) + "\n")
+    check(c.delete_messages("roomA", [url.parent.name]) == 1, "the plain note was deleted")
+    check(url.exists(), "the other room's attachment is still there")
 
 
 def test_delete_missing_room_noop() -> None:
@@ -295,6 +320,7 @@ def test_delete_when_room_cant_be_rewritten() -> None:
 def main() -> int:
     test_max_id_large_room_tail_read()
     test_torn_trailing_line_tolerated()
+    test_deleting_a_message_keeps_others_files()
     test_delete_missing_room_noop()
     test_append_lock_stale_steal()
     test_append_lock_steal_is_safe()
