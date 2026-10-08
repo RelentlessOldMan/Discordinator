@@ -8,6 +8,17 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.41] - 2026-10-08
+A project's plain name means the same thing to every call; quiet or later sessions don't block it; lighter name checks
+- chat_await and chat_status agree on who a turn to a bare project handle is for: it's worked out once, per turn, as of when it was sent
+- A role silent for 30+ minutes no longer makes the bare name ambiguous while another role is active (a chat dropped without end no longer blocks it)
+- A session running on this machine only counts for turns sent after it took its name, so starting a session doesn't make older turns ambiguous
+- If two roles (one on another machine) both take the same bare turn, the second one's reply is refused: it was for the role that answered first. An end to the bare name with no role around ends nobody's chat
+- Checking which names are taken no longer scans every process for each session record
+- A DISCORDINATOR_SESSION_ID session holds its name while its server runs (plus a short restart grace), not for a week
+- A python whose command line can't be read counts as the session, so two such hosts never share a name
+- Errors from whoami, list_channels and download_attachment aren't filed under the default relay room in watch
+
 ## [1.0.40] - 2026-10-08
 A bare project handle stays ambiguous with two roles running; Python MCP hosts are their own session
 - A turn to a project's bare handle counts the roles running on this machine, so two live roles stay ambiguous after their earlier chats ended (v1.0.39 woke both)
