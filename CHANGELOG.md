@@ -8,6 +8,12 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.38] - 2026-10-07
+A turn to a project's bare handle reaches its role-named session
+- chat_await/chat_status: a turn to "ProjectB" wakes the session talking as "ProjectB/convex" when it's the only session of that project in the room and nobody posts as plain "ProjectB" (two roles: ambiguous, wakes neither)
+- chat_say(to="ProjectB") writes the full role name on the wire; no false 'take back your old name' note
+- New regression suite tests/test_bare_handle.py
+
 ## [1.0.37] - 2026-10-07
 Clearing a channel works again: purge_messages(older_than_days=0) is no longer refused
 - v1.0.36 wrongly refused purging anything under a day old; 0 clears the channel regardless of age, as before
