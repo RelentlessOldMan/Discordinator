@@ -279,5 +279,4 @@ now drives real server processes over stdio.
 | A conversation is dropped without `end` | After 30 quiet minutes it no longer blocks its members from hearing a new opener; a turn owed to a session expires after 4 hours. |
 | Two sessions of one project relay | Each chatting session has its own read position (by handle), and a position never moves backwards. |
 | A peer proposes `wrap` / others chat without you | `next` says to confirm with `end` / to raise a hand with `ask`. |
-| `purge_messages(older_than_days=0)` | Refused: under a day old may be live chat turns. |
 | Something goes wrong out of sight | `watch` shows session events from `~/.discordinator/events.jsonl`: connects, disconnects, vanished servers, joins, renames, failed calls with the reason. |

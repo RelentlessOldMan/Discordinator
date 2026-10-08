@@ -672,12 +672,13 @@ def test_relay_position_per_session_and_forward_only() -> None:
 
 
 def test_purge_floor() -> None:
-    print("purge_messages refuses to touch messages under a day old:")
-    try:
-        mcp.purge_messages(channel="anything", older_than_days=0, dry_run=False)
-        check(False, "older_than_days=0 must be refused")
-    except ValueError as e:
-        check("at least 1" in str(e), "refused with the reason")
+    print("purge_messages(older_than_days=0) clears a room, whatever the age:")
+    c = LocalClient()
+    room = "purgeall"
+    c.send_message(room, "one")
+    chat.send_chat(c, room, "A", "over", "a chat turn", to="B")
+    out = mcp.purge_messages(channel=room, older_than_days=0, only_mine=False, dry_run=False)
+    check(c.read_messages(room, limit=10) == [], f"room is empty: {out}")
 
 
 def test_errors_reach_the_model() -> None:

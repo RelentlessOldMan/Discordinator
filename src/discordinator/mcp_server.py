@@ -358,10 +358,10 @@ def purge_messages(
     """Delete old messages from a channel (housekeeping; destructive).
 
     Defaults are safe: dry_run=True (nothing deleted, just reports what would be),
-    only_mine=True, and messages older than 7 days (never less than 1 day: newer
-    messages may be other sessions' live chat turns). Set dry_run=False to
-    actually delete. Deleting other users' messages (only_mine=False) requires
-    the Manage Messages permission.
+    only_mine=True, and messages older than 7 days. Pass older_than_days=0 to
+    clear the channel regardless of age (that includes any chat going on in it
+    right now). Set dry_run=False to actually delete. Deleting other users'
+    messages (only_mine=False) requires the Manage Messages permission.
 
     "Mine" is the bot's (on a local room: this machine label's) messages - every
     machine posts as the same bot, and every session on a machine shares its
@@ -369,7 +369,7 @@ def purge_messages(
 
     Args:
         channel: Configured channel name or raw id. Defaults to the default channel.
-        older_than_days: Only affect messages older than this many days (min 1).
+        older_than_days: Only affect messages older than this many days (0 = all).
         only_mine: If true (default), only delete the bot's / label's messages.
         scan_limit: How many recent messages to scan.
         dry_run: If true (default), report but do not delete.
@@ -378,11 +378,6 @@ def purge_messages(
     """
     from datetime import datetime, timedelta, timezone
 
-    if older_than_days < 1:
-        raise ValueError(
-            "older_than_days must be at least 1: newer messages may be live chat turns "
-            "of other sessions. (To wipe a local room now, delete its .jsonl file while "
-            "no session is chatting there.)")
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
