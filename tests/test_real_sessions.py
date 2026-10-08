@@ -112,11 +112,13 @@ def test_reconnect_while_waiting_keeps_the_name() -> None:
         await a1.call("chat_say", text="please review X", chatter="ui", channel="r1",
                       to="ProjB", wait=False)
         await a1.stop()  # /mcp reconnect: the server goes, the session stays
-        chat.send_chat(LocalClient(), "r1", "ProjB", "over", "reviewed: fine", to="ProjA/ui")
         a2 = await Session("sess-a", handle="ProjA").start()
-        r = await a2.call("chat_await", channel="r1", timeout=5, poll=0.2)  # no chatter: forgot it
+        first = await a2.call("chat_await", channel="r1", timeout=0.5, poll=0.1)  # no chatter
+        check(first.get("timed_out"), "nothing yet - still waiting")
+        chat.send_chat(LocalClient(), "r1", "ProjB", "over", "reviewed: fine", to="ProjA/ui")
+        r = await a2.call("chat_await", channel="r1", timeout=5, poll=0.2)
         check(r.get("from") == "ProjB" and r.get("text") == "reviewed: fine",
-              f"the new server receives the reply: {str(r)[:80]}")
+              f"the reply that comes later reaches it: {str(r)[:80]}")
         await a2.stop()
     run(go())
 
@@ -145,23 +147,43 @@ def test_old_server_left_running_doesnt_take_the_name() -> None:
 
 def test_disconnect_ends_a_wait_promptly() -> None:
     print("a server whose client hangs up mid-wait exits at once:")
+    import subprocess
+    env = {**os.environ, "DISCORDINATOR_SESSION_ID": "sess-w", "DISCORDINATOR_CHAT_HANDLE": "ProjW"}
+    p = subprocess.Popen([sys.executable, "-m", "discordinator.mcp_server"], cwd=str(_TMP),
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, env=env)
+
+    def send(msg: dict) -> None:
+        p.stdin.write((json.dumps(msg) + "\n").encode())
+        p.stdin.flush()
+
+    send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+          "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                     "clientInfo": {"name": "test", "version": "1"}}})
+    p.stdout.readline()
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+          "params": {"name": "chat_begin", "arguments": {"channel": "r3"}}})
+    p.stdout.readline()
+    send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+          "params": {"name": "chat_await",
+                     "arguments": {"channel": "r3", "timeout": 60, "poll": 0.2, "nudge_after": 0}}})
+    time.sleep(1.0)
+    t0 = time.monotonic()
+    p.stdin.close()  # the client hangs up; nothing kills the process
+    try:
+        p.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+    took = time.monotonic() - t0
+    check(took < 10, f"exited {took:.1f}s after the client hung up (its wait had 60s left)")
 
     async def go():
-        s = await Session("sess-w", handle="ProjW").start()
-        await s.call("chat_begin", channel="r3")
-        task = asyncio.create_task(s.call("chat_await", channel="r3", timeout=60, poll=0.2))
-        await asyncio.sleep(1.0)
-        task.cancel()
-        t0 = time.monotonic()
-        try:
-            await s.stop()
-        except BaseException:  # noqa: BLE001 - the cancelled call may surface here
-            pass
-        check(time.monotonic() - t0 < 15, f"stopped in {time.monotonic() - t0:.1f}s, not 60")
         chat.send_chat(LocalClient(), "r3", "Peer", "over", "for ProjW", to="ProjW")
         s2 = await Session("sess-w", handle="ProjW").start()
         r = await s2.call("chat_await", channel="r3", timeout=5, poll=0.2)
-        check(r.get("text") == "for ProjW", "the old server didn't use up the reply")
+        check(r.get("text") == "for ProjW", "the session's next server gets the reply")
         await s2.stop()
     run(go())
 
