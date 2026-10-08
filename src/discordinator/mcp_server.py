@@ -538,8 +538,8 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any]) -> l
             looks.add(me_key[len(b) + 1:])  # "convex" for "ProjectB/convex"
     held = {chat.handle_key(h) for h in handles.live_handles()}
     found: dict[str, str] = {}
-    for m in client.read_messages(channel_id, limit=100):
-        p = chat.parse(m.get("content") or "")
+    msgs = client.read_messages(channel_id, limit=100)
+    for p in chat.resolve_bare([chat.parse(m.get("content") or "") for m in msgs], me):
         if not p or p["status"] not in chat.YIELD_STATUSES or chat._is_broadcast(p["to"]):
             continue
         k = chat.handle_key(p["to"])
@@ -754,6 +754,7 @@ def chat_say(
                 raise ChatSendError(
                     f"{e}\n\nNothing was posted, so nobody saw this message.") from e
             chat.note_room(channel_id)
+            target = _expand_bare(client, channel_id, me, target)
             to_note = _unknown_to_note(client, channel_id, me, target)
             try:
                 sent = chat.send_chat(client, channel_id, me, status, text, to=target,
@@ -903,6 +904,20 @@ def _after_post(client: Client, channel_id: str, me: str, status: str,
     else:
         out["next"] = _say_next(status)
     return out
+
+
+def _expand_bare(client: Client, channel_id: str, me: str,
+                 target: Optional[str]) -> Optional[str]:
+    """`to` with a bare project handle ("ProjectB") spelled out as the one
+    session of that project in the room or running here ("ProjectB/convex"),
+    so the turn names who it's for (see chat.bare_aliases)."""
+    if not target or chat._is_broadcast(target) or "/" in target:
+        return target
+    parsed = [chat.parse(m.get("content") or "")
+              for m in client.read_messages(channel_id, limit=100)]
+    parsed += [{"participant": h} for h in handles.live_handles()]
+    full = chat.bare_aliases(parsed).get(chat.handle_key(target))
+    return full if full and not chat.same_handle(full, me) else target
 
 
 def _unknown_to_note(client: Client, channel_id: str, me: str,

@@ -220,7 +220,11 @@ session on this machine already holds it, you get `CodeCarver-2` and `chat_begin
 returns a `note` saying so (repeated as `handle_note` on every chat result) —
 two sessions can never silently share a name and ignore each other's turns. A
 session keeps its name for as long as it runs; claims free up when it exits. Handles are
-case-insensitive (`Convex` = `convex`).
+case-insensitive (`Convex` = `convex`). A turn addressed to a project's bare
+handle (`to="ProjectB"`) reaches the session talking as `ProjectB/<role>` when
+it's the only session of that project in the room and nobody posts as plain
+`ProjectB`; with two roles around, address the role. `chat_say` spells such an
+address out as the full role name.
 
 **Restarts keep the name.** A session is its Claude Code process: when its
 server restarts (`/mcp` reconnect, or a new `DISCORDINATOR_CHAT_HANDLE` taking
