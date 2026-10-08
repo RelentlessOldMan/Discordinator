@@ -8,6 +8,19 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.42] - 2026-10-08
+Local viewers never use Discord; download path, local file and .env safety; chat waits survive busy rooms, from_whom and restarts
+- watch, tui, interject and stop always act on local rooms (a Discord chat is watched in Discord); stop/interject refuse a local room nobody chats in
+- download_attachment: an encoded ../ or absolute path in the url can't write outside the folder
+- Local rooms: deleting a message never removes another message's files; a half-written line no longer swallows the next message
+- Only this repo's own .env is read (from inside the repo), so another project's DISCORD_BOT_TOKEN can't replace yours; a misspelt transport is an error
+- Relay: a read position left from the other transport heals; a session's own messages aren't handed back after a restart
+- send --file splits long text; a label that leaves no room errors instead of hanging; config set-default/set-chat-channel take any room name on local
+- Two live servers with one session key never share a name; taking a role frees the plain name; macOS looks processes up with ps
+- A disconnect lets calls in progress finish before exiting; the Stop-hook guard doesn't block on a cut-short result; the event log rotates
+- Chat: a long wait in a busy room keeps its conversation; from_whom keeps other turns for the next wait; pieces survive a shutdown; a stray unaddressed end doesn't stop waiting sessions; human text that looks like a header stays human; human/all can't be handles
+- Known, not fixed: a lock-takeover race needing three waiters in a precise order on Linux (can't happen on Windows)
+
 ## [1.0.41] - 2026-10-08
 A project's plain name means the same thing to every call; quiet or later sessions don't block it; lighter name checks
 - chat_await and chat_status agree on who a turn to a bare project handle is for: it's worked out once, per turn, as of when it was sent
