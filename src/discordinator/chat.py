@@ -202,61 +202,81 @@ def _project_of(handle: Optional[str]) -> Optional[str]:
 
 
 def bare_aliases(parsed: list[Optional[dict[str, Any]]], me: Optional[str] = None,
-                 live: Any = ()) -> dict[str, str]:
+                 live: Any = (), stamps: Optional[list[Any]] = None) -> dict[str, str]:
     """Bare project handles that stand for one session's `<project>/<role>`
-    handle in this room: a peer that only knows the project's name ("ProjectB")
-    still reaches the session talking as "ProjectB/convex". Only when nobody
-    posts under the bare name itself and exactly one role of that project is
-    around (in a chat still going, running on this machine - ``live``, a list
-    or a function returning one - or is ``me``) - with two roles a bare
-    address stays ambiguous and wakes neither. A chat that ended (end/impasse)
-    takes its members out until they post again."""
-    return _bare_walk(parsed, me, live)[0]
+    handle in this room now: a peer that only knows the project's name
+    ("ProjectB") still reaches the session talking as "ProjectB/convex". Only
+    when nobody posts under the bare name itself and exactly one role of that
+    project is around - in a chat in the room (one that spoke in the last
+    STALE_AFTER; failing that, one whose chat never ended), running on this
+    machine (``live``: handles, or (handle, running-since) pairs, or a function
+    returning them), or ``me``. With two roles around a bare address stays
+    ambiguous and wakes neither. A chat that ended (end/impasse) takes its
+    members out until they post again. ``stamps`` are the turns' times."""
+    return _bare_walk(parsed, me, live, stamps)[0]
 
 
 def _is_bare(to: Optional[str]) -> bool:
     return not _is_broadcast(to) and "/" not in handle_key(to)
 
 
+def _when(v: Any) -> Optional[datetime]:
+    if v is None or isinstance(v, datetime):
+        return v
+    if isinstance(v, (int, float)):
+        return datetime.fromtimestamp(v, timezone.utc)
+    return _parse_ts(v)
+
+
 def _bare_walk(parsed: list[Optional[dict[str, Any]]], me: Optional[str], live: Any,
+               stamps: Optional[list[Any]] = None,
                ) -> tuple[dict[str, str], dict[int, Optional[str]]]:
     """(bare_aliases; index of each turn addressed to a bare name -> the role
     it stood for when it was sent, or None if it may have meant another).
-    A role still unknown then (nobody of the project in the room yet) is the
-    one that answered it, else ("") the alias at the end."""
-    keys: dict[str, str] = {}
+    A role still unknown then (nobody of the project around yet) is the one
+    that answered it, else ("") the alias at the end. A turn only a session
+    running here could have meant goes to whichever role answers it instead,
+    if one does."""
+    keys: dict[str, str] = {}  # who is in a chat in the room (not ended since)
+    seen: dict[str, Optional[datetime]] = {}  # key -> when it last posted
     at: dict[int, Optional[str]] = {}
-    waiting: dict[tuple[str, str], list[int]] = {}  # (project, sender) -> unanswered bare turns
-    live_list: Optional[list[str]] = None
+    waiting: dict[tuple[str, str], list[int]] = {}  # (project, sender) -> unsettled bare turns
+    live_list: Optional[list[tuple[str, Optional[datetime]]]] = None
 
-    def here() -> list[str]:
+    def here() -> list[tuple[str, Optional[datetime]]]:
         nonlocal live_list
         if live_list is None:
             try:
-                live_list = list(live() if callable(live) else live)
+                got = list(live() if callable(live) else live)
             except Exception:
-                live_list = []
+                got = []
+            live_list = [(h, None) if isinstance(h, str) else (h[0], _when(h[1]))
+                         for h in got]
         return live_list
 
+    def roles(base: str, ts: Optional[datetime], extra: list[str]) -> list[str]:
+        """The roles of ``base`` around at ``ts``: in a chat that spoke within
+        STALE_AFTER, or ``extra``; failing those, any whose chat never ended."""
+        chatting = {k: h for k, h in keys.items() if _project_of(k) == base}
+        found = {k: h for k, h in chatting.items()
+                 if ts is None or seen.get(k) is None or seen[k] >= ts - STALE_AFTER}
+        for h in extra:
+            if _project_of(h) == base:
+                found.setdefault(handle_key(h), h)
+        return list((found or chatting).values())
+
     def aliases() -> dict[str, str]:
-        found = dict(keys)
         # Running sessions only matter to a turn addressed to a name nobody
         # posts under (reading them costs a look at the registry).
-        for h in ([me] if me else []) + (here() if needs_live else []):
-            found.setdefault(handle_key(h), h)
-        roles: dict[str, list[str]] = {}
-        for k, h in found.items():
-            base = _project_of(k)
-            if base and base not in found:
-                roles.setdefault(base, []).append(h)
-        return {b: hs[0] for b, hs in roles.items() if len(hs) == 1}
-
-    def then(base: str) -> tuple[bool, Optional[str]]:
-        """(could it mean someone, the one role it meant) as the room stands."""
-        if base in keys:
-            return False, None  # someone posts as the bare name: it's them
-        roles = [h for k, h in keys.items() if _project_of(k) == base]
-        return len(roles) <= 1, (roles[0] if roles else None)
+        extra = ([me] if me else []) + ([h for h, _ in here()] if needs_live else [])
+        now = datetime.now(timezone.utc) if stamps else None
+        out: dict[str, str] = {}
+        for base in {_project_of(k) for k in keys} | {_project_of(h) for h in extra}:
+            if base and base not in keys:
+                found = roles(base, now, extra)
+                if len(found) == 1:
+                    out[base] = found[0]
+        return out
 
     posters = {handle_key(p["participant"]) for p in parsed if p}
     needs_live = any(p and _is_bare(p.get("to")) and handle_key(p["to"]) not in posters
@@ -265,24 +285,33 @@ def _bare_walk(parsed: list[Optional[dict[str, Any]]], me: Optional[str], live: 
         if not p:
             continue
         k = handle_key(p["participant"])
+        ts = _when(stamps[i]) if stamps else None
         keys.setdefault(k, p["participant"])
+        seen[k] = ts
         to = p.get("to")
         base = _project_of(k)
         if base and not _is_broadcast(to):
-            # A role answering a bare turn sent before it was here: it was theirs.
+            # A role answering a bare turn nobody could firmly mean: it was theirs.
             for j in waiting.pop((base, handle_key(to)), []):
                 at[j] = p["participant"]
         if _is_bare(to):
-            ok, role = then(handle_key(to))
-            if not ok or role:
-                at[i] = role if ok else None
+            b = handle_key(to)
+            # Sessions running here count for turns sent since they started.
+            running = [h for h, since in here()
+                       if ts is None or since is None or since < ts] if b not in keys else []
+            firm = roles(b, ts, [])
+            found = roles(b, ts, running)
+            if b in keys or len(found) > 1:
+                at[i] = None  # someone posts as the bare name, or two roles: ambiguous
+            elif found and any(same_handle(found[0], h) for h in firm):
+                at[i] = found[0]
             elif p.get("status") in TERMINAL_STATUSES:
-                at[i] = aliases().get(handle_key(to))  # whose chat it ends: settle it now
+                at[i] = found[0] if found else None  # else nobody's chat to end
             else:
-                # Nobody of the project here yet: the role that answers it, or
-                # failing that whoever the bare name stands for at the end.
-                at[i] = ""
-                waiting.setdefault((handle_key(to), k), []).append(i)
+                # Only a session running here, or nobody of the project yet:
+                # the role that answers it, else that one / the alias at the end.
+                at[i] = found[0] if found else ""
+                waiting.setdefault((b, k), []).append(i)
         if p.get("status") in TERMINAL_STATUSES:
             keys.pop(k, None)
             if not _is_broadcast(to):
@@ -292,11 +321,12 @@ def _bare_walk(parsed: list[Optional[dict[str, Any]]], me: Optional[str], live: 
 
 
 def resolve_bare(parsed: list[Optional[dict[str, Any]]], me: Optional[str] = None,
-                 live: Any = ()) -> list[Optional[dict[str, Any]]]:
+                 live: Any = (), stamps: Optional[list[Any]] = None,
+                 ) -> list[Optional[dict[str, Any]]]:
     """``parsed`` with each turn addressed to a bare project handle readdressed
     to the role it stands for (see bare_aliases) - the role it could only mean
     when it was sent, so an older chat's turns aren't handed to a newcomer."""
-    aliases, at = _bare_walk(parsed, me, live)
+    aliases, at = _bare_walk(parsed, me, live, stamps)
     out = list(parsed)
     for i, role in at.items():
         if role == "":
@@ -306,10 +336,20 @@ def resolve_bare(parsed: list[Optional[dict[str, Any]]], me: Optional[str] = Non
     return out
 
 
-def _live_here() -> list[str]:
-    """Handles held by sessions running on this machine (see handles.live_handles)."""
+def bare_target(parsed: list[Optional[dict[str, Any]]], stamps: list[Any], sender: str,
+                to: str, live: Any) -> Optional[str]:
+    """The role a turn from ``sender`` to the bare ``to`` would mean if sent
+    now (None when it's ambiguous or no role of the project is around)."""
+    parsed = list(parsed) + [{"participant": sender, "to": to, "status": "over", "body": ""}]
+    stamps = list(stamps) + [datetime.now(timezone.utc)]
+    return _bare_walk(parsed, None, live, stamps)[1].get(len(parsed) - 1) or None
+
+
+def _live_here() -> list[tuple[str, Optional[float]]]:
+    """Sessions running on this machine: (handle, running since) - see
+    handles.live_claims."""
     from . import handles  # (imports this module)
-    return handles.live_handles()
+    return handles.live_claims()
 
 
 def _could_mean(to: Optional[str], me: str) -> bool:
@@ -317,16 +357,51 @@ def _could_mean(to: Optional[str], me: str) -> bool:
     return not _is_broadcast(to) and _project_of(me) == handle_key(to)
 
 
-def _means_me(client: DiscordClient, channel_id: str, to: Optional[str], me: str) -> bool:
+def _room(client: DiscordClient, channel_id: str, me: Optional[str], scan: int = 100,
+          upto: Optional[str] = None,
+          ) -> tuple[list[dict[str, Any]], list[Optional[dict[str, Any]]]]:
+    """The room's recent messages (oldest first) and their chat turns, with
+    bare project handles readdressed to the role each meant (resolve_bare)."""
+    raw = _history(client, channel_id, me, scan, upto)
+    msgs = list(reversed([simplify_message(m) for m in raw]))  # chronological
+    parsed = resolve_bare([parse(m["content"]) for m in msgs], me, _live_here,
+                          [m["timestamp"] for m in msgs])
+    return msgs, parsed
+
+
+def _means_me(client: DiscordClient, channel_id: str, to: Optional[str], me: str,
+              message_id: Optional[str] = None) -> bool:
     """Does a turn addressed ``to`` (not a broadcast) name me, counting my
-    project's bare handle when in this room it can only mean me?"""
+    project's bare handle when it meant me - worked out exactly as
+    compute_state does, so chat_await and chat_status agree?"""
     if same_handle(to, me):
         return True
     if not _could_mean(to, me):
         return False
-    parsed = [parse(m.get("content") or "")
-              for m in reversed(client.read_messages(channel_id, limit=100))]  # oldest first
-    return same_handle(bare_aliases(parsed, me, _live_here).get(handle_key(to)), me)
+    msgs, parsed = _room(client, channel_id, me)
+    i = next((i for i, m in enumerate(msgs) if str(m["id"]) == str(message_id)), None)
+    if i is not None and parsed[i] is not None:
+        return same_handle(parsed[i]["to"], me)
+    return same_handle(bare_aliases([parse(m["content"]) for m in msgs], me, _live_here,
+                                    [m["timestamp"] for m in msgs]).get(handle_key(to)), me)
+
+
+def bare_taken(client: DiscordClient, channel_id: str, me: str,
+               sender: str) -> Optional[str]:
+    """Another role of my project that ``sender``'s latest turn to our bare
+    project handle turned out to be for (that role answered it), or None."""
+    msgs, parsed = _room(client, channel_id, me)
+    for m, p in zip(reversed(msgs), reversed(parsed)):
+        if p is None or not same_handle(p["participant"], sender):
+            continue
+        if p["status"] not in YIELD_STATUSES:
+            continue
+        raw = parse(m["content"]) or {}
+        if (_could_mean(raw.get("to"), me) and not same_handle(p["to"], me)
+                and _project_of(p["to"]) == _project_of(me)):
+            return p["to"]
+        return None
+    return None
 
 
 _STOP_RE = re.compile(
@@ -792,7 +867,7 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
             # A yielded turn (over/wrap). Does the floor actually come to me?
             if want is not None and not same_handle(sender, want):
                 continue  # waiting specifically for a different peer
-            if not _targets(to, me) and not _means_me(client, channel_id, to, me):
+            if not _targets(to, me) and not _means_me(client, channel_id, to, me, m["id"]):
                 continue  # addressed to another peer — keep holding the wait
             if _is_broadcast(to) and not _broadcast_for_me(client, channel_id, me, m["id"]):
                 continue  # open to all - but in a conversation I'm not part of
@@ -861,9 +936,7 @@ def compute_state(
     are left out - see _conversation. Without `me` (a viewer) it's the room's
     latest chat. ``upto`` stops at that message id, as if nothing came after.
     """
-    raw = _history(client, channel_id, me, scan, upto)
-    msgs = list(reversed([simplify_message(m) for m in raw]))  # chronological
-    parsed_list = resolve_bare([parse(m["content"]) for m in msgs], me, _live_here)
+    msgs, parsed_list = _room(client, channel_id, me, scan, upto)
     scope, room_others = _conversation(msgs, parsed_list, me)
 
     # Scope to the CURRENT chat. A terminal turn (end/impasse) or a human stop
@@ -1227,7 +1300,8 @@ def _owes_reply(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[str,
 def _ends_mine(client: DiscordClient, channel_id: str, me: str,
                p: dict[str, Any], message_id: str) -> bool:
     """Does this end/impasse end MY conversation (not another one in the room)?"""
-    if not _is_broadcast(p.get("to")) and _means_me(client, channel_id, p.get("to"), me):
+    if not _is_broadcast(p.get("to")) and _means_me(client, channel_id, p.get("to"), me,
+                                                    message_id):
         return True
     return bool(compute_state(client, channel_id, me, upto=message_id).get("ended"))
 
@@ -1253,7 +1327,7 @@ def _wakes(client: DiscordClient, channel_id: str, m: dict[str, Any], me: str,
         return _ends_mine(client, channel_id, me, p, m["id"])
     if _is_broadcast(p["to"]):
         return _broadcast_for_me(client, channel_id, me, m["id"])
-    return _means_me(client, channel_id, p["to"], me)
+    return _means_me(client, channel_id, p["to"], me, m["id"])
 
 
 def _owed_to(turns: list[dict[str, Any]], me: str,

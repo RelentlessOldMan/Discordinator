@@ -47,6 +47,7 @@ def _fresh() -> None:
     """Empty registry and forget this process's resolved names."""
     handles.registry_path().unlink(missing_ok=True)
     handles._resolved.clear()
+    handles._since.clear()
     handles._last_chatter = None
 
 
@@ -112,6 +113,7 @@ def test_collision_gets_suffix() -> None:
         check(role == "CodeCarver/ui" and rnote is None, "a role avoids the collision cleanly")
         _plant("CodeCarver-2", other.pid)
         handles._resolved.clear()
+        handles._since.clear()
         handles._last_chatter = None  # as a brand-new session
         third, _ = handles.resolve(None, cfg)
         check(third == "CodeCarver-3", "next free suffix is taken")
@@ -277,6 +279,7 @@ def _restart() -> None:
     """As if this session's MCP server restarted: same project, nothing remembered."""
     handles.release_all()
     handles._resolved.clear()
+    handles._since.clear()
     handles._last_chatter = None
 
 
@@ -428,6 +431,7 @@ def test_only_the_current_name_is_reserved() -> None:
     finally:
         path.unlink(missing_ok=True)
     handles._resolved.clear()
+    handles._since.clear()
     handles._last_chatter = None
     handles.resolve(None, {"chat_handle": "ProjQ"})
     handles.resolve("ui", {"chat_handle": "ProjQ"})
@@ -437,13 +441,17 @@ def test_only_the_current_name_is_reserved() -> None:
 
 def test_session_is_found_past_launchers() -> None:
     print("the session is the process above any launcher:")
-    for name in ("discordinator-mcp.exe", "python.exe", "Python3.12", "pythonw.exe", "py.exe",
-                 "python3"):
+    for name in ("discordinator-mcp.exe", "Discordinator-MCP"):
         check(handles._is_launcher(name), f"{name} is a launcher")
     for name in ("claude.exe", "node", "claude", "bash.exe", None):
         check(not handles._is_launcher(name), f"{name} is not")
+    # A python whose command line can't be read is the session (two such
+    # hosts must never share a name).
+    for name in ("python.exe", "Python3.12", "pythonw.exe", "py.exe", "python3"):
+        check(not handles._is_launcher(name), f"{name} with no command line isn't one")
+    check(not handles._is_launcher("python.exe", 2 ** 31 - 7), "nor one that's gone")
     me, name = handles.process_parent(os.getpid())
-    check(me == os.getppid() and handles._is_launcher(name),
+    check(me == os.getppid() and "python" in (name or "").casefold(),
           f"process_parent reads this process: {me} {name}")
     check("test_handles" in (handles.process_cmdline(os.getpid()) or ""),
           "process_cmdline reads this process")
@@ -462,6 +470,71 @@ def test_session_is_found_past_launchers() -> None:
     finally:
         shim.kill()
         host.kill()
+
+
+def test_id_session_names_free_up_when_its_server_is_gone() -> None:
+    print("a DISCORDINATOR_SESSION_ID session's name isn't held for a week:")
+    _fresh()
+    path = handles.sessions_path()
+    server = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        time.sleep(0.3)
+        rec = {"chatter": "ui", "handle": "ProjQ/ui", "resolved": {"projq/ui": "ProjQ/ui"},
+               "ts": time.time() - 3600, "pid": server.pid,
+               "started": handles.process_started(server.pid)}
+        path.write_text(json.dumps({"id:other": rec}), encoding="utf-8")
+        check("ProjQ/ui" in handles.live_handles(), "held while its server runs, however idle")
+        server.kill()
+        server.wait()
+        check("ProjQ/ui" not in handles.live_handles(), "free once the server is gone")
+        rec["ts"] = time.time()
+        path.write_text(json.dumps({"id:other": rec}), encoding="utf-8")
+        check("ProjQ/ui" in handles.live_handles(), "but held just after (a restart)")
+    finally:
+        server.kill()
+        path.unlink(missing_ok=True)
+
+
+def test_reserved_names_dont_walk_the_process_table() -> None:
+    print("checking reserved names doesn't scan every process for new records:")
+    _fresh()
+    path = handles.sessions_path()
+    key = f"{os.getpid()}:{handles.process_started(os.getpid())}"
+    calls = []
+    real = handles.process_parent
+    handles.process_parent = lambda pid: calls.append(pid) or real(pid)
+    try:
+        path.write_text(json.dumps({key: {"chatter": "ui", "handle": "ProjQ/ui",
+                                          "ts": time.time()}}), encoding="utf-8")
+        handles._SESSION_KEY = "id:me"
+        check("ProjQ/ui" in handles.live_handles(), "the running session's name is held")
+        check(not calls, f"without a process snapshot: {calls}")
+        path.write_text(json.dumps({key: {"chatter": "ui", "resolved": {"projq/ui": "ProjQ/ui"},
+                                          "ts": time.time()}}), encoding="utf-8")
+        handles.live_handles()
+        check(calls, "an old record (maybe keyed by a launcher) is still checked")
+    finally:
+        handles.process_parent = real
+        handles._SESSION_KEY = None
+        path.unlink(missing_ok=True)
+
+
+def test_claims_say_since_when() -> None:
+    print("a claim records since when its session has had the name:")
+    _fresh()
+    t0 = time.time()
+    handles.resolve("ui", {"chat_handle": "ProjQ"})
+    first = dict(handles.live_claims())["ProjQ/ui"]
+    check(first is not None and first >= t0 - 1, f"since it was claimed: {first}")
+    time.sleep(0.05)
+    handles.resolve("ui", {"chat_handle": "ProjQ"})
+    check(dict(handles.live_claims())["ProjQ/ui"] == first, "a later call keeps it")
+    handles._resolved.clear()
+    handles._since.clear()
+    handles._last_chatter = None
+    handles._restored = False
+    handles.restore()  # a restarted server of the same session
+    check(handles._since.get("projq/ui") == first, "and a restart picks it back up")
 
 
 def main() -> int:
@@ -483,6 +556,9 @@ def main() -> int:
     test_running_sessions_names_are_reserved()
     test_only_the_current_name_is_reserved()
     test_session_is_found_past_launchers()
+    test_id_session_names_free_up_when_its_server_is_gone()
+    test_reserved_names_dont_walk_the_process_table()
+    test_claims_say_since_when()
     print(f"\nALL {_passed} HANDLE CHECKS PASSED")
     return 0
 

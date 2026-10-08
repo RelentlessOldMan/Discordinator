@@ -49,6 +49,7 @@ def _fresh() -> None:
     handles.registry_path().unlink(missing_ok=True)
     handles.sessions_path().unlink(missing_ok=True)
     handles._resolved.clear()
+    handles._since.clear()
     handles._last_chatter = None
     handles._restored = False
 
@@ -261,6 +262,129 @@ def test_error_event_names_the_room() -> None:
     check(evs["boom2"].get("room") == "elsewhere", "an explicit room")
 
 
+def _backdate(room: str, minutes: float) -> None:
+    import json
+    from datetime import datetime, timedelta, timezone
+    from discordinator.local_client import local_dir
+    path = local_dir() / f"{room}.jsonl"
+    when = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    recs = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    for rec in recs:
+        rec["timestamp"] = when
+    path.write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+
+
+def test_role_that_walked_away_doesnt_block() -> None:
+    print("a role that stopped chatting long ago (no end) doesn't block the bare name:")
+    _fresh()
+    r = "bare-dropped"
+    c = LocalClient()
+    chat.send_chat(c, r, "ProjB/api", "over", "yesterday's question", to="Y")
+    chat.send_chat(c, r, "Y", "over", "yesterday's answer", to="ProjB/api")
+    _backdate(r, 20 * 60)  # api just stopped - no end - and isn't running any more
+    mcp.chat_begin(chatter="ProjB/convex", channel=r)
+    mcp.chat_say(text="new question", chatter="ProjB/convex", channel=r, to="Peer", wait=False)
+    check(mcp._expand_bare(c, r, "Peer", "ProjB") == "ProjB/convex",
+          "a sender here spells it out as convex")
+    chat.send_chat(c, r, "Peer", "over", "answer", to="ProjB")  # an older/remote Peer
+    st = mcp.chat_status(chatter="ProjB/convex", channel=r)
+    check(st["your_turn"], f"chat_status: convex's turn ({st.get('pending_turn')})")
+    check("ProjB" not in st["participants"] and not st["multiparty"],
+          f"no phantom bare participant: {st['participants']}")
+    b = wait("ProjB/convex", r)
+    check(b["your_turn"] and b["text"] == "answer", f"chat_await agrees: {b.get('timed_out')}")
+
+
+def test_await_and_status_agree() -> None:
+    print("chat_await and chat_status agree on who a bare turn is for:")
+    _fresh()
+    r = "bare-agree"
+    c = LocalClient()
+    mcp.chat_begin(chatter="ProjectB/api", channel="bare-agree-elsewhere")  # running here
+    mcp.chat_begin(chatter="ProjectB/ui", channel=r)
+    mcp.chat_say(text="question", chatter="ProjectB/ui", channel=r, to="X", wait=False)
+    chat.send_chat(c, r, "X", "over", "reply", to="ProjectB")
+    st = mcp.chat_status(chatter="ProjectB/ui", channel=r)
+    b = wait("ProjectB/ui", r, 0.3)
+    check(not st["your_turn"] and b["timed_out"],
+          f"two roles running here: ambiguous for both ({st['your_turn']}, {b.get('timed_out')})")
+
+    _fresh()
+    r = "bare-agree-2"
+    mcp.chat_begin(chatter="ProjectB/ui", channel=r)
+    mcp.chat_say(text="question", chatter="ProjectB/ui", channel=r, to="X", wait=False)
+    chat.send_chat(c, r, "X", "over", "reply", to="ProjectB")
+    chat.send_chat(c, r, "ProjectB/api", "over", "unrelated", to="Y")  # arrives after
+    st = mcp.chat_status(chatter="ProjectB/ui", channel=r)
+    b = wait("ProjectB/ui", r)
+    check(st["your_turn"] and b["your_turn"] and b["text"] == "reply",
+          "a role turning up afterwards doesn't take it from ui, for either")
+
+    _fresh()
+    r = "bare-agree-3"
+    mcp.chat_begin(chatter="ProjectB/ui", channel=r)
+    chat.send_chat(c, r, "ProjectB/ui", "ask", "here", to="X")
+    chat.send_chat(c, r, "ProjectB/api", "ask", "here too", to="Y")
+    chat.send_chat(c, r, "X", "over", "which of you?", to="ProjectB")
+    chat.send_chat(c, r, "ProjectB/api", "end", "bye", to="Y")  # api leaves afterwards
+    st = mcp.chat_status(chatter="ProjectB/ui", channel=r)
+    b = wait("ProjectB/ui", r, 0.3)
+    check(not st["your_turn"] and b["timed_out"],
+          "ambiguous when sent stays ambiguous after one role leaves, for both")
+
+
+def test_running_roles_count_from_when_they_started() -> None:
+    print("a session running here only counts for turns sent after it started:")
+    P = lambda h, s, to: {"participant": h, "to": to, "status": s, "body": ""}  # noqa: E731
+    hist = [P("X", "over", "ProjB")]
+    t = ["2026-01-01T12:00:00+00:00"]
+    ui = ("ProjB/ui", chat._parse_ts("2026-01-01T11:00:00+00:00"))
+    late = ("ProjB/api", chat._parse_ts("2026-01-01T13:00:00+00:00"))
+    early = ("ProjB/api", chat._parse_ts("2026-01-01T11:30:00+00:00"))
+    check(chat.resolve_bare(hist, None, [ui, late], t)[0]["to"] == "ProjB/ui",
+          "api started after it was sent: it was ui's")
+    check(chat.resolve_bare(hist, None, [ui, early], t)[0]["to"] == "ProjB",
+          "both running then: ambiguous")
+    answered = hist + [P("ProjB/api", "over", "X")]
+    check(chat.resolve_bare(answered, None, [ui, late], t + t)[0]["to"] == "ProjB/api",
+          "a role that answered it beats one that was merely running")
+    end = [P("X", "end", "ProjB")]
+    check(chat.resolve_bare(end, "ProjB/ui", [], t)[0]["to"] == "ProjB",
+          "an end to the bare name with no role around ends nobody's chat")
+
+
+def test_second_role_to_answer_is_told() -> None:
+    print("two roles (one elsewhere) both take a bare opener: the second is told:")
+    _fresh()
+    r = "bare-race"
+    c = LocalClient()
+    mcp.chat_begin(chatter="ProjectB/ui", channel=r)
+    chat.send_chat(c, r, "X", "over", "anyone from ProjectB?", to="ProjectB")
+    check(wait("ProjectB/ui", r)["your_turn"], "ui (the only one it knows of) wakes")
+    chat.send_chat(c, r, "ProjectB/api", "over", "api here", to="X")  # another machine's
+    try:
+        mcp.chat_say(text="ui here", chatter="ProjectB/ui", channel=r, wait=False)
+        raise AssertionError("ui's reply must not go out")
+    except Exception as e:
+        check("ProjectB/api" in str(e) and "answered it first" in str(e), f"told: {str(e)[:90]}")
+    last = c.read_messages(r, limit=1)[0]["content"]
+    check(last.startswith("[ProjectB/api>X|over]"), "nothing posted")
+    out = mcp.chat_say(text="ui here too", chatter="ProjectB/ui", channel=r, to="X", wait=False)
+    check(out.get("sent_messages") == 1, "addressing X on purpose still works")
+
+
+def test_roomless_tool_errors_have_no_room() -> None:
+    print("a failed call to a tool that uses no room isn't filed under one:")
+    import inspect
+    from discordinator import events
+    mcp._log_error("whoami", ValueError("roomless"), {}, False)
+    evs = {e.get("message"): e for e in events.read(0)[0] if e.get("kind") == "error"}
+    check(evs["roomless"].get("room") is None, f"no room: {evs['roomless'].get('room')}")
+    for fn in (mcp.whoami, mcp.list_channels, mcp.download_attachment):
+        check("channel" not in inspect.signature(fn).parameters, f"{fn.__name__} has no room")
+    check("channel" in inspect.signature(mcp.chat_say).parameters, "chat_say has one")
+
+
 def main() -> int:
     test_aliases_unit()
     test_bare_opener_wakes_the_role()
@@ -274,6 +398,11 @@ def main() -> int:
     test_end_to_the_bare_name_ends_the_roles_chat()
     test_old_bare_turns_arent_handed_to_a_newcomer()
     test_error_event_names_the_room()
+    test_role_that_walked_away_doesnt_block()
+    test_await_and_status_agree()
+    test_running_roles_count_from_when_they_started()
+    test_second_role_to_answer_is_told()
+    test_roomless_tool_errors_have_no_room()
     print(f"\nALL {_passed} BARE-HANDLE CHECKS PASSED")
     return 0
 

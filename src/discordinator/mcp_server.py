@@ -21,6 +21,7 @@ from __future__ import annotations
 import difflib
 import atexit
 import functools
+import inspect
 import io
 import logging
 import os
@@ -52,12 +53,14 @@ def _tool():
     tool <name>", and every "nothing was posted, because ..." we write would be
     lost. The module keeps the plain function (tests call it directly)."""
     def register(fn):
+        in_room = "channel" in inspect.signature(fn).parameters
+
         @functools.wraps(fn)
         def reported(*args, **kwargs):
             try:
                 return fn(*args, **kwargs)
             except Exception as e:  # noqa: BLE001 - re-raised with its text
-                _log_error(fn.__name__, e, kwargs)
+                _log_error(fn.__name__, e, kwargs, in_room)
                 if isinstance(e, ToolError):
                     raise
                 raise ToolError(f"{type(e).__name__}: {e}") from e
@@ -71,10 +74,12 @@ def _me_now() -> Optional[str]:
     return next(iter(handles._resolved.values()), None)
 
 
-def _log_error(tool: str, e: Exception, kwargs: dict[str, Any]) -> None:
+def _log_error(tool: str, e: Exception, kwargs: dict[str, Any], in_room: bool = True) -> None:
+    """Log a failed tool call; ``in_room`` False for a tool that acts on no
+    room (whoami, list_channels, download_attachment)."""
     first = (str(e).strip().splitlines() or [type(e).__name__])[0]
     events.record("error", tool=tool, message=first[:200], handle=_me_now(),
-                  room=_event_room(tool, kwargs.get("channel")))
+                  room=_event_room(tool, kwargs.get("channel")) if in_room else None)
 
 
 def _event_room(tool: str, channel: Optional[str]) -> Optional[str]:
@@ -550,8 +555,7 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any]) -> l
             looks.add(me_key[len(b) + 1:])  # "convex" for "ProjectB/convex"
     held = {chat.handle_key(h) for h in handles.live_handles()}
     found: dict[str, str] = {}
-    msgs = client.read_messages(channel_id, limit=100)
-    for p in chat.resolve_bare([chat.parse(m.get("content") or "") for m in reversed(msgs)], me):
+    for p in chat._room(client, channel_id, me)[1]:
         if not p or p["status"] not in chat.YIELD_STATUSES or chat._is_broadcast(p["to"]):
             continue
         k = chat.handle_key(p["to"])
@@ -845,6 +849,16 @@ def _check_turn(client: Client, channel_id: str, me: str, status: str,
         raise RuntimeError(
             f"{who} posted something you haven't read yet (\"{(p['body'] if p else m['content'])[:80]}\"). "
             "Call chat_await to read it first, then reply.")
+    if target is None and not st.get("your_turn") and status in chat.YIELD_STATUSES:
+        # Two roles of my project both took a turn sent to our bare project
+        # handle (one on another machine): it was for whichever answered first.
+        sender = chat.get_reply_to(channel_id, me)
+        taken = chat.bare_taken(client, channel_id, me, sender) if sender else None
+        if taken:
+            raise RuntimeError(
+                f"{sender}'s turn to your project's name went to {taken}, which "
+                "answered it first - it was theirs, not yours. Call chat_await to "
+                "wait for a turn meant for you, or pass to=... to say something anyway.")
     note = None
     if target is None:
         back = chat.get_reply_to(channel_id, me)
@@ -925,10 +939,10 @@ def _expand_bare(client: Client, channel_id: str, me: str,
     so the turn names who it's for (see chat.bare_aliases)."""
     if not target or chat._is_broadcast(target) or "/" in target:
         return target
-    parsed = [chat.parse(m.get("content") or "")
-              for m in reversed(client.read_messages(channel_id, limit=100))]  # oldest first
-    parsed += [{"participant": h} for h in handles.live_handles()]
-    full = chat.bare_aliases(parsed).get(chat.handle_key(target))
+    msgs = list(reversed(client.read_messages(channel_id, limit=100)))  # oldest first
+    full = chat.bare_target([chat.parse(m.get("content") or "") for m in msgs],
+                            [m.get("timestamp") for m in msgs], me, target,
+                            handles.live_claims)
     return full if full and not chat.same_handle(full, me) else target
 
 
