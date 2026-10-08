@@ -8,6 +8,10 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.37] - 2026-10-07
+Clearing a channel works again: purge_messages(older_than_days=0) is no longer refused
+- v1.0.36 wrongly refused purging anything under a day old; 0 clears the channel regardless of age, as before
+
 ## [1.0.36] - 2026-10-07
 Sessions keep their name across restarts; relay posts are never chat turns; session events in watch
 - A restarted server picks up its session's role and name and takes over a claim the old server still holds (Claude Code leaves old servers running after /mcp reconnect), so sessions no longer become Name-2 and miss replies
