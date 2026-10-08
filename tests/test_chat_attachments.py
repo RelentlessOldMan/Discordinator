@@ -102,17 +102,15 @@ def test_terminal_turn_with_file() -> None:
 
 
 def test_out_of_band_file_is_plain_turn() -> None:
-    print("a file sent out-of-band (no chat header) surfaces as a 'plain' turn:")
+    print("a file sent outside the chat (no chat header) is relay traffic, not a turn:")
     room = "chat-att-4"
     a, b = LocalClient("A"), LocalClient("B")
     chat.reset(room, "B", "0", 20)
-    a.send_files(room, "oops, raw send", [_file("stray.bin", b"\x01")])  # not via send_chat
+    a.send_files(room, "oops, raw send", [_file("stray.bin", b"")])  # not via send_chat
 
-    res = chat.await_turn(b, room, "B", timeout=2, poll=0.02, nudge_after=0)
-    check(res["status"] == "plain" and res["your_turn"] is True,
-          "an out-of-band send never strands the awaiter")
-    check(len(res["attachments"]) == 1 and res["attachments"][0]["filename"] == "stray.bin",
-          "its attachment is surfaced too")
+    res = chat.await_turn(b, room, "B", timeout=0.5, poll=0.02, nudge_after=0)
+    check(res["timed_out"] and not res["your_turn"],
+          "it doesn't count as anyone's turn (a bystander's post can't answer for a peer)")
 
 
 def test_messages_metadata_includes_attachments() -> None:

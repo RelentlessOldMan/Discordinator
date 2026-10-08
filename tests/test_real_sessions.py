@@ -1,0 +1,281 @@
+"""Real sessions: each one a separate `python -m discordinator.mcp_server`
+process driven over stdio, the way Claude Code runs it.
+
+The other suites call the tool functions directly inside one process, which
+can't show what breaks in real use: a server restarting (and forgetting what
+it knew), an old server left running after a reconnect, errors passing
+through the MCP layer, separate processes racing. Each check here replays one
+of those, most of them taken from real stalls.
+
+DISCORDINATOR_SESSION_ID stands in for the Claude Code process that owns a
+server (normally its parent process): two servers with the same id are one
+session restarting; different ids are different sessions.
+Run:  python tests/test_real_sessions.py
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+import tempfile
+import time
+from contextlib import AsyncExitStack
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = str(ROOT / "src")
+_TMP = Path(tempfile.mkdtemp(prefix="discordinator-real-"))
+os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
+os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
+os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
+for _k in ("DISCORD_BOT_TOKEN", "DISCORDINATOR_CHAT_HANDLE", "DISCORDINATOR_CHAT_CHANNEL",
+           "DISCORDINATOR_LABEL", "DISCORDINATOR_RELAY_CHANNEL", "DISCORDINATOR_SESSION_ID"):
+    os.environ.pop(_k, None)
+os.environ["PYTHONPATH"] = SRC + os.pathsep + os.environ.get("PYTHONPATH", "")
+os.chdir(_TMP)  # never the repo: a .env there would be picked up
+sys.path.insert(0, SRC)
+
+from discordinator import chat, events  # noqa: E402
+from discordinator.local_client import LocalClient, local_dir  # noqa: E402
+
+_passed = 0
+
+
+def check(cond: bool, msg: str) -> None:
+    global _passed
+    if not cond:
+        raise AssertionError(msg)
+    _passed += 1
+    print(f"  ok: {msg}")
+
+
+class Session:
+    """One real MCP server process, as a Claude Code session would run it."""
+
+    def __init__(self, session_id: str, handle: str | None = None, **env: str):
+        self.env = {**os.environ, "DISCORDINATOR_SESSION_ID": session_id, **env}
+        if handle:
+            self.env["DISCORDINATOR_CHAT_HANDLE"] = handle
+        self.stack = AsyncExitStack()
+
+    async def start(self) -> "Session":
+        from mcp.client.session import ClientSession
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+        params = StdioServerParameters(command=sys.executable,
+                                       args=["-m", "discordinator.mcp_server"],
+                                       env=self.env, cwd=str(_TMP))
+        r, w = await self.stack.enter_async_context(stdio_client(params))
+        self.s = await self.stack.enter_async_context(ClientSession(r, w))
+        await self.s.initialize()
+        return self
+
+    async def stop(self) -> None:
+        await self.stack.aclose()
+
+    async def call(self, tool: str, **args) -> dict:
+        res = await self.s.call_tool(tool, args)
+        text = "\n".join(c.text for c in res.content if getattr(c, "text", None) is not None)
+        if res.is_error:
+            return {"error": text}
+        try:
+            return json.loads(text)
+        except ValueError:
+            return {"text": text}
+
+
+def run(coro) -> None:
+    asyncio.run(coro)
+
+
+def backdate(room: str, hours: float) -> None:
+    """Make every message in a local room look ``hours`` old."""
+    path = local_dir() / f"{room}.jsonl"
+    when = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    lines = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        rec = json.loads(line)
+        rec["timestamp"] = when
+        lines.append(json.dumps(rec))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_reconnect_while_waiting_keeps_the_name() -> None:
+    print("a session reconnected mid-wait keeps its name and gets the reply:")
+
+    async def go():
+        a1 = await Session("sess-a", handle="ProjA").start()
+        check((await a1.call("chat_begin", chatter="ui", channel="r1"))["chatter"] == "ProjA/ui",
+              "before: ProjA/ui")
+        await a1.call("chat_say", text="please review X", chatter="ui", channel="r1",
+                      to="ProjB", wait=False)
+        await a1.stop()  # /mcp reconnect: the server goes, the session stays
+        chat.send_chat(LocalClient(), "r1", "ProjB", "over", "reviewed: fine", to="ProjA/ui")
+        a2 = await Session("sess-a", handle="ProjA").start()
+        r = await a2.call("chat_await", channel="r1", timeout=5, poll=0.2)  # no chatter: forgot it
+        check(r.get("from") == "ProjB" and r.get("text") == "reviewed: fine",
+              f"the new server receives the reply: {str(r)[:80]}")
+        await a2.stop()
+    run(go())
+
+
+def test_old_server_left_running_doesnt_take_the_name() -> None:
+    print("an old server Claude Code left running can't push its session to '-2':")
+
+    async def go():
+        old = await Session("sess-z", handle="ProjZ").start()
+        check((await old.call("chat_begin", channel="r2"))["chatter"] == "ProjZ", "old: ProjZ")
+        new = await Session("sess-z", handle="ProjZ").start()  # reconnect; old still alive
+        b = await new.call("chat_begin", channel="r2")
+        check(b["chatter"] == "ProjZ" and "note" not in b,
+              f"the new server is ProjZ, not ProjZ-2: {b.get('chatter')}")
+        chat.send_chat(LocalClient(), "r2", "Peer", "over", "hello ProjZ", to="ProjZ")
+        r = await new.call("chat_await", channel="r2", timeout=5, poll=0.2)
+        check(r.get("text") == "hello ProjZ", "and it gets the turns sent to that name")
+        other = await Session("sess-other", handle="ProjZ").start()
+        o = await other.call("chat_begin", channel="r2")
+        check(o["chatter"] == "ProjZ-2" and "note" in o,
+              "a genuinely different session of the project still gets ProjZ-2")
+        for s in (other, new, old):  # the client library closes newest first
+            await s.stop()
+    run(go())
+
+
+def test_disconnect_ends_a_wait_promptly() -> None:
+    print("a server whose client hangs up mid-wait exits at once:")
+
+    async def go():
+        s = await Session("sess-w", handle="ProjW").start()
+        await s.call("chat_begin", channel="r3")
+        task = asyncio.create_task(s.call("chat_await", channel="r3", timeout=60, poll=0.2))
+        await asyncio.sleep(1.0)
+        task.cancel()
+        t0 = time.monotonic()
+        try:
+            await s.stop()
+        except BaseException:  # noqa: BLE001 - the cancelled call may surface here
+            pass
+        check(time.monotonic() - t0 < 15, f"stopped in {time.monotonic() - t0:.1f}s, not 60")
+        chat.send_chat(LocalClient(), "r3", "Peer", "over", "for ProjW", to="ProjW")
+        s2 = await Session("sess-w", handle="ProjW").start()
+        r = await s2.call("chat_await", channel="r3", timeout=5, poll=0.2)
+        check(r.get("text") == "for ProjW", "the old server didn't use up the reply")
+        await s2.stop()
+    run(go())
+
+
+def test_two_sessions_of_a_project_keep_their_own_names() -> None:
+    print("two sessions of one project restarting together don't swap names:")
+
+    async def go():
+        x = await Session("sess-x", handle="ProjQ").start()
+        y = await Session("sess-y", handle="ProjQ").start()
+        check((await x.call("chat_begin", channel="r4"))["chatter"] == "ProjQ", "X: ProjQ")
+        check((await y.call("chat_begin", channel="r4"))["chatter"] == "ProjQ-2", "Y: ProjQ-2")
+        await y.stop()
+        await x.stop()
+        c = LocalClient()
+        chat.send_chat(c, "r4", "PeerB", "over", "answer for X", to="ProjQ")
+        chat.send_chat(c, "r4", "PeerC", "over", "answer for Y", to="ProjQ-2")
+        y2 = await Session("sess-y", handle="ProjQ").start()  # Y comes back first
+        ry = await y2.call("chat_await", channel="r4", timeout=5, poll=0.2)
+        x2 = await Session("sess-x", handle="ProjQ").start()
+        rx = await x2.call("chat_await", channel="r4", timeout=5, poll=0.2)
+        check(ry.get("text") == "answer for Y" and rx.get("text") == "answer for X",
+              f"each gets its own reply: Y={ry.get('text')!r} X={rx.get('text')!r}")
+        await x2.stop()
+        await y2.stop()
+    run(go())
+
+
+def test_bystander_post_is_nobodys_reply() -> None:
+    print("a relay post into the chat room doesn't answer for anyone:")
+
+    async def go():
+        a = await Session("sess-ba", handle="ProjA").start()
+        b = await Session("sess-bb", handle="ProjB").start()
+        c = await Session("sess-bc", handle="ProjC").start()
+        await a.call("chat_begin", channel="r5")
+        await b.call("chat_begin", channel="r5")
+        await a.call("chat_say", text="question for B", channel="r5", to="ProjB", wait=False)
+        await c.call("send_message", text="FYI: CI is green", channel="r5")
+        r = await a.call("chat_await", channel="r5", timeout=1, poll=0.2)
+        check(r.get("timed_out") and not r.get("your_turn"), "A keeps waiting for B")
+        st = await b.call("chat_status", channel="r5")
+        check(st.get("your_turn") is True, "B still owes A its answer")
+        for s in (c, b, a):
+            await s.stop()
+    run(go())
+
+
+def test_errors_reach_the_model_over_stdio() -> None:
+    print("a tool's refusal reaches the model in full over real stdio:")
+
+    async def go():
+        s = await Session("sess-e", handle="ProjE").start()
+        r = await s.call("chat_say", text="x", channel="r6", status="bogus")
+        check("status must be one of" in r.get("error", "") and "Nothing was posted" in r["error"],
+              f"the reason arrives: {r.get('error', '')[:60]}")
+        await s.stop()
+    run(go())
+
+
+def test_old_turns_expire() -> None:
+    print("a long-dead conversation's turn isn't handed to a new session:")
+
+    async def go():
+        chat.send_chat(LocalClient(), "r7", "ProjB", "wrap", "done?", to="ProjF")
+        backdate("r7", 72)
+        s = await Session("sess-f", handle="ProjF").start()
+        b = await s.call("chat_begin", channel="r7")
+        check(b.get("recovered_pending_turn") is False, "3-day-old turn not recovered")
+        await s.stop()
+    run(go())
+
+
+def test_abandoned_conversation_hears_a_new_opener() -> None:
+    print("an unaddressed opener reaches a session whose last chat was dropped:")
+
+    async def go():
+        c = LocalClient()
+        chat.send_chat(c, "r8", "ProjG", "over", "q", to="ProjH")
+        chat.send_chat(c, "r8", "ProjH", "over", "a", to="ProjG")
+        chat.send_chat(c, "r8", "ProjG", "over", "thanks, one more?", to="ProjH")  # dropped
+        backdate("r8", 1)
+        g = await Session("sess-g", handle="ProjG").start()
+        await g.call("chat_begin", channel="r8")
+        chat.send_chat(c, "r8", "ProjK", "over", "anyone free to help?")  # unaddressed
+        r = await g.call("chat_await", channel="r8", timeout=5, poll=0.2)
+        check(r.get("from") == "ProjK" and r.get("your_turn"), f"ProjG hears it: {str(r)[:70]}")
+        await g.call("chat_say", text="sure", channel="r8", wait=False)
+        st = chat.compute_state(c, "r8", "ProjK")
+        check(st["your_turn"], "the reply goes back to the opener")
+        await g.stop()
+    run(go())
+
+
+def test_session_events_are_logged() -> None:
+    print("session events land in the machine's event log:")
+    seen = [e["kind"] for e in events.read(0)[0]]
+    for kind in ("server_start", "joined", "error", "server_exit"):
+        check(kind in seen, f"{kind} logged")
+
+
+def main() -> int:
+    test_reconnect_while_waiting_keeps_the_name()
+    test_old_server_left_running_doesnt_take_the_name()
+    test_disconnect_ends_a_wait_promptly()
+    test_two_sessions_of_a_project_keep_their_own_names()
+    test_bystander_post_is_nobodys_reply()
+    test_errors_reach_the_model_over_stdio()
+    test_old_turns_expire()
+    test_abandoned_conversation_hears_a_new_opener()
+    test_session_events_are_logged()
+    print(f"\nALL {_passed} REAL-SESSION CHECKS PASSED")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

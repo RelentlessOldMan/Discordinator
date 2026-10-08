@@ -572,28 +572,45 @@ def get_cursor(channel_id: str, reader: Optional[str] = None) -> Optional[str]:
     state = load_state()
     if reader:
         mine = (state.get("relay_cursors") or {}).get(str(channel_id)) or {}
-        for key in (reader, reader.split("|")[0]):  # "label|project", then "label"
+        # "label|project/role" (one session), then "label|project", then "label":
+        # a session's first read starts where its project (or machine) left off.
+        label, _, handle = reader.partition("|")
+        keys = [reader]
+        for cut in ("/", "-"):
+            if handle and cut in handle:
+                keys.append(f"{label}|{handle.split(cut)[0]}")
+        keys.append(label)
+        for key in keys:
             if key in mine:
                 return mine[key] or None  # None: reset, read from scratch
     return (state.get("cursors") or {}).get(str(channel_id))
 
 
-def relay_reader(cfg: dict[str, Any]) -> Optional[str]:
-    """Whose relay read position this is: the label, plus the project's chat
-    handle when there is one - so two projects' sessions on one machine have
-    their own position even if they share a label."""
+def relay_reader(cfg: dict[str, Any], session: Optional[str] = None) -> Optional[str]:
+    """Whose relay read position this is: the label, plus the session's chat
+    handle (``session``, e.g. "CodeCarver/ui" or "CodeCarver-2") or else the
+    project's - so sessions on one machine have their own position even if
+    they share a label."""
     label = cfg.get("machine_label")
-    handle = cfg.get("chat_handle")
+    handle = session or cfg.get("chat_handle")
     if label and handle:
         return f"{label}|{handle}"
     return label or (f"|{handle}" if handle else None)
 
 
 def set_cursor(channel_id: str, message_id: str, reader: Optional[str] = None) -> None:
+    """Advance a read position (never back: two readers sharing one finishing
+    out of order mustn't re-deliver what the other already read)."""
     with update_state() as state:
         if reader:
-            state.setdefault("relay_cursors", {}).setdefault(
-                str(channel_id), {})[reader] = str(message_id)
+            mine = state.setdefault("relay_cursors", {}).setdefault(str(channel_id), {})
+            old = mine.get(reader)
+            try:
+                if old is not None and int(old) > int(message_id):
+                    return
+            except ValueError:
+                pass
+            mine[reader] = str(message_id)
         else:
             state.setdefault("cursors", {})[str(channel_id)] = str(message_id)
 

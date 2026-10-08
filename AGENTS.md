@@ -59,9 +59,10 @@ discordinator config set-relay-transport discord   # send/read/relay
 discordinator config set-chat-transport  local     # live chat_*
 ```
 Two sessions on one machine can relay to each other even with the same label:
-each skips only the messages it sent itself, and each project (its
-`DISCORDINATOR_CHAT_HANDLE`) keeps its own read position, so one session reading
-its inbox never uses up the other's messages. To tell them apart in the channel,
+each skips only the messages it sent itself, and each session keeps its own read
+position (by its chat handle, e.g. `CodeCarver/ui`), so one session reading its
+inbox doesn't use up another's messages. (Two sessions of one project that only
+relay and never chat share their project's position; give each its own label.) To tell them apart in the channel,
 give each project its own label in its `.mcp.json` env
 (`"DISCORDINATOR_LABEL": "<SESSION_LABEL>"`); `config set-label` sets the one
 label every session on the machine shares.
@@ -80,7 +81,13 @@ the attachment.
 `discordinator watch <room> --follow --state` to see it live (chat turns parsed,
 plus floor/waiting; `watch --all` interleaves every room), `discordinator
 interject "<text>"` to drop a human turn the agents pick up on their next
-`chat_await`, and `discordinator stop` to end a runaway chat. With no room
+`chat_await`, and `discordinator stop` to end a runaway chat. `watch` calls out
+turns that change the chat (an ending, an impasse, a proposal to end, a raised
+hand, someone off working, a human stop) and also shows **session events** that
+never reach the room, from a per-machine log (`~/.discordinator/events.jsonl`):
+a session's server connecting or disconnecting (or vanishing without saying so),
+joining a room, being renamed or taking its name back, a turn sitting under its
+old name, and any tool call that failed, with the reason. `--no-events` hides them. With no room
 named, these act on the room this machine's chat sessions last used (the room is
 usually set in a project's `.mcp.json`, which your shell never sees); each prints
 the room it used. For a full-screen
@@ -188,7 +195,10 @@ Confirm inside Claude Code with `/mcp`.
   only messages new since the last call (advances a per-channel cursor), with the
   messages this session sent filtered out. `ack=true` reacts ✅ to the newest.
 - `purge_messages(channel?, older_than_days?, only_mine?, scan_limit?, dry_run?)` —
-  delete old messages. Safe defaults: dry_run=True, only_mine=True, 7-day floor.
+  delete old messages. Safe defaults: dry_run=True, only_mine=True, older than 7
+  days (never less than 1 day, so live chat turns are safe). "Mine" means the
+  bot's messages (on a local room, this machine label's) - every session's, not
+  just this session's.
 - `list_channels()` — configured channel names + default.
 - `whoami()` — verify token / bot identity.
 
@@ -212,19 +222,29 @@ two sessions can never silently share a name and ignore each other's turns. A
 session keeps its name for as long as it runs; claims free up when it exits. Handles are
 case-insensitive (`Convex` = `convex`).
 
-A restart (`/mcp` reconnect, or a new `DISCORDINATOR_CHAT_HANDLE` taking effect)
-forgets the session's role. If it then omits `chatter` and a turn in the room is
-owed to exactly one `<project handle>/<role>` that no running session holds, it
-takes that name back (with a `note`) and gets the turn. When that can't be
-decided (several such names, or a turn owed to its name from before the project
-had a handle), `chat_begin`, `chat_status` and a timed-out `chat_await` name the
-waiting turn and how to answer it, instead of reporting nothing going on.
+**Restarts keep the name.** A session is its Claude Code process: when its
+server restarts (`/mcp` reconnect, or a new `DISCORDINATOR_CHAT_HANDLE` taking
+effect), the new server picks up the session's role and name, and takes over a
+claim the old server still holds (Claude Code can leave the old one running) -
+so the session never turns into `CodeCarver-2` and misses the turns sent to it.
+A server whose client disconnects exits at once, even mid-`chat_await`, without
+reading anything meant for the session's next server.
+A brand-new session (quit and resumed) that omits `chatter` takes back a
+`<project handle>/<role>` that no running session holds when exactly one such
+name is owed a turn in the room, or is waiting on its own unanswered turn.
+When that can't be decided, `chat_begin`, `chat_status` and a timed-out
+`chat_await` name the waiting turn and how to answer it (and `next` says so).
 
 **Who counts as a participant.** Chat state (`chat_status`, the `watch --state` /
 TUI sidebar) covers only **your current conversation** — the sessions you're
 talking with, everything since its last `end`/`impasse` or a human stop — and
 drops anyone silent for **30+ minutes**
-(except both ends of a turn still owed). The ranked list of non-floor
+(except both ends of a turn still owed). A conversation nobody has spoken in for
+30 minutes (dropped without an `end`) no longer keeps its members from hearing a
+new unaddressed opener, and a turn owed to you expires after **4 hours** (a
+session joining days later isn't handed a dead conversation's turn). A session
+waiting in a room where others chat without addressing it is told how to join
+(`status="ask"`). The ranked list of non-floor
 participants (`waiting` in results, shown as **others** in the viewers) is a
 fairness order for `suggest_next`, not a list of sessions actually blocked in
 `chat_await`.
@@ -272,7 +292,7 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   `posted: true` with an `error`, the message **was** posted (something failed
   afterwards) - don't send it again; follow `next`.
 - `chat_await(chatter?, channel?, timeout=120, poll=3, from_whom?)` — BLOCKS until a
-  turn comes to YOU / a human interjects / a participant posts out-of-band / timeout.
+  turn comes to YOU / a human interjects / timeout.
   Returns `{from, to, status, text, your_turn, ended, stop_reason, timed_out,
   cap_reached, next}` (plus `floor, pending_requests, waiting, suggest_next` when the
   floor comes to you in a multiparty room). A turn addressed to a *different* peer
@@ -280,10 +300,11 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   one peer. **If `timed_out` and not `ended`, call it again** — the other side is
   still busy, and waiting a long time is fine; the timeout `note` shows what they
   said they're working on. (A session that owes a reply and sends it with
-  `send_message` to the chat room has it posted as its chat turn to that peer. An
-  untagged message from elsewhere counts as the floor holder's turn: it comes
-  back as `status="plain"` to the side that handed them the floor, so a
-  non-`chat_say` reply can't strand you.) Called when it's
+  `send_message` to the chat room has it posted as its chat turn to that peer. Any
+  other untagged bot message - a relay note, a CLI `send` - is never anyone's
+  turn and wakes nobody, so a bystander can't answer for your peer.) A turn
+  that ends with `wrap` comes with a `next` saying to confirm with `end` (or
+  reply `over` to go on). Called when it's
   already your turn, it hands that turn straight back (`already_received`) instead
   of blocking on yourself. After a long wait (`nudge_after`, default 240s) it posts
   one visible channel reminder so a human knows which session to poke — held back
@@ -338,8 +359,8 @@ machine in `~/.claude/settings.json`:
 (Use the path of your `discordinator` executable: `where discordinator`.)
 
 **Recovering from a stall.** If a chat seems stuck, it usually means one side
-`end`ed (or dropped) and the other spoke again, or someone replied with a plain
-`send_message`. Call `chat_status(chatter=you)`: if `your_turn` is true, call
+`end`ed (or dropped) and the other spoke again. `discordinator watch` shows the
+session events behind it (a disconnect, a rename, a refused call). Call `chat_status(chatter=you)`: if `your_turn` is true, call
 `chat_begin` (it repositions you onto the pending turn) then `chat_await`. See
 [`docs/chat-protocol-notes.md`](docs/chat-protocol-notes.md) for the full analysis.
 

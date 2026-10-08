@@ -19,16 +19,22 @@ config file, or by raw numeric channel ids.
 from __future__ import annotations
 
 import difflib
+import atexit
 import functools
+import io
 import logging
+import os
 import re
+import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import chat, config, handles, use_system_certs
+from . import chat, config, events, handles, use_system_certs
 from .client_factory import Client, make_client, make_client_for_url
 from .discord_client import DiscordError, simplify_message
 
@@ -50,13 +56,25 @@ def _tool():
         def reported(*args, **kwargs):
             try:
                 return fn(*args, **kwargs)
-            except ToolError:
-                raise
             except Exception as e:  # noqa: BLE001 - re-raised with its text
+                _log_error(fn.__name__, e, kwargs)
+                if isinstance(e, ToolError):
+                    raise
                 raise ToolError(f"{type(e).__name__}: {e}") from e
         mcp.tool()(reported)
         return fn
     return register
+
+
+def _me_now() -> Optional[str]:
+    """This session's chat handle if it has one yet (for the event log)."""
+    return next(iter(handles._resolved.values()), None)
+
+
+def _log_error(tool: str, e: Exception, kwargs: dict[str, Any]) -> None:
+    first = (str(e).strip().splitlines() or [type(e).__name__])[0]
+    events.record("error", tool=tool, message=first[:200], handle=_me_now(),
+                  room=kwargs.get("channel"))
 
 
 def _client(mode: Optional[str] = None) -> Client:
@@ -281,9 +299,11 @@ def get_new_messages(
     channel — the relay primitive for two-way session handoff.
 
     A per-channel cursor is stored and advanced on each call, so repeated calls
-    return only fresh messages (not the whole history). Each project (label +
-    chat handle) has its own cursor, so two sessions on one machine never
-    consume each other's messages. By default the messages this session sent
+    return only fresh messages (not the whole history). Each session (label +
+    its chat handle, e.g. "CodeCarver/ui") has its own cursor, so two sessions
+    on one machine don't consume each other's messages - for two sessions of
+    one project that only relay (never chat), give each its own
+    DISCORDINATOR_LABEL. By default the messages this session sent
     are filtered out, so you see just what the other session/machine said -
     another session on this machine is someone else, even with the same label.
 
@@ -301,7 +321,8 @@ def get_new_messages(
     """
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
-    reader = config.relay_reader(cfg)
+    handles.restore()
+    reader = config.relay_reader(cfg, handles.current(None, cfg) if handles._resolved else None)
     if ack is None:
         ack = bool(cfg.get("ack_on_read"))
     cursor = config.get_cursor(channel_id, reader)
@@ -337,14 +358,19 @@ def purge_messages(
     """Delete old messages from a channel (housekeeping; destructive).
 
     Defaults are safe: dry_run=True (nothing deleted, just reports what would be),
-    only_mine=True (only the bot's own messages), and a 7-day age floor. Set
-    dry_run=False to actually delete. Deleting other users' messages
-    (only_mine=False) requires the Manage Messages permission.
+    only_mine=True, and messages older than 7 days (never less than 1 day: newer
+    messages may be other sessions' live chat turns). Set dry_run=False to
+    actually delete. Deleting other users' messages (only_mine=False) requires
+    the Manage Messages permission.
+
+    "Mine" is the bot's (on a local room: this machine label's) messages - every
+    machine posts as the same bot, and every session on a machine shares its
+    label, so it is NOT just this session's messages.
 
     Args:
         channel: Configured channel name or raw id. Defaults to the default channel.
-        older_than_days: Only affect messages older than this many days.
-        only_mine: If true (default), only delete the bot's own messages.
+        older_than_days: Only affect messages older than this many days (min 1).
+        only_mine: If true (default), only delete the bot's / label's messages.
         scan_limit: How many recent messages to scan.
         dry_run: If true (default), report but do not delete.
 
@@ -352,6 +378,11 @@ def purge_messages(
     """
     from datetime import datetime, timedelta, timezone
 
+    if older_than_days < 1:
+        raise ValueError(
+            "older_than_days must be at least 1: newer messages may be live chat turns "
+            "of other sessions. (To wipe a local room now, delete its .jsonl file while "
+            "no session is chatting there.)")
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
@@ -430,22 +461,23 @@ def whoami() -> dict[str, Any]:
 
 
 def _chatter(chatter: Optional[str], cfg: dict[str, Any],
-             channel: Optional[str] = None) -> tuple[str, Optional[str]]:
+             channel: Optional[str] = None, fresh: bool = False) -> tuple[str, Optional[str]]:
     """This session's handle (see handles.resolve): the project's fixed handle,
     optionally with a role (`CodeCarver/ui`), made unique among live sessions on
     this machine. Plus a note when it isn't the name the session asked for -
     returned on every chat result so a rename can't go unnoticed.
 
-    A restarted session (an /mcp reconnect, or a new DISCORDINATOR_CHAT_HANDLE
-    taking effect) has forgotten its role. If it doesn't name one and a turn in
-    the room is owed to exactly one `<project handle>/<role>` that no running
-    session holds, that was this session: it takes the name back instead of
-    becoming the bare project handle and never seeing the turn."""
+    A restarted server normally picks its session's name back up (see
+    handles.restore). A brand-new session (quit and resumed) can't, so if it
+    doesn't name a role and exactly one `<project handle>/<role>` that no
+    running session holds is owed a turn in the room - or is waiting on its own
+    unanswered turn there - that was this session: it takes the name back
+    instead of becoming the bare project handle and never seeing the reply."""
     role = _lost_role(chatter, cfg, channel)
     if role is None:
-        return handles.resolve(chatter, cfg)
+        return handles.resolve(chatter, cfg, fresh=fresh and chatter not in (None, ""))
     me, note = handles.resolve(role, cfg)
-    back = (f"A turn in this room is owed to '{me}', which no running session holds, "
+    back = (f"'{me}' has a chat going in this room that no running session holds, "
             "so this session has taken that name back (its role was forgotten when "
             f"it restarted). Pass chatter=\"{role}\" on your chat calls.")
     return me, f"{note} {back}" if note else back
@@ -455,19 +487,45 @@ def _lost_role(chatter: Optional[str], cfg: dict[str, Any],
                channel: Optional[str]) -> Optional[str]:
     """The role to rejoin as (see _chatter), or None."""
     base = cfg.get("chat_handle")
-    if chatter not in (None, "") or handles._last_chatter is not None or handles._resolved:
-        return None  # it named itself, or already has a name in this process
-    if not base:
-        return None
+    if chatter not in (None, ""):
+        return None  # it named itself
+    handles.restore()
+    if handles._last_chatter is not None or handles._resolved or not base:
+        return None  # already has a name in this session
+    prefix = chat.handle_key(base) + "/"
     try:
         channel_id = config.resolve_chat_channel(cfg, channel)
         with _client("chat") as client:
             lost = _lost_turns(client, channel_id, chat.sanitize_handle(base), cfg)
+            mine = {chat.handle_key(h): h for h in lost
+                    if chat.handle_key(h).startswith(prefix)}
+            mine.update({chat.handle_key(h): h for h in _left_waiting(client, channel_id, base)})
     except Exception:
         return None
+    return next(iter(mine.values()))[len(prefix):] if len(mine) == 1 else None
+
+
+def _left_waiting(client: Any, channel_id: str, base: str) -> list[str]:
+    """`<base>/<role>` handles no running session holds whose own turn in the
+    room is still waiting for its answer - a session that restarted while
+    waiting for a reply."""
     prefix = chat.handle_key(base) + "/"
-    mine = [h for h in lost if chat.handle_key(h).startswith(prefix)]
-    return mine[0][len(prefix):] if len(mine) == 1 else None
+    held = {chat.handle_key(h) for h in handles.live_handles()}
+    seen: dict[str, str] = {}
+    for m in client.read_messages(channel_id, limit=100):
+        p = chat.parse(m.get("content") or "")
+        if p and chat.handle_key(p["participant"]).startswith(prefix):
+            seen.setdefault(chat.handle_key(p["participant"]), p["participant"])
+    out = []
+    for k, h in seen.items():
+        if k in held:
+            continue
+        st = chat.compute_state(client, channel_id, h)
+        pending = st.get("pending_turn")
+        if (pending and chat.same_handle(pending["from"], h) and not st.get("ended")
+                and not st.get("your_turn")):
+            out.append(h)
+    return out
 
 
 def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any]) -> list[str]:
@@ -496,6 +554,14 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any]) -> l
             found[k] = p["to"]
     return [h for h in found.values()
             if chat.compute_state(client, channel_id, h).get("your_turn")]
+
+
+def _lost_next(lost: list[str], cfg: dict[str, Any]) -> str:
+    """The step for a session whose turn went to its old name (see _lost_note)."""
+    return ("A turn in this room went to a name that looks like yours from before a "
+            "restart (see handle_note). If that was you, do what handle_note says "
+            "now - waiting under your current name won't receive it. Otherwise call "
+            "chat_await again.")
 
 
 def _lost_note(lost: list[str], cfg: dict[str, Any]) -> str:
@@ -540,7 +606,7 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         turn_cap: soft cap on your turns before you're nudged to wrap up.
     """
     cfg = config.load()
-    me, note = _chatter(chatter, cfg, channel)
+    me, note = _chatter(chatter, cfg, channel, fresh=True)
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client("chat") as client:
         st = chat.compute_state(client, channel_id, me)
@@ -572,6 +638,10 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         note = f"{note} {busy}" if note else busy
     if note:
         out["note"] = note
+    events.record("joined", handle=me, room=channel_id, recovered=owed or None)
+    if note and (lost or "name" in note):
+        events.record("renamed" if not lost else "lost_turn", handle=me, room=channel_id,
+                      note=note[:200])
     return out
 
 
@@ -907,7 +977,8 @@ def chat_await(
       - from: the sender's handle, or "human", or null on timeout
       - to: who that turn was addressed to (null if broadcast/unaddressed)
       - status: their turn status (over/wrap/end/impasse), "interjection"/"stop"
-        for a human message, "plain" for an out-of-band send, or null on timeout
+        for a human message, or null on timeout (an untagged bot post - a
+        relay message - is never a turn and never wakes you)
       - text: their turn's combined body (or the human's text) — the words live
         here; `messages` is metadata-only ({id, from, to, status, timestamp,
         attachments})
@@ -945,9 +1016,11 @@ def chat_await(
                                  nudge_after=nudge_after, from_whom=from_whom)
         # Waiting in vain because the turn went to this session's old name?
         lost = _lost_turns(client, channel_id, me, cfg) if result.get("timed_out") else []
+    result["next"] = chat.next_step(result)
     if lost:
         handle_note = f"{handle_note} {_lost_note(lost, cfg)}" if handle_note else _lost_note(lost, cfg)
-    result["next"] = chat.next_step(result)
+        result["next"] = _lost_next(lost, cfg)
+        events.record("lost_turn", handle=me, room=channel_id, note=_lost_note(lost, cfg)[:200])
     if handle_note:
         result["handle_note"] = handle_note
     return result
@@ -958,7 +1031,7 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
     """Report the current chat state on a channel, derived from history. **Call
     this when (re)engaging a chat channel** — it tells you whether a turn is owed
     to you, instead of eyeballing message tags. This is how you recover from a
-    stall (you ended/dropped, or the other side replied out-of-band).
+    stall (you ended/dropped, or restarted and lost track).
 
     Returns:
       - session_active / ended
@@ -1006,8 +1079,72 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
     return public
 
 
+class _WatchedStdin(io.TextIOWrapper):
+    """The server's stdin, noticing when the client hangs up (EOF)."""
+
+    def readline(self, *args: Any) -> str:  # type: ignore[override]
+        line = super().readline(*args)
+        if not line:
+            _disconnected()
+        return line
+
+
+_exit_logged = False
+
+
+def _log_exit() -> None:
+    global _exit_logged
+    if not _exit_logged:
+        _exit_logged = True
+        events.record("server_exit", handle=_me_now(),
+                      project=config.load().get("chat_handle") if not _me_now() else None)
+
+
+def _disconnected() -> None:
+    """The client closed the connection (an /mcp reconnect, the session
+    ending). Stop now: a chat_await still waiting would otherwise keep this
+    process - and its claim on the session's name - alive for minutes, and
+    could read the reply meant for the session's new server."""
+    chat.SHUTDOWN.set()
+
+    def finish() -> None:
+        time.sleep(1.0)  # let a reply in flight go out
+        handles.release_all()
+        _log_exit()
+        os._exit(0)
+
+    threading.Thread(target=finish, daemon=True).start()
+
+
+def _watch_stdin() -> None:
+    """Serve over a stdin that reports EOF (see _WatchedStdin). Best effort: if
+    this MCP SDK is laid out differently, serve as usual."""
+    try:
+        import anyio
+        from mcp.server.mcpserver import server as srv
+        original = srv.stdio_server
+    except (ImportError, AttributeError):
+        return
+
+    def watched(stdin: Any = None, stdout: Any = None) -> Any:
+        if stdin is None:
+            stdin = anyio.wrap_file(_WatchedStdin(sys.stdin.buffer, encoding="utf-8",
+                                                  errors="replace"))
+        return original(stdin=stdin, stdout=stdout)
+
+    srv.stdio_server = watched
+
+
 def main() -> None:
     use_system_certs()
+    _watch_stdin()
+    try:
+        project = config.load().get("chat_handle")
+    except Exception:  # noqa: BLE001 - a bad config is reported by the tools
+        project = None
+    events.record("server_start", project=project, cwd=os.getcwd(),
+                  session=handles.session_key())
+    atexit.register(_log_exit)
     mcp.run()
 
 

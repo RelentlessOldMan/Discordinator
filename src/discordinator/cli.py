@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from . import __version__, chat, config, use_system_certs
+from . import __version__, chat, config, events, use_system_certs
 from .client_factory import make_client
 from .discord_client import DiscordClient, DiscordError, simplify_message
 from .local_client import local_dir
@@ -278,7 +278,95 @@ def _fmt_watch(m: dict[str, Any], color: bool, room: Optional[str] = None) -> st
     out = f"{head} {lines[0]}"
     for extra in lines[1:]:
         out += f"\n{indent}{extra}"
+    mark = _turn_marker(m, parsed)
+    if mark:
+        out += "\n" + " " * (tag_w + 10) + (f"\033[1m{mark}\033[0m" if color else mark)
     return "\n" + out  # blank line before each timestamped message
+
+
+def _turn_marker(m: dict[str, Any], parsed: Optional[dict[str, Any]]) -> Optional[str]:
+    """A line calling out a message that changes the chat (an ending, a stop, a
+    proposal to end, a hand-raise, someone going off to work)."""
+    if parsed is None:
+        if not m.get("bot") and chat.is_human_stop(m.get("content") or ""):
+            return "\u25a0 STOPPED by the human - the chat is over for everyone"
+        return None
+    who, to, status = parsed["participant"], parsed["to"], parsed["status"]
+    if status == "end":
+        return f"\u25a0 CHAT ENDED by {who}"
+    if status == "impasse":
+        return f"\u26a0 IMPASSE from {who} - a human is needed"
+    if status == "wrap":
+        return f"\u2026 {who} proposes ending" + (f" ({to} should confirm with end)" if to else "")
+    if status == "working":
+        return f"\u29d7 {who} is busy working - the others keep waiting"
+    if status == "ask":
+        return f"\u270b {who} raises a hand" + (f" (asking {to} for the floor)" if to else "")
+    return None
+
+
+def _fmt_event(e: dict[str, Any], color: bool, room: Optional[str] = None) -> str:
+    """A session event (events.py) as a dimmed watch line."""
+    ts = str(e.get("ts") or "")
+    try:
+        ts = datetime.fromisoformat(ts).astimezone(timezone.utc).strftime("%H:%M:%S")
+    except ValueError:
+        ts = ts[11:19]
+    tag = f"{(room or '')[:10]:<11} " if room is not None else ""
+    return "\n" + _dim(f"{tag}{ts}  {events.describe(e)}", color)
+
+
+def _event_for(e: dict[str, Any], room: Optional[str]) -> bool:
+    """Does this event belong in a view of ``room``?"""
+    return not e.get("room") or str(e.get("room")) == str(room)
+
+
+def _ts_key(ts: Any) -> float:
+    try:
+        t = datetime.fromisoformat(str(ts))
+    except ValueError:
+        return 0.0
+    return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).timestamp()
+
+
+class _ServerWatch:
+    """Notices sessions' servers that ended without logging it (killed)."""
+
+    def __init__(self, initial: list[dict[str, Any]]):
+        self.running: dict[int, dict[str, Any]] = {}
+        self.seen(initial)
+        self.checked = 0.0
+
+    def seen(self, evs: list[dict[str, Any]]) -> None:
+        for e in evs:
+            pid = e.get("pid")
+            if e.get("kind") == "server_start" and isinstance(pid, int):
+                self.running[pid] = e
+            elif e.get("kind") == "server_exit":
+                self.running.pop(pid, None)
+            elif isinstance(pid, int) and pid in self.running and e.get("handle"):
+                self.running[pid] = {**self.running[pid], "handle": e["handle"]}
+
+    def gone(self) -> list[dict[str, Any]]:
+        if time.monotonic() - self.checked < 5:
+            return []
+        self.checked = time.monotonic()
+        out = []
+        for pid, e in list(self.running.items()):
+            if not config.pid_alive(pid):
+                del self.running[pid]
+                out.append({"ts": datetime.now(timezone.utc).isoformat(), "kind": "server_gone",
+                            "pid": pid, "handle": e.get("handle"), "project": e.get("project")})
+        return out
+
+
+def _since(first_ts: Optional[str]) -> datetime:
+    """Where session events start in a view: the first message shown, else an hour ago."""
+    if first_ts:
+        t = datetime.fromisoformat(first_ts)
+        t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+        return t - timedelta(minutes=15)  # the joins and connects leading up to it
+    return datetime.now(timezone.utc) - timedelta(hours=1)
 
 
 def _state_footer(client: Any, room: str) -> Optional[str]:
@@ -337,8 +425,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
         msgs = [simplify_message(m) for m in raw]
         msgs.reverse()
         print(f"─ #{room} " + "─" * max(0, 40 - len(room)))
-        for m in msgs:
-            print(_fmt_watch(m, color))
+        evs, ev_offset = ([], 0) if args.no_events else events.recent(
+            _since(msgs[0]["timestamp"] if msgs else None))
+        servers = _ServerWatch([] if args.no_events else events.read(0)[0])
+        lines = [(_ts_key(m["timestamp"]), _fmt_watch(m, color)) for m in msgs]
+        lines += [(_ts_key(e.get("ts")), _fmt_event(e, color))
+                  for e in evs if _event_for(e, room)]
+        for _k, line in sorted(lines, key=lambda x: x[0]):
+            print(line)
         show_state(client)
 
         if not args.follow:
@@ -355,11 +449,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 raw = client.read_messages(room, limit=100, after=cursor)
                 new = [simplify_message(m) for m in raw]
                 new.reverse()
-                if new:
-                    for m in new:
-                        print(_fmt_watch(m, color))
-                    cursor = new[-1]["id"]
-                    show_state(client)
+                evs = []
+                if not args.no_events:
+                    evs, ev_offset = events.read(ev_offset)
+                    servers.seen(evs)
+                    evs = [e for e in evs if _event_for(e, room)] + servers.gone()
+                if new or evs:
+                    lines = [(_ts_key(m["timestamp"]), _fmt_watch(m, color)) for m in new]
+                    lines += [(_ts_key(e.get("ts")), _fmt_event(e, color)) for e in evs]
+                    for _k, line in sorted(lines, key=lambda x: x[0]):
+                        print(line)
+                    if new:
+                        cursor = new[-1]["id"]
+                        show_state(client)
                     sys.stdout.flush()  # stream promptly even when piped
                 time.sleep(args.interval)
         except KeyboardInterrupt:
@@ -398,8 +500,15 @@ def _watch_all(cfg: dict[str, Any], args: argparse.Namespace, color: bool) -> in
         cursors: dict[str, str] = {}
         print("─ #(all local rooms) " + "─" * 24)
         entries = collect(client, cursors, initial=True)
-        for _id, room, m in entries:
-            print(_fmt_watch(m, color, room=room))
+        evs, ev_offset = ([], 0) if args.no_events else events.recent(
+            _since(entries[0][2]["timestamp"] if entries else None))
+        servers = _ServerWatch([] if args.no_events else events.read(0)[0])
+        lines = [(_ts_key(m["timestamp"]), _fmt_watch(m, color, room=room))
+                 for _id, room, m in entries]
+        lines += [(_ts_key(e.get("ts")), _fmt_event(e, color, room=str(e.get("room") or "")))
+                  for e in evs]
+        for _k, line in sorted(lines, key=lambda x: x[0]):
+            print(line)
         if not args.follow:
             if not entries:
                 print("(no rooms yet)")
@@ -408,9 +517,19 @@ def _watch_all(cfg: dict[str, Any], args: argparse.Namespace, color: bool) -> in
         try:
             while True:
                 batch = collect(client, cursors, initial=False)
-                if batch:
-                    for _id, room, m in batch:
-                        print(_fmt_watch(m, color, room=room))
+                evs = []
+                if not args.no_events:
+                    evs, ev_offset = events.read(ev_offset)
+                    servers.seen(evs)
+                    evs += servers.gone()
+                if batch or evs:
+                    lines = [(_ts_key(m["timestamp"]), _fmt_watch(m, color, room=room))
+                             for _id, room, m in batch]
+                    lines += [(_ts_key(e.get("ts")),
+                               _fmt_event(e, color, room=str(e.get("room") or "")))
+                              for e in evs]
+                    for _k, line in sorted(lines, key=lambda x: x[0]):
+                        print(line)
                     sys.stdout.flush()  # stream promptly even when piped
                 time.sleep(args.interval)
         except KeyboardInterrupt:
@@ -803,6 +922,8 @@ def build_parser() -> argparse.ArgumentParser:
     wc.add_argument("-n", "--limit", type=int, default=30, help="how many recent messages to show first (default 30)")
     wc.add_argument("--state", action="store_true", help="also show derived chat state (floor/others/hands)")
     wc.add_argument("--no-color", action="store_true", help="disable ANSI colors")
+    wc.add_argument("--no-events", action="store_true",
+                    help="hide session events (connects, joins, renames, refusals)")
     wc.set_defaults(func=cmd_watch)
 
     ij = sub.add_parser("interject", help="post a HUMAN turn into a local chat room (steer the agents)")
