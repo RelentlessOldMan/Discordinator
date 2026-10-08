@@ -21,9 +21,10 @@ own handle in that machine's .mcp.json (e.g. ``CodeCarverWork``).
 A session's name also survives its MCP server restarting (an /mcp reconnect):
 each process records the role it uses and the names it holds under its
 *session* - the Claude Code process that launched it (its parent, or above
-any launcher in between, such as discordinator-mcp.exe; the session lives on
-while the server restarts). Those names stay reserved for the session while
-it runs, so another session can't take them in the gap of a restart. A new server with the same parent picks
+any launcher in between, such as discordinator-mcp.exe or a python.exe
+running it; the session lives on while the server restarts). The name it goes
+by stays reserved for the session while it runs, so another session can't
+take it in the gap of a restart. A new server with the same parent picks
 the name back up, and takes over a claim the old server (still winding down)
 hasn't released yet, instead of becoming "-2" and missing turns sent to it.
 """
@@ -50,6 +51,7 @@ _resolved: dict[str, str] = {}
 # it - so forgetting `chatter` once doesn't switch the session's identity.
 _last_chatter: Optional[str] = None
 _restored = False  # this process has looked up its session's earlier identity
+_current: Optional[str] = None  # the handle this session's last chat call used
 
 SESSION_TTL = 7 * 24 * 3600.0  # forget a session record after a week unused
 
@@ -86,14 +88,23 @@ def session_key() -> Optional[str]:
     return _SESSION_KEY
 
 
-def _is_launcher(name: Optional[str]) -> bool:
+def _is_launcher(name: Optional[str], pid: Optional[int] = None) -> bool:
     """A process that only starts the server: the pip console-script launcher
     (discordinator-mcp.exe) or a Python launcher/venv shim (python.exe, py.exe)
-    - a new one each time the server starts, so never the session itself."""
+    running it - a new one each time the server starts, so never the session
+    itself. A Python process running anything else (a Python MCP host, a test
+    harness) is the session. With no ``pid`` (or its command line unreadable)
+    the name decides."""
     n = (name or "").casefold()
     if n.endswith(".exe"):
         n = n[:-4]
-    return n.startswith(("discordinator", "python")) or n in ("py", "pyw")
+    if n.startswith("discordinator"):
+        return True
+    if not (n.startswith("python") or n in ("py", "pyw")):
+        return False
+    cmd = process_cmdline(pid) if pid else None
+    return cmd is None or any(s in cmd.casefold()
+                              for s in ("discordinator.mcp_server", "discordinator-mcp"))
 
 
 def session_pid(ppid: int) -> int:
@@ -103,10 +114,56 @@ def session_pid(ppid: int) -> int:
     pid = ppid
     for _ in range(4):
         parent, name = process_parent(pid)
-        if not _is_launcher(name) or not parent:
+        if not parent or not _is_launcher(name, pid):
             break
         pid = parent
     return pid
+
+
+def process_cmdline(pid: int) -> Optional[str]:
+    """``pid``'s command line, or None if it can't be read."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            ntdll = ctypes.WinDLL("ntdll")
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+            ntdll.NtQueryInformationProcess.argtypes = [
+                wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.ULONG,
+                ctypes.POINTER(wintypes.ULONG)]
+
+            class UNICODE_STRING(ctypes.Structure):
+                _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT),
+                            ("Buffer", ctypes.c_void_p)]
+
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return None
+            try:
+                size = wintypes.ULONG(0)
+                buf = ctypes.create_string_buffer(4096)
+                for _ in range(2):
+                    # ProcessCommandLineInformation (60): Windows 8.1+.
+                    status = ntdll.NtQueryInformationProcess(
+                        handle, 60, buf, len(buf), ctypes.byref(size))
+                    if status == 0:
+                        us = UNICODE_STRING.from_buffer(buf)
+                        return ctypes.wstring_at(us.Buffer, us.Length // 2)
+                    if size.value <= len(buf):
+                        return None
+                    buf = ctypes.create_string_buffer(size.value)
+                return None
+            finally:
+                kernel32.CloseHandle(handle)
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:  # Linux
+            return fh.read().replace(b"\0", b" ").decode(errors="replace")
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def process_parent(pid: int) -> tuple[Optional[int], Optional[str]]:
@@ -197,7 +254,8 @@ def _remember() -> None:
         with _AppendLock(path):
             data = _load(path)
             data = {k: v for k, v in data.items() if _session_alive(k, now, v)}
-            data[key] = {"chatter": _last_chatter, "resolved": dict(_resolved), "ts": now}
+            data[key] = {"chatter": _last_chatter, "resolved": dict(_resolved),
+                         "handle": _current, "ts": now}
             config._atomic_write(path, json.dumps(data, indent=2, sort_keys=True))
     except OSError:
         pass  # only a convenience for the next restart
@@ -290,9 +348,12 @@ def _reserved(now: float) -> dict[str, str]:
         if key == mine or not _session_alive(key, now, entry):
             continue
         pid = key.split(":", 1)[0]
-        if pid.isdigit() and _is_launcher(process_parent(int(pid))[1]):
+        if pid.isdigit() and _is_launcher(process_parent(int(pid))[1], int(pid)):
             continue  # keyed by a launcher (before v1.0.39): not a session
-        for h in (entry.get("resolved") or {}).values():
+        # The name it goes by now (older records: every name it has used).
+        names = ([entry["handle"]] if isinstance(entry.get("handle"), str)
+                 else (entry.get("resolved") or {}).values())
+        for h in names:
             if isinstance(h, str):
                 out[chat.handle_key(h)] = h
     return out
@@ -353,7 +414,7 @@ def resolve(chatter: Optional[str], cfg: dict[str, Any],
     (across server restarts too): the same request resolves to the same handle.
     ``fresh`` (an explicit chat_begin) asks for the plain name again if it has
     come free since this session was renamed."""
-    global _last_chatter
+    global _last_chatter, _current
     restore()
     if chatter in (None, "") and _last_chatter is not None:
         chatter = _last_chatter
@@ -369,6 +430,7 @@ def resolve(chatter: Optional[str], cfg: dict[str, Any],
         # the name the other session now holds.
         handle = claim(held)
         _resolved[held_key] = handle
+        _current = handle
         _remember()
         return handle, (None if chat.same_handle(handle, held)
                         else _rename_note(held, handle, cfg))
@@ -378,6 +440,7 @@ def resolve(chatter: Optional[str], cfg: dict[str, Any],
     key = chat.handle_key(desired)
     handle = claim(desired if fresh else _resolved.get(key, desired))
     _resolved[key] = handle
+    _current = handle
     _remember()
     note = None
     if not chat.same_handle(handle, desired):

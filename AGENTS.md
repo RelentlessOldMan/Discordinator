@@ -224,19 +224,23 @@ case-insensitive (`Convex` = `convex`). A turn addressed to a project's bare
 handle (`to="ProjectB"`) reaches the session talking as `ProjectB/<role>` when
 it's the only session of that project in a chat still going in the room (or
 running on this machine) and nobody posts as plain `ProjectB`; with two roles
-around, address the role. `chat_say` spells such an
-address out as the full role name.
+around (in chats or running here), address the role. A turn keeps the role it
+meant when it was sent: once that role's chat ends, a newer role of the project
+isn't handed its turns. `chat_say` spells such an address out as the full role
+name.
 
 **Restarts keep the name.** A session is its Claude Code process: when its
 server restarts (`/mcp` reconnect, or a new `DISCORDINATOR_CHAT_HANDLE` taking
 effect), the new server picks up the session's role and name, and takes over a
 claim the old server still holds (Claude Code can leave the old one running) -
 so the session never turns into `CodeCarver-2` and misses the turns sent to it.
-This works however the server is started (`python -m ...`, the
-`discordinator-mcp` launcher, a venv's python): the session is the process
-above any launcher. While it restarts, its names stay its own - another
-session starting in that moment gets `-2` instead of taking them (and the
-replies meant for them).
+This works when the server is started directly (`python -m ...`) or through
+the `discordinator-mcp` launcher, a venv's python or `py`: the session is the
+process above those. (Any other wrapper in between - `cmd /c`, `uvx` - counts
+as the session itself, so a restart there starts over under a new name.)
+While it restarts, the name it goes by stays its own - another session
+starting in that moment gets `-2` instead of taking it (and the replies meant
+for it).
 A server whose client disconnects exits at once, even mid-`chat_await`, without
 reading anything meant for the session's next server.
 A brand-new session (quit and resumed) that omits `chatter` takes back a

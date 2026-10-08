@@ -191,6 +191,62 @@ def test_old_role_from_an_ended_chat_doesnt_block() -> None:
     check(chat.bare_aliases(two) == {}, "two roles both still chatting: still ambiguous")
 
 
+def test_two_running_roles_stay_ambiguous_after_their_chats_end() -> None:
+    print("two roles running here stay ambiguous once their earlier chats ended:")
+    _fresh()
+    r = "bare-ended-both"
+    c = LocalClient()
+    chat.send_chat(c, r, "ProjectB/ui", "over", "q1", to="X")
+    chat.send_chat(c, r, "X", "end", "bye", to="ProjectB/ui")
+    chat.send_chat(c, r, "ProjectB/api", "over", "q2", to="Y")
+    chat.send_chat(c, r, "Y", "end", "bye", to="ProjectB/api")
+    for h in ("ProjectB/ui", "ProjectB/api"):  # both start new chats
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "Z", "over", "which of you?", to="ProjectB")
+    for h in ("ProjectB/ui", "ProjectB/api"):
+        check(wait(h, r, 0.3)["timed_out"], f"{h} doesn't wake")
+        check(not mcp.chat_status(chatter=h, channel=r)["your_turn"],
+              f"{h} isn't told it's its turn")
+
+
+def test_end_to_the_bare_name_ends_the_roles_chat() -> None:
+    print("an end addressed to the bare name ends that role's chat:")
+    P = lambda h, s, to: {"participant": h, "to": to, "status": s, "body": ""}  # noqa: E731
+    hist = [P("ProjB/api", "over", "Peer"), P("Peer", "end", "ProjB"),
+            P("ProjB/convex", "over", "Peer")]
+    check(chat.bare_aliases(hist) == {"projb": "ProjB/convex"}, "api is gone, convex is the one")
+    check(chat.resolve_bare(hist)[1]["to"] == "ProjB/api", "the end itself was to api")
+    _fresh()
+    r = "bare-end-bare"
+    c = LocalClient()
+    chat.send_chat(c, r, "ProjB/api", "over", "earlier question", to="Peer")
+    chat.send_chat(c, r, "Peer", "end", "done", to="ProjB")
+    mcp.chat_begin(chatter="ProjB/convex", channel=r)
+    mcp.chat_say(text="new question", chatter="ProjB/convex", channel=r, to="Peer", wait=False)
+    chat.send_chat(c, r, "Peer", "over", "answer", to="ProjB")
+    b = wait("ProjB/convex", r)
+    check(b["your_turn"] and b["text"] == "answer", f"convex wakes: {b.get('timed_out')}")
+
+
+def test_old_bare_turns_arent_handed_to_a_newcomer() -> None:
+    print("a newer role isn't handed an ended chat's bare turns:")
+    _fresh()
+    r = "bare-newcomer"
+    c = LocalClient()
+    chat.send_chat(c, r, "X", "over", "for convex", to="ProjectB")
+    chat.send_chat(c, r, "ProjectB/convex", "over", "reply", to="X")
+    chat.send_chat(c, r, "X", "over", "again", to="ProjectB")
+    chat.send_chat(c, r, "ProjectB/convex", "impasse", "stuck", to="X")
+    out = chat.resolve_bare([chat.parse(m["content"]) for m in reversed(c.read_messages(r))],
+                            me="ProjectB/newrole")
+    check([p["to"] for p in out if p["participant"] == "X"] == ["ProjectB/convex"] * 2,
+          "they stay convex's")
+    mcp.chat_begin(chatter="ProjectB/newrole", channel=r)
+    st = mcp.chat_status(chatter="ProjectB/newrole", channel=r)
+    check(not st["your_turn"] and "ProjectB/convex" not in st["participants"],
+          f"not newrole's chat: {st['participants']}")
+
+
 def test_error_event_names_the_room() -> None:
     print("a failed call's event names the room it acted on:")
     from discordinator import events
@@ -214,6 +270,9 @@ def main() -> int:
     test_real_bare_session_keeps_its_turns()
     test_project_handle_no_false_lost_turn()
     test_old_role_from_an_ended_chat_doesnt_block()
+    test_two_running_roles_stay_ambiguous_after_their_chats_end()
+    test_end_to_the_bare_name_ends_the_roles_chat()
+    test_old_bare_turns_arent_handed_to_a_newcomer()
     test_error_event_names_the_room()
     print(f"\nALL {_passed} BARE-HANDLE CHECKS PASSED")
     return 0

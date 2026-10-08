@@ -412,6 +412,29 @@ def test_running_sessions_names_are_reserved() -> None:
         path.unlink(missing_ok=True)
 
 
+def test_only_the_current_name_is_reserved() -> None:
+    print("a running session keeps only the name it goes by now:")
+    _fresh()
+    path = handles.sessions_path()
+    path.write_text(json.dumps({"id:other-session": {
+        "chatter": "ui", "handle": "ProjQ/ui",
+        "resolved": {"projq": "ProjQ", "projq/ui": "ProjQ/ui"}, "ts": time.time()}}),
+        encoding="utf-8")
+    try:
+        live = handles.live_handles()
+        check("ProjQ/ui" in live and "ProjQ" not in live, f"its old bare name isn't held: {live}")
+        h, note = handles.resolve(None, {"chat_handle": "ProjQ"})
+        check(h == "ProjQ" and not note, f"another session gets the bare name: {h}")
+    finally:
+        path.unlink(missing_ok=True)
+    handles._resolved.clear()
+    handles._last_chatter = None
+    handles.resolve(None, {"chat_handle": "ProjQ"})
+    handles.resolve("ui", {"chat_handle": "ProjQ"})
+    rec = json.loads(path.read_text(encoding="utf-8"))[handles.session_key()]
+    check(rec.get("handle") == "ProjQ/ui", f"the record names the current one: {rec.get('handle')}")
+
+
 def test_session_is_found_past_launchers() -> None:
     print("the session is the process above any launcher:")
     for name in ("discordinator-mcp.exe", "python.exe", "Python3.12", "pythonw.exe", "py.exe",
@@ -422,9 +445,23 @@ def test_session_is_found_past_launchers() -> None:
     me, name = handles.process_parent(os.getpid())
     check(me == os.getppid() and handles._is_launcher(name),
           f"process_parent reads this process: {me} {name}")
-    top = handles.session_pid(os.getpid())  # this python is a launcher-like hop
-    check(top != os.getpid() and not handles._is_launcher(handles.process_parent(top)[1]),
-          f"walks up to a non-Python process: {handles.process_parent(top)[1]}")
+    check("test_handles" in (handles.process_cmdline(os.getpid()) or ""),
+          "process_cmdline reads this process")
+    # A Python process running something else (a Python MCP host, this test)
+    # is the session: two hosts started from one shell aren't one session.
+    check(not handles._is_launcher(name, os.getpid()), "this test's python isn't a launcher")
+    check(handles.session_pid(os.getpid()) == os.getpid(), "so the walk stops at it")
+    shim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
+                             "-m", "discordinator.mcp_server"])
+    host = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        time.sleep(0.5)
+        check(handles._is_launcher("python.exe", shim.pid),
+              "a python running the server (venv shim, py launcher) is a launcher")
+        check(not handles._is_launcher("python.exe", host.pid), "a python running other code isn't")
+    finally:
+        shim.kill()
+        host.kill()
 
 
 def main() -> int:
@@ -444,6 +481,7 @@ def main() -> int:
     test_turn_owed_to_the_name_before_a_project_handle()
     test_name_taken_meanwhile_isnt_shared()
     test_running_sessions_names_are_reserved()
+    test_only_the_current_name_is_reserved()
     test_session_is_found_past_launchers()
     print(f"\nALL {_passed} HANDLE CHECKS PASSED")
     return 0
