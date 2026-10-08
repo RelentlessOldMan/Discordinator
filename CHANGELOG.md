@@ -8,6 +8,16 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.39] - 2026-10-08
+Sessions keep their name behind a launcher and through the restart gap; slow replies go to their asker
+- Session restore works when the server is started through discordinator-mcp.exe or a venv python (the session is the process above any launcher)
+- A running session's names stay reserved while its server restarts, so a new session can't take them (and their replies)
+- A session passing its full name as chatter never shares it with another session
+- A reply owed after 30+ quiet minutes of work goes back to its asker, not to a newcomer's opener
+- Bare project handle: roles from ended chats no longer make it ambiguous
+- Rename note example fixed; error events name the resolved room in watch
+- After updating, restart every session's server (mixed versions disagree on what counts as a turn)
+
 ## [1.0.38] - 2026-10-07
 A turn to a project's bare handle reaches its role-named session
 - chat_await/chat_status: a turn to "ProjectB" wakes the session talking as "ProjectB/convex" when it's the only session of that project in the room and nobody posts as plain "ProjectB" (two roles: ambiguous, wakes neither)
