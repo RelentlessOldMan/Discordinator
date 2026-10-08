@@ -341,6 +341,34 @@ def test_plain_reply_reaches_its_peer() -> None:
     check(plain.startswith("Sent 1 message"), "elsewhere, send_message is a plain relay post")
 
 
+def _backdate(room: str, minutes: float) -> None:
+    from datetime import datetime, timedelta, timezone
+    from discordinator.local_client import local_dir
+    path = local_dir() / f"{room}.jsonl"
+    when = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    recs = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    for rec in recs:
+        rec["timestamp"] = when
+    path.write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+
+
+def test_long_work_reply_goes_to_its_asker() -> None:
+    print("a reply after 30+ minutes of quiet work still goes back to its asker:")
+    r = "long-work"
+    c = LocalClient()
+    mcp.chat_begin(chatter="B", channel=r)
+    chat.send_chat(c, r, "A", "over", "please run the full suite and report", to="B")
+    check(wait("B", r)["from"] == "A", "B gets A's request")
+    _backdate(r, 40)  # B works for 40 minutes without posting
+    chat.send_chat(c, r, "C", "over", "anyone around to look at my PR?")  # unaddressed
+    out = mcp.chat_say(text="all tests pass", chatter="B", channel=r, wait=False)
+    check(out.get("posted", True) and "error" not in out, "B's results aren't refused")
+    last = c.read_messages(r, limit=1)[0]["content"]
+    check(last.startswith("[B>A|over]"), f"they go to A: {last[:14]}")
+    st = chat.compute_state(c, r, "A")
+    check(st["your_turn"], "and it's A's turn")
+
+
 def main() -> int:
     test_other_chats_end_isnt_mine()
     test_two_pairs_not_multiparty()
@@ -354,6 +382,7 @@ def main() -> int:
     test_two_answers_at_once()
     test_same_label_sessions_relay()
     test_plain_reply_reaches_its_peer()
+    test_long_work_reply_goes_to_its_asker()
     print(f"\nALL {_passed} SHARED-ROOM CHECKS PASSED")
     return 0
 

@@ -207,9 +207,18 @@ def bare_aliases(parsed: list[Optional[dict[str, Any]]],
     handle in this room: a peer that only knows the project's name ("ProjectB")
     still reaches the session talking as "ProjectB/convex". Only when nobody
     posts under the bare name itself and exactly one role of that project is
-    around (posted, or is ``me``) - with two roles a bare address stays
-    ambiguous and wakes neither."""
-    keys = {handle_key(p["participant"]): p["participant"] for p in parsed if p}
+    around (in a chat still going, or is ``me``) - with two roles a bare
+    address stays ambiguous and wakes neither. A chat that ended (end/impasse)
+    takes its members out until they post again."""
+    keys: dict[str, str] = {}
+    for p in parsed:
+        if not p:
+            continue
+        keys[handle_key(p["participant"])] = p["participant"]
+        if p.get("status") in TERMINAL_STATUSES:
+            keys.pop(handle_key(p["participant"]), None)
+            if not _is_broadcast(p.get("to")):
+                keys.pop(handle_key(p["to"]), None)
     if me:
         keys.setdefault(handle_key(me), me)
     roles: dict[str, list[str]] = {}
@@ -245,7 +254,7 @@ def _means_me(client: DiscordClient, channel_id: str, to: Optional[str], me: str
     if not _could_mean(to, me):
         return False
     parsed = [parse(m.get("content") or "")
-              for m in client.read_messages(channel_id, limit=100)]
+              for m in reversed(client.read_messages(channel_id, limit=100))]  # oldest first
     return same_handle(bare_aliases(parsed, me).get(handle_key(to)), me)
 
 
@@ -1080,9 +1089,11 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
     my = handle_key(me)
     mine = grp(my)
     alone = len(mine) == 1
-    if not alone:
+    if not alone and not _owes_reply(msgs, parsed_list, my, mine):
         # A conversation nobody has spoken in for STALE_AFTER (dropped without
-        # an `end`) doesn't keep its members from hearing a new opener.
+        # an `end`) doesn't keep its members from hearing a new opener - unless
+        # I still owe its last turn an answer (a long piece of work): then my
+        # answer goes back to the one who asked, not to a newcomer.
         stamps = [_parse_ts(msgs[i]["timestamp"]) for i, p in enumerate(parsed_list)
                   if p is not None]
         stamps = [t for t in stamps if t is not None]
@@ -1120,6 +1131,26 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
     busy = [name for name, ts in others.values()
             if ts is None or latest is None or ts >= latest - STALE_AFTER]
     return scope, busy
+
+
+def _owes_reply(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[str, Any]]],
+                my: str, mine: set[str]) -> bool:
+    """Is the latest turn addressed to ``my`` (handle key) from my conversation
+    still unanswered - nothing completed by me since, and not past OWED_EXPIRY?"""
+    horizon = datetime.now(timezone.utc) - OWED_EXPIRY
+    for m, p in zip(reversed(msgs), reversed(parsed_list)):
+        if p is None:
+            continue
+        ts = _parse_ts(m.get("timestamp"))
+        if ts is not None and ts < horizon:
+            return False
+        who = handle_key(p["participant"])
+        if who == my and p["status"] in YIELD_STATUSES + TERMINAL_STATUSES:
+            return False
+        if (p["status"] in YIELD_STATUSES and who in mine and not _is_broadcast(p["to"])
+                and handle_key(p["to"]) == my):
+            return True
+    return False
 
 
 def _ends_mine(client: DiscordClient, channel_id: str, me: str,

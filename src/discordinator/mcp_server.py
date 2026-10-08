@@ -74,7 +74,19 @@ def _me_now() -> Optional[str]:
 def _log_error(tool: str, e: Exception, kwargs: dict[str, Any]) -> None:
     first = (str(e).strip().splitlines() or [type(e).__name__])[0]
     events.record("error", tool=tool, message=first[:200], handle=_me_now(),
-                  room=kwargs.get("channel"))
+                  room=_event_room(tool, kwargs.get("channel")))
+
+
+def _event_room(tool: str, channel: Optional[str]) -> Optional[str]:
+    """The room a tool call acted on, as `watch` names it (the resolved
+    channel, so an error made with the default room shows up in that room)."""
+    try:
+        cfg = config.load()
+        if tool.startswith("chat_"):
+            return config.resolve_chat_channel(cfg, channel)
+        return config.resolve_channel(cfg, channel)
+    except Exception:
+        return channel
 
 
 def _client(mode: Optional[str] = None) -> Client:
@@ -539,7 +551,7 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any]) -> l
     held = {chat.handle_key(h) for h in handles.live_handles()}
     found: dict[str, str] = {}
     msgs = client.read_messages(channel_id, limit=100)
-    for p in chat.resolve_bare([chat.parse(m.get("content") or "") for m in msgs], me):
+    for p in chat.resolve_bare([chat.parse(m.get("content") or "") for m in reversed(msgs)], me):
         if not p or p["status"] not in chat.YIELD_STATUSES or chat._is_broadcast(p["to"]):
             continue
         k = chat.handle_key(p["to"])
@@ -914,7 +926,7 @@ def _expand_bare(client: Client, channel_id: str, me: str,
     if not target or chat._is_broadcast(target) or "/" in target:
         return target
     parsed = [chat.parse(m.get("content") or "")
-              for m in client.read_messages(channel_id, limit=100)]
+              for m in reversed(client.read_messages(channel_id, limit=100))]  # oldest first
     parsed += [{"participant": h} for h in handles.live_handles()]
     full = chat.bare_aliases(parsed).get(chat.handle_key(target))
     return full if full and not chat.same_handle(full, me) else target

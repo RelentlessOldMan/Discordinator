@@ -20,8 +20,10 @@ own handle in that machine's .mcp.json (e.g. ``CodeCarverWork``).
 
 A session's name also survives its MCP server restarting (an /mcp reconnect):
 each process records the role it uses and the names it holds under its
-*session* - the Claude Code process that launched it (its parent; the session
-lives on while the server restarts). A new server with the same parent picks
+*session* - the Claude Code process that launched it (its parent, or above
+any launcher in between, such as discordinator-mcp.exe; the session lives on
+while the server restarts). Those names stay reserved for the session while
+it runs, so another session can't take them in the gap of a restart. A new server with the same parent picks
 the name back up, and takes over a claim the old server (still winding down)
 hasn't released yet, instead of becoming "-2" and missing turns sent to it.
 """
@@ -74,7 +76,7 @@ def session_key() -> Optional[str]:
             _SESSION_KEY = "id:" + explicit
         else:
             try:
-                ppid = os.getppid()
+                ppid = session_pid(os.getppid())
             except (OSError, AttributeError):
                 return None
             started = process_started(ppid)
@@ -82,6 +84,73 @@ def session_key() -> Optional[str]:
                 return None
             _SESSION_KEY = f"{ppid}:{started}"
     return _SESSION_KEY
+
+
+def _is_launcher(name: Optional[str]) -> bool:
+    """A process that only starts the server: the pip console-script launcher
+    (discordinator-mcp.exe) or a Python launcher/venv shim (python.exe, py.exe)
+    - a new one each time the server starts, so never the session itself."""
+    n = (name or "").casefold()
+    if n.endswith(".exe"):
+        n = n[:-4]
+    return n.startswith(("discordinator", "python")) or n in ("py", "pyw")
+
+
+def session_pid(ppid: int) -> int:
+    """The session process: ``ppid``, or above it past any launchers (Windows
+    starts the real interpreter as a child of discordinator-mcp.exe or of a
+    venv's python.exe)."""
+    pid = ppid
+    for _ in range(4):
+        parent, name = process_parent(pid)
+        if not _is_launcher(name) or not parent:
+            break
+        pid = parent
+    return pid
+
+
+def process_parent(pid: int) -> tuple[Optional[int], Optional[str]]:
+    """(parent pid, executable name) of ``pid``, or (None, None) if unknown."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            class PROCESSENTRY32W(ctypes.Structure):
+                _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                            ("th32ProcessID", wintypes.DWORD),
+                            ("th32DefaultHeapID", ctypes.c_void_p),
+                            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                            ("th32ParentProcessID", wintypes.DWORD),
+                            ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                            ("szExeFile", ctypes.c_wchar * 260)]
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+            kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+            kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+            kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            snap = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+            if not snap or snap == wintypes.HANDLE(-1).value:
+                return None, None
+            try:
+                e = PROCESSENTRY32W()
+                e.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+                ok = kernel32.Process32FirstW(snap, ctypes.byref(e))
+                while ok:
+                    if e.th32ProcessID == pid:
+                        return int(e.th32ParentProcessID), e.szExeFile
+                    ok = kernel32.Process32NextW(snap, ctypes.byref(e))
+            finally:
+                kernel32.CloseHandle(snap)
+            return None, None
+        with open(f"/proc/{pid}/stat", "rb") as fh:  # Linux: "pid (comm) state ppid ..."
+            raw = fh.read()
+        comm = raw[raw.index(b"(") + 1:raw.rindex(b")")].decode(errors="replace")
+        return int(raw.rsplit(b")", 1)[1].split()[1]), comm
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None, None
 
 
 def _session_alive(key: str, now: float, entry: Any) -> bool:
@@ -210,6 +279,25 @@ def _load(path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _reserved(now: float) -> dict[str, str]:
+    """Names other running sessions are known by (handle key -> handle), from
+    their session records: held for them while their server restarts, so a
+    new session can't take the name - and the turns sent to it - in the gap
+    before their next server claims it again."""
+    mine = session_key()
+    out: dict[str, str] = {}
+    for key, entry in _load(sessions_path()).items():
+        if key == mine or not _session_alive(key, now, entry):
+            continue
+        pid = key.split(":", 1)[0]
+        if pid.isdigit() and _is_launcher(process_parent(int(pid))[1]):
+            continue  # keyed by a launcher (before v1.0.39): not a session
+        for h in (entry.get("resolved") or {}).values():
+            if isinstance(h, str):
+                out[chat.handle_key(h)] = h
+    return out
+
+
 def _held_by_other(entry: Any, me: int, now: float) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -241,10 +329,12 @@ def claim(desired: str) -> str:
     path = registry_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     me, now = os.getpid(), time.time()
+    reserved = _reserved(now)
     with _AppendLock(path):
         reg = _load(path)
         handle, n = desired, 1
-        while _held_by_other(reg.get(chat.handle_key(handle)), me, now):
+        while (_held_by_other(reg.get(chat.handle_key(handle)), me, now)
+               or chat.handle_key(handle) in reserved):
             n += 1
             handle = _with_suffix(desired, n)
         # Prune dead/expired claims while we hold the lock.
@@ -270,12 +360,18 @@ def resolve(chatter: Optional[str], cfg: dict[str, Any],
     # A session renamed to e.g. "CodeCarver-2" that passes that name back as
     # `chatter` (as told: "pass the same chatter on every call") means itself,
     # not a role "CodeCarver/CodeCarver-2".
-    held = next((h for h in _resolved.values() if chat.same_handle(h, chatter)), None)
-    if held is not None:
+    held_key = next((k for k, h in _resolved.items() if chat.same_handle(h, chatter)), None)
+    if held_key is not None:
         _last_chatter = str(chatter)
-        claim(held)  # refresh the lease, as any call does
+        held = _resolved[held_key]
+        # Refresh the lease, as any call does - and if another session took the
+        # name meanwhile (this one restarted), use what the claim gave us, never
+        # the name the other session now holds.
+        handle = claim(held)
+        _resolved[held_key] = handle
         _remember()
-        return held, None
+        return handle, (None if chat.same_handle(handle, held)
+                        else _rename_note(held, handle, cfg))
     desired = compose(chatter, cfg.get("chat_handle"))
     if chatter not in (None, ""):
         _last_chatter = str(chatter)
@@ -285,10 +381,15 @@ def resolve(chatter: Optional[str], cfg: dict[str, Any],
     _remember()
     note = None
     if not chat.same_handle(handle, desired):
-        note = (f"'{desired}' is already in use by another live session on this "
-                f"machine, so you are '{handle}'. Pass chatter=\"<role>\" to pick a "
-                f"clearer name (e.g. chatter=\"ui\" -> '{desired}/ui').")
+        note = _rename_note(desired, handle, cfg)
     return handle, note
+
+
+def _rename_note(desired: str, handle: str, cfg: dict[str, Any]) -> str:
+    example = compose("ui", cfg.get("chat_handle"))
+    return (f"'{desired}' is already in use by another live session on this "
+            f"machine, so you are '{handle}'. Pass chatter=\"<role>\" to pick a "
+            f"clearer name (e.g. chatter=\"ui\" -> '{example}').")
 
 
 def current(chatter: Optional[str], cfg: dict[str, Any]) -> Optional[str]:
@@ -308,20 +409,26 @@ def current(chatter: Optional[str], cfg: dict[str, Any]) -> Optional[str]:
     # the project isn't answered for its sibling (which holds the bare name).
     reg = _load(registry_path())
     me, now = os.getpid(), time.time()
+    reserved = _reserved(now)
     handle, n = desired, 1
-    while _held_by_other(reg.get(chat.handle_key(handle)), me, now):
+    while (_held_by_other(reg.get(chat.handle_key(handle)), me, now)
+           or chat.handle_key(handle) in reserved):
         n += 1
         handle = _with_suffix(desired, n)
     return handle
 
 
 def live_handles() -> list[str]:
-    """Handles currently held by live sessions on this machine."""
+    """Handles currently held by live sessions on this machine (including a
+    running session's names while its server restarts)."""
     reg = _load(registry_path())
     me, now = os.getpid(), time.time()
-    return [v["handle"] for v in reg.values()
-            if isinstance(v, dict) and isinstance(v.get("handle"), str)
-            and (v.get("pid") == me or _held_by_other(v, me, now))]
+    out = {chat.handle_key(v["handle"]): v["handle"] for v in reg.values()
+           if isinstance(v, dict) and isinstance(v.get("handle"), str)
+           and (v.get("pid") == me or _held_by_other(v, me, now))}
+    for k, h in _reserved(now).items():
+        out.setdefault(k, h)
+    return list(out.values())
 
 
 def release_all() -> None:
