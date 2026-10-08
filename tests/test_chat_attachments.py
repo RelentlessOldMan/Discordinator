@@ -11,12 +11,17 @@ Run:  python tests/test_chat_attachments.py
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-chatatt-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))

@@ -10,13 +10,18 @@ Run:  python tests/test_chat_guard.py
 from __future__ import annotations
 
 import json
+import atexit
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-guard-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "cfg" / "config.json")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -63,6 +68,21 @@ def transcript(*entries) -> str:
     path = _TMP / f"t{len(list(_TMP.iterdir()))}.jsonl"
     path.write_text("\n".join(json.dumps(x) for x in flat) + "\n", encoding="utf-8")
     return str(path)
+
+
+def test_cut_short_result_isnt_an_error() -> None:
+    print("a long chat result Claude Code cut short isn't taken for an error:")
+    long_end = json.dumps({"from": "B", "text": "x" * 5000, "ended": True})[:3000]
+    p = transcript(user("go"), call("chat_await", {}, long_end))
+    check(run(p) == "", "a cut-short result (JSON that doesn't parse) -> allowed")
+    a, u = call("chat_await", {}, "Output too large; saved to a file")
+    u["message"]["content"][0]["is_error"] = False
+    check(run(transcript(user("go"), a, u)) == "", "a non-error result it can't read -> allowed")
+    a, u = call("chat_await", {}, "anything")
+    u["message"]["content"][0]["is_error"] = True
+    out = run(transcript(user("go"), a, u))
+    check(out and "returned an error" in json.loads(out)["reason"],
+          "a result marked is_error is still an error -> blocked once")
 
 
 def run(path: str, **extra) -> str:
@@ -303,6 +323,7 @@ def main() -> int:
     test_only_current_turn_counts()
     test_ignores_other_tools_and_subagents()
     test_result_shapes()
+    test_cut_short_result_isnt_an_error()
     test_never_breaks()
     test_cli_end_to_end()
     print(f"\nALL {_passed} CHAT-GUARD CHECKS PASSED")

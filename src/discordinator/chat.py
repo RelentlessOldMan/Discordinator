@@ -93,11 +93,24 @@ NUDGE_MARK = "⏳"  # ⏳
 _HEADER_RE = re.compile(r"^\[([^|\]>]{1,32})(?:>([^|\]]{1,32}))?\|([a-z]+)\]\s?(.*)$", re.S)
 
 
+RESERVED_HANDLES = BROADCAST_ALIASES | {"human"}
+
+
 def sanitize_handle(handle: str) -> str:
     h = re.sub(r"[|\]\[>]", "", str(handle)).strip()
     if not h:
         raise ValueError("participant handle is empty after removing []|> characters")
     return h[:32]
+
+
+def check_own_handle(handle: str) -> str:
+    """A handle a session may go by: not 'human' (that's how the human's
+    messages are delivered) or a broadcast word like 'all' (nobody could
+    address it)."""
+    if handle_key(handle) in RESERVED_HANDLES:
+        raise ValueError(f"'{handle}' can't be a chat handle - it's reserved "
+                         f"({', '.join(sorted(RESERVED_HANDLES))}). Pick another name.")
+    return handle
 
 
 def header(handle: str, status: str, to: Optional[str] = None) -> str:
@@ -158,10 +171,18 @@ def parse(content: str) -> Optional[dict[str, Optional[str]]]:
     """Return {participant, to, status, body} for a chat-formatted message, else
     None. ``to`` is None when the turn is unaddressed (broadcast / 2-party)."""
     m = _HEADER_RE.match(content or "")
-    if not m:
-        return None
+    if not m or m.group(3) not in STATUSES:
+        return None  # e.g. a human's "[URGENT|fyi] prod is down"
     return {"participant": m.group(1), "to": m.group(2),
             "status": m.group(3), "body": m.group(4)}
+
+
+def parse_msg(m: dict[str, Any]) -> Optional[dict[str, Optional[str]]]:
+    """``parse`` for a (simplified) message: only the bot posts chat turns, so a
+    human whose message happens to look like a header is still a human."""
+    if not m.get("bot"):
+        return None
+    return parse(m.get("content") or "")
 
 
 def handle_key(handle: Optional[str]) -> str:
@@ -364,7 +385,7 @@ def _room(client: DiscordClient, channel_id: str, me: Optional[str], scan: int =
     bare project handles readdressed to the role each meant (resolve_bare)."""
     raw = _history(client, channel_id, me, scan, upto)
     msgs = list(reversed([simplify_message(m) for m in raw]))  # chronological
-    parsed = resolve_bare([parse(m["content"]) for m in msgs], me, _live_here,
+    parsed = resolve_bare([parse_msg(m) for m in msgs], me, _live_here,
                           [m["timestamp"] for m in msgs])
     return msgs, parsed
 
@@ -382,7 +403,7 @@ def _means_me(client: DiscordClient, channel_id: str, to: Optional[str], me: str
     i = next((i for i, m in enumerate(msgs) if str(m["id"]) == str(message_id)), None)
     if i is not None and parsed[i] is not None:
         return same_handle(parsed[i]["to"], me)
-    return same_handle(bare_aliases([parse(m["content"]) for m in msgs], me, _live_here,
+    return same_handle(bare_aliases([parse_msg(m) for m in msgs], me, _live_here,
                                     [m["timestamp"] for m in msgs]).get(handle_key(to)), me)
 
 
@@ -396,7 +417,7 @@ def bare_taken(client: DiscordClient, channel_id: str, me: str,
             continue
         if p["status"] not in YIELD_STATUSES:
             continue
-        raw = parse(m["content"]) or {}
+        raw = parse_msg(m) or {}
         if (_could_mean(raw.get("to"), me) and not same_handle(p["to"], me)
                 and _project_of(p["to"]) == _project_of(me)):
             return p["to"]
@@ -493,7 +514,41 @@ def send_chat(client: DiscordClient, channel_id: str, me: str, status: str, text
             e.chat_pieces_sent, e.chat_pieces_total = i, len(pieces)  # type: ignore[attr-defined]
             e.chat_rest = join_pieces(pieces[i:])  # type: ignore[attr-defined]
             raise
+    _posted(channel_id, me, status, sent, to)
     return sent
+
+
+def _drop_last_post(channel_id: str, me: str) -> None:
+    if "last_post" not in _slot(config.load_state(), channel_id, me):
+        return
+    try:
+        with config.update_state() as state:
+            _slot(state, channel_id, me).pop("last_post", None)
+    except (OSError, config.LockTimeout):
+        pass
+
+
+def _posted(channel_id: str, me: str, status: str, sent: list[dict[str, Any]],
+            to: Optional[str] = None) -> None:
+    """Note my latest post (until it's answered, compute_state reads back at
+    least that far, so my own conversation never drops out of view while I
+    wait in a busy room), and on a yield or ending start the next wait afresh."""
+    last = next((str(m.get("id")) for m in reversed(sent) if isinstance(m, dict)
+                 and m.get("id") is not None), None)
+    try:
+        with config.update_state() as state:
+            slot = _slot(state, channel_id, me)
+            if last is not None:
+                slot["last_post"] = last
+            if status in YIELD_STATUSES + TERMINAL_STATUSES:
+                slot.pop("waiting_since", None)
+                slot.pop("nudged", None)
+                if slot.get("held") and to and not _is_broadcast(to):
+                    # Answered: a held turn from them is no longer waiting on me.
+                    slot["held"] = [h for h in slot["held"] if not same_handle(
+                        (h.get("result") or {}).get("from"), to)]
+    except (OSError, config.LockTimeout):
+        pass  # bookkeeping only: never fail a post that went out
 
 
 def _lean(collected: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -562,28 +617,38 @@ def unread_for_me(client: DiscordClient, channel_id: str, me: str) -> list[dict[
     out = []
     for raw in client.read_messages(channel_id, limit=100, after=cursor):
         m = simplify_message(raw)
-        if parse(m["content"]) is None and m.get("bot"):
+        if parse_msg(m) is None and m.get("bot"):
             continue
         if _wakes(client, channel_id, m, me):
             out.append(m)
     return list(reversed(out))
 
 
-def note_room(channel_id: str) -> None:
-    """Remember the room this machine's chat sessions are using, so the human's
-    `discordinator stop`/`interject`/`watch` find it without being told (the
-    room is usually set in a project's .mcp.json, which the shell never sees)."""
+def note_room(channel_id: str, local: bool) -> None:
+    """Remember the local room this machine's chat sessions are using, so the
+    human's `discordinator watch`/`interject`/`stop`/`tui` find it without being
+    told (the room - and the chat transport - are usually set in a project's
+    .mcp.json, which the shell never sees). A chat on Discord is watched in
+    Discord, so its room isn't remembered."""
+    if not local:
+        return
     try:
-        if config.load_state().get("last_chat_room") == channel_id:
+        if config.load_state().get("last_local_room") == channel_id:
             return
         with config.update_state() as state:
-            state["last_chat_room"] = channel_id
+            state["last_local_room"] = channel_id
     except OSError:
         pass  # only a convenience for the human's commands
 
 
 def last_room() -> Optional[str]:
-    room = config.load_state().get("last_chat_room")
+    state = config.load_state()
+    room = state.get("last_local_room")
+    if not room:
+        # Recorded before v1.0.42 (any transport): only if it's a local room.
+        from .local_client import LocalClient
+        old = state.get("last_chat_room")
+        room = old if old and LocalClient()._room_path(str(old)).exists() else None
     return str(room) if room else None
 
 
@@ -708,6 +773,16 @@ def await_turn(
         # old turns happen to be in the room.
         cursor0 = seed_cursor(client, channel_id, me)
         set_cursor(channel_id, me, cursor0)
+    held = _take_held(channel_id, me, from_whom)
+    while held is not None and not _held_still_open(client, channel_id, me, held):
+        held = _take_held(channel_id, me, from_whom)  # its chat ended since: drop it
+    if held is not None:
+        result = dict(held.get("result") or {})
+        result["note"] = ("This turn came in while you were waiting for someone else - "
+                          "it's your turn to answer it.")
+        if result.get("from"):
+            set_reply_to(channel_id, me, result["from"])
+        return _finish(channel_id, me, result)
     fresh = any(
         _wakes(client, channel_id, simplify_message(m), me, from_whom)
         for m in client.read_messages(channel_id, limit=50, after=cursor0))
@@ -753,9 +828,13 @@ def await_turn(
     # peer's turn - still arrives whole later.
     pending_by_sender = _load_partial(channel_id, me)
     want = from_whom
+    pos = _Position(channel_id, me)
 
     def done(result: dict[str, Any]) -> dict[str, Any]:
+        pos.save()
         _save_partial(channel_id, me, pending_by_sender)
+        if result.get("your_turn") or result.get("ended"):
+            _drop_last_post(channel_id, me)  # answered: no need to read back to it
         sender = result.get("from")
         if result.get("your_turn") and sender not in (None, "human", "participant"):
             set_reply_to(channel_id, me, sender)  # an unaddressed reply goes back to them
@@ -770,7 +849,7 @@ def await_turn(
 
     try:
         return _await_loop(client, channel_id, me, deadline, poll, nudge_after, want,
-                           pending_by_sender, done, since, nudged)
+                           pending_by_sender, done, since, nudged, pos)
     except BaseException:
         # A read failed (or we were interrupted) mid-way: the cursor has already
         # moved past any pieces in the buffers, so keep them for the next call.
@@ -779,23 +858,96 @@ def await_turn(
         except Exception:
             pass
         raise
+    finally:
+        try:
+            pos.save()
+        except Exception:  # noqa: BLE001 - never mask the real result/error
+            pass
+
+
+class _Position:
+    """My read position during one wait: moved in memory per message, and
+    written to the shared state once per batch and on return (a locked write
+    per message made a wait in a busy room slow). Turns for me that came while
+    I was waiting for someone else (``from_whom``) are held for my next wait."""
+
+    def __init__(self, channel_id: str, me: str) -> None:
+        self.channel_id, self.me = channel_id, me
+        self.at = self.saved = get_cursor(channel_id, me)
+        self.held: list[dict[str, Any]] = []
+
+    def move(self, message_id: str) -> None:
+        self.at = message_id
+
+    def save(self) -> None:
+        if self.at != self.saved:
+            set_cursor(self.channel_id, self.me, self.at)
+            self.saved = self.at
+        if self.held:
+            _hold(self.channel_id, self.me, self.held)
+            self.held = []
+
+
+HELD_MAX = 20
+
+
+def _hold(channel_id: str, me: str, items: list[dict[str, Any]]) -> None:
+    with config.update_state() as state:
+        slot = _slot(state, channel_id, me)
+        slot["held"] = (list(slot.get("held") or []) + items)[-HELD_MAX:]
+
+
+def _take_held(channel_id: str, me: str, from_whom: Optional[str]) -> Optional[dict[str, Any]]:
+    """The oldest held turn (from ``from_whom``, if given), removed from the slot."""
+    if not _slot(config.load_state(), channel_id, me).get("held"):
+        return None  # the usual case: no locked write
+    with config.update_state() as state:
+        slot = _slot(state, channel_id, me)
+        held = list(slot.get("held") or [])
+        i = next((i for i, h in enumerate(held) if from_whom is None
+                  or same_handle((h.get("result") or {}).get("from"), from_whom)), None)
+        if i is None:
+            return None
+        item = held.pop(i)
+        slot["held"] = held
+    return item
+
+
+def _held_still_open(client: DiscordClient, channel_id: str, me: str,
+                     item: dict[str, Any]) -> bool:
+    """Is a held turn still waiting on me - its chat not ended since (by its
+    sender, by an ending addressed to me, or by a human stop)?"""
+    sender = (item.get("result") or {}).get("from")
+    after = (item.get("message") or {}).get("id")
+    if not after:
+        return True
+    for raw in client.read_messages(channel_id, limit=100, after=str(after)):
+        m = simplify_message(raw)
+        if not m.get("bot") and is_human_stop(m.get("content") or ""):
+            return False
+        p = parse_msg(m)
+        if p is not None and p["status"] in TERMINAL_STATUSES and (
+                same_handle(p["participant"], sender) or same_handle(p["to"], me)):
+            return False
+    return True
 
 
 def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float,
                 poll: float, nudge_after: float, want: Optional[str],
                 pending_by_sender: dict[str, list[dict[str, Any]]], done: Any,
-                since: float, nudged: bool) -> dict[str, Any]:
+                since: float, nudged: bool, pos: _Position) -> dict[str, Any]:
     while True:
         if SHUTDOWN.is_set():
+            # Keep the pieces already read: the next server delivers the turn whole.
+            _save_partial(channel_id, me, pending_by_sender)
             return _result(me, channel_id, sender=None, status=None, text="", messages=[],
                            ended=False, stop_reason=None, your_turn=False, timed_out=True)
-        cursor = get_cursor(channel_id, me)
-        raw = client.read_messages(channel_id, limit=100, after=cursor)
+        raw = client.read_messages(channel_id, limit=100, after=pos.at)
         messages = list(reversed([simplify_message(m) for m in raw]))
 
         for m in messages:
-            set_cursor(channel_id, me, m["id"])
-            parsed = parse(m["content"])
+            pos.move(m["id"])
+            parsed = parse_msg(m)
 
             if parsed is None:
                 text = m["content"]
@@ -865,8 +1017,6 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
                     your_turn=False, addressed_to=to, attachments=atts))
 
             # A yielded turn (over/wrap). Does the floor actually come to me?
-            if want is not None and not same_handle(sender, want):
-                continue  # waiting specifically for a different peer
             if not _targets(to, me) and not _means_me(client, channel_id, to, me, m["id"]):
                 continue  # addressed to another peer — keep holding the wait
             if _is_broadcast(to) and not _broadcast_for_me(client, channel_id, me, m["id"]):
@@ -876,6 +1026,10 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
                 me, channel_id, sender=sender, status=status, text=text,
                 messages=_lean(pieces), ended=False, stop_reason=None,
                 your_turn=True, addressed_to=to, attachments=atts)
+            if want is not None and not same_handle(sender, want):
+                # For me, but I'm waiting for someone else: my next wait gets it.
+                pos.held.append({"message": m, "result": result})
+                continue
             result.update(_floor_context(client, channel_id, me))
             return done(result)
 
@@ -909,6 +1063,7 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
                 + (" (A channel reminder was posted so a human can poke the other "
                    "session.)" if nudged else ""))
             return result
+        pos.save()
         SHUTDOWN.wait(poll)
 
 
@@ -1153,14 +1308,17 @@ HISTORY_CAP = 500
 def _history(client: DiscordClient, channel_id: str, me: Optional[str], scan: int,
              upto: Optional[str]) -> list[dict[str, Any]]:
     """Recent messages, newest first: one page, plus older pages back to my read
-    position if more than a page has arrived since (whatever is owed to me lies
-    after it). ``upto`` reads as if that message were the latest."""
+    position (whatever is owed to me lies after it) and to my own latest post
+    (my conversation's last turns - a peer's `working` - lie after that), if
+    more than a page has arrived since. ``upto`` reads as if that message were
+    the latest."""
     kw = {"before": str(int(upto) + 1)} if upto is not None else {}
     page = client.read_messages(channel_id, limit=max(1, min(scan, 100)), **kw)
     out = list(page)
     try:
-        mark = get_cursor(channel_id, me) if me else None
-        cursor = int(mark) if mark is not None else None
+        slot = _slot(config.load_state(), channel_id, me) if me else {}
+        marks = [int(x) for x in (slot.get("cursor"), slot.get("last_post")) if x is not None]
+        cursor = min(marks) if marks else None
     except ValueError:
         cursor = None
     while (cursor is not None and len(page) == 100 and len(out) < HISTORY_CAP
@@ -1168,6 +1326,22 @@ def _history(client: DiscordClient, channel_id: str, me: Optional[str], scan: in
         page = client.read_messages(channel_id, limit=100, before=page[-1]["id"])
         out.extend(page)
     return out
+
+
+def has_posted(client: DiscordClient, channel_id: str, handle: str) -> bool:
+    """Has ``handle`` posted a chat turn in the room's last HISTORY_CAP messages?"""
+    page = client.read_messages(channel_id, limit=100)
+    seen = 0
+    while page:
+        for m in page:
+            p = parse_msg(simplify_message(m))
+            if p is not None and same_handle(p["participant"], handle):
+                return True
+        seen += len(page)
+        if len(page) < 100 or seen >= HISTORY_CAP:
+            return False
+        page = client.read_messages(channel_id, limit=100, before=page[-1]["id"])
+    return False
 
 
 def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[str, Any]]],
@@ -1245,7 +1419,13 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
                        if p is not None and (handle_key(p["participant"]) in mine or (
                            not _is_broadcast(p["to"]) and handle_key(p["to"]) in mine))]
         mine_stamps = [t for t in mine_stamps if t is not None]
-        if stamps and mine_stamps and max(mine_stamps) < max(stamps) - STALE_AFTER:
+        # A member that said it's `working` keeps the conversation for as long
+        # as reminders hold off for it (WORKING_GRACE), not just STALE_AFTER.
+        last_mine = next((p for p in reversed(parsed_list) if p is not None
+                          and handle_key(p["participant"]) in mine), None)
+        window = (WORKING_GRACE if last_mine and last_mine["status"] == "working"
+                  else STALE_AFTER)
+        if stamps and mine_stamps and max(mine_stamps) < max(stamps) - window:
             alone = True
 
     def ep(k: str) -> int:
@@ -1299,11 +1479,29 @@ def _owes_reply(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[str,
 
 def _ends_mine(client: DiscordClient, channel_id: str, me: str,
                p: dict[str, Any], message_id: str) -> bool:
-    """Does this end/impasse end MY conversation (not another one in the room)?"""
+    """Does this end/impasse end MY conversation (not another one in the room)?
+    An unaddressed one ends an unaddressed chat I took part in - not the wait
+    of a session that hasn't said anything yet (still waiting for its opener)."""
     if not _is_broadcast(p.get("to")) and _means_me(client, channel_id, p.get("to"), me,
                                                     message_id):
         return True
-    return bool(compute_state(client, channel_id, me, upto=message_id).get("ended"))
+    if not compute_state(client, channel_id, me, upto=message_id).get("ended"):
+        return False
+    if not _is_broadcast(p.get("to")):
+        return True
+    msgs, parsed = _room(client, channel_id, me, upto=message_id)
+    i = next((i for i, m in enumerate(msgs) if str(m["id"]) == str(message_id)), len(msgs))
+    sender = handle_key(p.get("participant"))
+    for q in reversed(parsed[:i]):
+        if q is None:
+            continue
+        if q["status"] in TERMINAL_STATUSES and _is_broadcast(q["to"]):
+            return False  # nothing of mine since the last unaddressed ending
+        if same_handle(q["participant"], me) or (
+                not _is_broadcast(q["to"]) and same_handle(q["to"], me)
+                and handle_key(q["participant"]) == sender):
+            return True
+    return False
 
 
 def _broadcast_for_me(client: DiscordClient, channel_id: str, me: str,
@@ -1320,7 +1518,7 @@ def _wakes(client: DiscordClient, channel_id: str, m: dict[str, Any], me: str,
     unaddressed turn only counts if it's from my conversation."""
     if not _would_wake(m, me, from_whom):
         return False
-    p = parse(m.get("content") or "")
+    p = parse_msg(m)
     if p is None:
         return not m.get("bot")  # a human; relay traffic never wakes anyone
     if p["status"] in TERMINAL_STATUSES:
@@ -1382,7 +1580,7 @@ def _would_wake(m: dict[str, Any], me: str, from_whom: Optional[str] = None) -> 
     content = m.get("content") or ""
     if content.lstrip().startswith(NUDGE_MARK):
         return False
-    p = parse(content)
+    p = parse_msg(m)
     if p is None:
         return not m.get("bot")  # a human, not relay traffic
     if same_handle(p["participant"], me) or p["status"] in PROGRESS_STATUSES + ("ask",):

@@ -13,12 +13,17 @@ Run:  python tests/test_attachments_send.py
 from __future__ import annotations
 
 import json
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-send-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -110,6 +115,54 @@ def test_send_files_only_no_text() -> None:
         sent = client.send_files("chan", "", [_mkfile("a.png", b"img")], label="HOME")
         check(len(sent) == 1, "a files-only message still sends")
         check(b"a.png" in seen["body"], "the file is attached even with empty text")
+    finally:
+        client.close()
+
+
+def test_send_files_with_long_text() -> None:
+    print("send_files: text past one message is split, the files ride with its last piece:")
+    bodies: list = []
+
+    def handler(req):
+        if req.headers.get("content-type", "").startswith("multipart/form-data"):
+            body = req.content.split(b"payload_json", 1)[1]
+            content = json.loads(body[body.index(b"{"):body.index(b"}\r\n") + 1])["content"]
+        else:
+            content = json.loads(req.content)["content"]
+        check(len(content) <= 2000, f"each message is within Discord's limit ({len(content)})")
+        bodies.append(content)
+        return httpx.Response(200, json={"id": str(len(bodies))})
+
+    client = _mock_client(handler)
+    try:
+        text = "word " * 500 + "end"
+        sent = client.send_files("chan", text, [_mkfile("long.txt", b"x")], label="HOME")
+        check(len(sent) == 2 and all(b.startswith("[HOME] ") for b in bodies),
+              "two labeled messages: the text didn't fit in one")
+        check(" ".join(b[len("[HOME] "):] for b in bodies).split() == text.split(),
+              "all of the text arrived")
+    finally:
+        client.close()
+
+
+def test_label_too_long_and_blank_runs() -> None:
+    print("a label that leaves no room errors at once; a long blank run sends nothing empty:")
+    posted: list = []
+
+    def handler(req):
+        posted.append(json.loads(req.content)["content"])
+        return httpx.Response(200, json={"id": "1"})
+
+    client = _mock_client(handler)
+    try:
+        try:
+            client.send_message("chan", "hello " * 400, label="L" * 2000)
+            check(False, "a 2000-character label should raise")
+        except ValueError:
+            check(not posted, "it raises before posting anything (no endless split)")
+        client.send_message("chan", "start" + " " * 4500 + "end")
+        check(posted and all(p.strip() for p in posted),
+              f"no whitespace-only message is posted ({len(posted)} message(s))")
     finally:
         client.close()
 
@@ -256,6 +309,8 @@ def main() -> int:
         test_guess_content_type()
         test_send_single_file_multipart()
         test_send_files_only_no_text()
+        test_send_files_with_long_text()
+        test_label_too_long_and_blank_runs()
         test_send_batches_over_ten_files()
         test_send_rejects_oversize()
         test_send_missing_file()

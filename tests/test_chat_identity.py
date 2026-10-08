@@ -13,13 +13,18 @@ Run:  python tests/test_chat_identity.py
 from __future__ import annotations
 
 import json
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-ident-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
 os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"

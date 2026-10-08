@@ -13,12 +13,17 @@ Run:  python tests/test_attachments.py
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-attach-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -128,6 +133,15 @@ def test_filename_from_url() -> None:
           "percent-encoding is decoded")
     check(dc._filename_from_url("https://cdn.x/") == "attachment",
           "no filename in url -> 'attachment' fallback")
+    for url, want in (("https://cdn.x/a/..%2F..%2Fescaped.txt", "escaped.txt"),
+                      ("https://cdn.x/a/..%5C..%5Cevil.txt", "evil.txt"),
+                      ("https://cdn.x/a/C%3A%5CUsers%5Cabs.txt", "abs.txt"),
+                      ("https://cdn.x/a/%2Fetc%2Fpasswd", "passwd"),
+                      ("https://cdn.x/a/C%3Aabs.txt", "abs.txt"),
+                      ("https://cdn.x/a/..", "attachment"),
+                      ("https://cdn.x/a/..%2F", "attachment")):
+        got = dc._filename_from_url(url)
+        check(got == want, f"{url} -> {want!r} (no path escapes the directory), got {got!r}")
 
 
 # -- the opt-in gate (off by default) --------------------------------------
@@ -205,6 +219,12 @@ def test_discord_download_to_dir_uses_url_name() -> None:
         got = client.download_attachment("https://cdn.x/a/chart.png?ex=9", d)
         check(got == d / "chart.png", "filename is derived from the url into the directory")
         check(got.read_bytes() == b"img", "content written into the directory")
+        sub = d / "inner"
+        sub.mkdir(exist_ok=True)
+        got = client.download_attachment("https://cdn.x/a/..%2F..%2Fescaped.png", sub)
+        check(got.parent == sub and not (d / "escaped.png").exists()
+              and not (_TMP / "escaped.png").exists(),
+              "an encoded ../ in the url can't write outside the directory")
     finally:
         client.close()
 

@@ -167,10 +167,28 @@ def process_cmdline(pid: int) -> Optional[str]:
                 return None
             finally:
                 kernel32.CloseHandle(handle)
+        if not _HAS_PROC:
+            return _ps(pid, "command")
         with open(f"/proc/{pid}/cmdline", "rb") as fh:  # Linux
             return fh.read().replace(b"\0", b" ").decode(errors="replace")
     except (OSError, ValueError, AttributeError):
         return None
+
+
+# macOS and the BSDs have no /proc: ask ps instead.
+_HAS_PROC = os.name == "nt" or os.path.exists("/proc/self/stat")
+
+
+def _ps(pid: int, field: str) -> Optional[str]:
+    """One ``ps`` field for ``pid``, or None (no such process, or no ps)."""
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-o", f"{field}=", "-p", str(int(pid))],
+                             capture_output=True, text=True, timeout=5,
+                             env={**os.environ, "LC_ALL": "C"})
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None if out.returncode == 0 else None
 
 
 def process_parent(pid: int) -> tuple[Optional[int], Optional[str]]:
@@ -209,6 +227,9 @@ def process_parent(pid: int) -> tuple[Optional[int], Optional[str]]:
             finally:
                 kernel32.CloseHandle(snap)
             return None, None
+        if not _HAS_PROC:
+            ppid, comm = _ps(pid, "ppid"), _ps(pid, "comm")
+            return (int(ppid), os.path.basename(comm)) if ppid and comm else (None, None)
         with open(f"/proc/{pid}/stat", "rb") as fh:  # Linux: "pid (comm) state ppid ..."
             raw = fh.read()
         comm = raw[raw.index(b"(") + 1:raw.rindex(b")")].decode(errors="replace")
@@ -309,6 +330,9 @@ def process_started(pid: int) -> Optional[int]:
                 return (t[0].dwHighDateTime << 32) | t[0].dwLowDateTime
             finally:
                 kernel32.CloseHandle(handle)
+        if not _HAS_PROC:
+            started = _ps(pid, "lstart")  # e.g. "Thu Oct  8 22:06:49 2026"
+            return int(time.mktime(time.strptime(started, "%a %b %d %H:%M:%S %Y"))) if started else None
         with open(f"/proc/{pid}/stat", "rb") as fh:  # Linux; field 22 = starttime
             return int(fh.read().rsplit(b")", 1)[1].split()[19])
     except (OSError, ValueError, IndexError, AttributeError):
@@ -328,12 +352,12 @@ def compose(chatter: Optional[str], base: Optional[str]) -> str:
             "a fixed handle by setting DISCORDINATOR_CHAT_HANDLE in its .mcp.json env."
         )
     if not base:
-        return chat.sanitize_handle(chatter)
+        return chat.check_own_handle(chat.sanitize_handle(chatter))
     if not chatter or chat.same_handle(chatter, base):
-        return chat.sanitize_handle(base)
+        return chat.check_own_handle(chat.sanitize_handle(base))
     if chat.handle_key(chatter).startswith(chat.handle_key(base) + "/"):
-        return chat.sanitize_handle(chatter)
-    return chat.sanitize_handle(f"{base}/{chatter}")
+        return chat.check_own_handle(chat.sanitize_handle(chatter))
+    return chat.check_own_handle(chat.sanitize_handle(f"{base}/{chatter}"))
 
 
 def _with_suffix(handle: str, n: int) -> str:
@@ -395,13 +419,24 @@ def _held_by_other(entry: Any, me: int, now: float) -> bool:
     pid = entry.get("pid")
     if pid == me or not pid_alive(pid):
         return False
-    if entry.get("session") and entry.get("session") == session_key():
-        return False  # this session's previous server, still winding down
     started = entry.get("started")
+    if entry.get("session") and entry.get("session") == session_key():
+        # This session's previous server, still winding down - unless it
+        # started after this one: then it's the newer server (or a second
+        # client sharing the session, e.g. one DISCORDINATOR_SESSION_ID in
+        # two sessions), and two live servers never share a name.
+        return _newer_than_me(pid, started)
     current = process_started(pid) if started is not None else None
     if current is not None:
         return current == started  # same process: holds it, however long idle
     return now - float(entry.get("ts", 0) or 0) <= CLAIM_TTL
+
+
+def _newer_than_me(pid: Any, started: Any) -> bool:
+    mine = _my_start()
+    if not isinstance(started, (int, float)) or mine is None:
+        return False
+    return (started, pid) > (mine, os.getpid())
 
 
 def _my_start() -> Optional[int]:
@@ -437,9 +472,15 @@ def claim(desired: str) -> str:
                 prev.get("session") and prev.get("session") == session_key()))
             t = prev.get("since") if same else None
             _since[key] = float(t) if isinstance(t, (int, float)) else now
-        # Prune dead/expired claims while we hold the lock.
+        # Prune dead/expired claims while we hold the lock - and, taking a role
+        # of a project, the plain project name this session went by before: it
+        # would block the next session that wants it and look like a session
+        # still running under it.
+        bare = _resolved.get(chat.handle_key(handle.split("/", 1)[0])) if "/" in handle else None
+        dropped = chat.handle_key(bare) if bare and "/" not in bare else None
         reg = {k: v for k, v in reg.items()
-               if isinstance(v, dict) and (v.get("pid") == me or _held_by_other(v, me, now))}
+               if isinstance(v, dict) and (k != dropped if v.get("pid") == me
+                                           else _held_by_other(v, me, now))}
         reg[key] = {"handle": handle, "pid": me, "ts": now, "since": _since[key],
                     "started": _my_start(), "session": session_key()}
         config._atomic_write(path, json.dumps(reg, indent=2, sort_keys=True))
@@ -488,7 +529,10 @@ def resolve(chatter: Optional[str], cfg: dict[str, Any],
 
 
 def _rename_note(desired: str, handle: str, cfg: dict[str, Any]) -> str:
-    example = compose("ui", cfg.get("chat_handle"))
+    taken = {chat.handle_key(h) for h in live_handles()}
+    example = next((e for e in (compose(r, cfg.get("chat_handle"))
+                                for r in ("ui", "api", "docs", "tests", "review", "work"))
+                    if chat.handle_key(e) not in taken), compose("role2", cfg.get("chat_handle")))
     return (f"'{desired}' is already in use by another live session on this "
             f"machine, so you are '{handle}'. Pass chatter=\"<role>\" to pick a "
             f"clearer name (e.g. chatter=\"ui\" -> '{example}').")

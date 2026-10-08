@@ -7,7 +7,9 @@ in an MCP client (e.g. Claude Code / Claude Desktop) like:
       "mcpServers": {
         "discordinator": {
           "command": "discordinator-mcp",
-          "env": { "DISCORD_BOT_TOKEN": "..." }
+          "env": { "DISCORD_BOT_TOKEN": "...",
+                   "DISCORDINATOR_RELAY_TRANSPORT": "discord",
+                   "DISCORDINATOR_CHAT_TRANSPORT": "discord" }
         }
       }
     }
@@ -36,7 +38,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from . import chat, config, events, handles, use_system_certs
-from .client_factory import Client, make_client, make_client_for_url
+from .client_factory import Client, make_client, make_client_for_url, read_new
 from .discord_client import DiscordError, simplify_message
 
 # Keep the HTTP client quiet: it logs an INFO line per request to stderr, which
@@ -45,6 +47,13 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 mcp = MCPServer("discordinator")
+
+
+# Tool calls in progress: a disconnect lets them finish (a long turn going out
+# piece by piece) before the server exits.
+_running = 0
+_running_lock = threading.Lock()
+FINISH_WAIT = 20.0  # seconds, at most
 
 
 def _tool():
@@ -57,6 +66,9 @@ def _tool():
 
         @functools.wraps(fn)
         def reported(*args, **kwargs):
+            global _running
+            with _running_lock:
+                _running += 1
             try:
                 return fn(*args, **kwargs)
             except Exception as e:  # noqa: BLE001 - re-raised with its text
@@ -64,6 +76,9 @@ def _tool():
                 if isinstance(e, ToolError):
                     raise
                 raise ToolError(f"{type(e).__name__}: {e}") from e
+            finally:
+                with _running_lock:
+                    _running -= 1
         mcp.tool()(reported)
         return fn
     return register
@@ -162,18 +177,33 @@ def send_message(
     tag = label if label is not None else cfg.get("machine_label")
     with _client("relay") as client:
         sent = client.send_message(channel_id, text, label=tag)
-    _remember_sent(sent)
+    _remember_sent(cfg, sent)
     return f"Sent {len(sent)} message(s) to channel {channel_id}."
 
 
-# Ids of the relay messages this session (this server process) sent, so its own
-# inbox skips exactly those - not everything carrying its label, which another
-# session on the machine may share.
+# Ids of the relay messages this session sent, so its own inbox skips exactly
+# those - not everything carrying its label, which another session on the
+# machine may share. Also kept under the session (its Claude Code process), so
+# a restarted server doesn't hand the session back its own messages.
 _sent_ids: set[str] = set()
 
 
-def _remember_sent(sent: list[dict[str, Any]]) -> None:
-    _sent_ids.update(str(m.get("id")) for m in sent if isinstance(m, dict))
+def _reader(cfg: dict[str, Any]) -> Optional[str]:
+    """This session's relay read position key."""
+    handles.restore()
+    return config.relay_reader(cfg, handles.current(None, cfg) if handles._resolved else None)
+
+
+def _remember_sent(cfg: dict[str, Any], sent: list[dict[str, Any]]) -> None:
+    ids = [str(m.get("id")) for m in sent if isinstance(m, dict)]
+    _sent_ids.update(ids)
+    session = handles.session_key()
+    if session is None:
+        return  # no way to tell this session's next server; memory only
+    try:
+        config.note_sent(session, ids)
+    except OSError:
+        pass  # the in-memory list still covers this server
 
 
 def _owed_chat_reply(cfg: dict[str, Any], channel_id: str) -> Optional[tuple[str, str]]:
@@ -267,7 +297,7 @@ def send_file(
     file_list = [paths] if isinstance(paths, str) else list(paths)
     with _client("relay") as client:
         sent = client.send_files(channel_id, text, file_list, label=tag)
-    _remember_sent(sent)
+    _remember_sent(cfg, sent)
     return f"Sent {len(sent)} message(s) with {len(file_list)} file(s) to channel {channel_id}."
 
 
@@ -329,7 +359,8 @@ def get_new_messages(
             configured default channel.
         include_self: If true, also include the messages this session sent.
         limit: How many recent messages to return on the FIRST call (before a
-            cursor exists). Subsequent calls return everything new since.
+            cursor exists). Later calls return what's new since, up to 100
+            per call - call again until it comes back empty to catch up.
         ack: React ✅ to the newest returned message so the other side can see
             it was read (needs Add Reactions permission). Defaults to the
             configured ack_on_read setting when omitted.
@@ -338,26 +369,17 @@ def get_new_messages(
     """
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
-    handles.restore()
-    reader = config.relay_reader(cfg, handles.current(None, cfg) if handles._resolved else None)
+    reader = _reader(cfg)
     if ack is None:
         ack = bool(cfg.get("ack_on_read"))
-    cursor = config.get_cursor(channel_id, reader)
 
     capped = max(1, min(int(limit), 100))
     with _client("relay") as client:
-        if cursor:
-            raw = client.read_messages(channel_id, limit=100, after=cursor)
-        else:
-            raw = client.read_messages(channel_id, limit=capped)
-        messages = [simplify_message(m) for m in raw]
-        messages.reverse()
-
-        if messages:
-            config.set_cursor(channel_id, messages[-1]["id"], reader)
-
+        messages = read_new(client, channel_id, reader, capped)
         if not include_self:
-            messages = [m for m in messages if str(m["id"]) not in _sent_ids]
+            session = handles.session_key()
+            mine = _sent_ids | (config.sent_ids(session) if session else set())
+            messages = [m for m in messages if str(m["id"]) not in mine]
 
         if ack:
             _try_ack(client, channel_id, messages)
@@ -525,7 +547,7 @@ def _left_waiting(client: Any, channel_id: str, base: str) -> list[str]:
     held = {chat.handle_key(h) for h in handles.live_handles()}
     seen: dict[str, str] = {}
     for m in client.read_messages(channel_id, limit=100):
-        p = chat.parse(m.get("content") or "")
+        p = chat.parse_msg(simplify_message(m))
         if p and chat.handle_key(p["participant"]).startswith(prefix):
             seen.setdefault(chat.handle_key(p["participant"]), p["participant"])
     out = []
@@ -597,8 +619,9 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
     """Start or join a turn-based chat as participant `chatter`.
 
     Seeds your read position to *now* (prior history is ignored) and resets your
-    turn counter. BOTH participants call this first, with DISTINCT `chatter`
-    handles (e.g. "A" and "B"). Then the initiator calls `chat_say`; the other
+    turn counter. BOTH participants call this first (two sessions of the same
+    project each pass their own role as `chatter`; see below). Then the
+    initiator calls `chat_say`; the other
     calls `chat_await`. Do NOT have both call `chat_await` first — that deadlocks.
 
     Args:
@@ -613,7 +636,7 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         channel: chat channel name/id. Omit to use the dedicated chat channel
             (chat_channel / DISCORDINATOR_CHAT_CHANNEL — a shared room like
             claudes-chatroom); both sides then meet there with no negotiation.
-            Never defaults to a per-project relay channel unless one isn't set.
+            With no chat channel set, falls back to the relay default channel.
         turn_cap: soft cap on your turns before you're nudged to wrap up.
     """
     cfg = config.load()
@@ -627,7 +650,7 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         # silent stall; a long turn in progress arrives whole.
         cursor = chat.seed_cursor(client, channel_id, me)
     chat.reset(channel_id, me, cursor, turn_cap)
-    chat.note_room(channel_id)
+    chat.note_room(channel_id, config.is_local(cfg, "chat"))
     owed = bool(st.get("your_turn"))
     out = {
         "channel": channel_id, "chatter": me, "turn_cap": turn_cap,
@@ -722,7 +745,9 @@ def chat_say(
     paths in `text` yourself.
 
     If this call raises, the message was NOT posted (the error says so); if it
-    was your turn, it still is - fix the problem and call chat_say again. It
+    was your turn, it still is - fix the problem and call chat_say again. (One
+    exception, also spelled out in the error: a long message that failed
+    part-way had its first pieces posted as `say` - send just the rest.) It
     refuses on purpose when something for you arrived that you haven't read
     (call chat_await first) or when an unaddressed turn would talk over someone
     else's floor. If it returns `posted: true` with an `error`, the message WAS
@@ -769,7 +794,7 @@ def chat_say(
             except Exception as e:
                 raise ChatSendError(
                     f"{e}\n\nNothing was posted, so nobody saw this message.") from e
-            chat.note_room(channel_id)
+            chat.note_room(channel_id, config.is_local(cfg, "chat"))
             target = _expand_bare(client, channel_id, me, target)
             to_note = _unknown_to_note(client, channel_id, me, target)
             try:
@@ -844,7 +869,7 @@ def _check_turn(client: Client, channel_id: str, me: str, status: str,
     unread = [] if mid_turn else chat.unread_for_me(client, channel_id, me)
     if unread:
         m = unread[0]
-        p = chat.parse(m["content"])
+        p = chat.parse_msg(m)
         who = "A human" if p is None else p["participant"]
         raise RuntimeError(
             f"{who} posted something you haven't read yet (\"{(p['body'] if p else m['content'])[:80]}\"). "
@@ -939,8 +964,8 @@ def _expand_bare(client: Client, channel_id: str, me: str,
     so the turn names who it's for (see chat.bare_aliases)."""
     if not target or chat._is_broadcast(target) or "/" in target:
         return target
-    msgs = list(reversed(client.read_messages(channel_id, limit=100)))  # oldest first
-    full = chat.bare_target([chat.parse(m.get("content") or "") for m in msgs],
+    msgs = [simplify_message(m) for m in reversed(client.read_messages(channel_id, limit=100))]
+    full = chat.bare_target([chat.parse_msg(m) for m in msgs],
                             [m.get("timestamp") for m in msgs], me, target,
                             handles.live_claims)
     return full if full and not chat.same_handle(full, me) else target
@@ -958,6 +983,8 @@ def _unknown_to_note(client: Client, channel_id: str, me: str,
              if not chat.same_handle(h, me)]
     if any(chat.same_handle(target, h) for h in known):
         return None
+    if chat.has_posted(client, channel_id, target):
+        return None  # a peer (maybe on another machine) who spoke further back
     names = sorted({chat.handle_key(h): h for h in known}.values())
     close = difflib.get_close_matches(target.casefold(),
                                       [h.casefold() for h in names], n=1, cutoff=0.6)
@@ -1002,7 +1029,8 @@ def chat_await(
     conversations in the same room never wake you. A turn addressed
     to a DIFFERENT peer does not wake you — you keep holding the wait (the floor
     token). `ask` (a hand-raise), `say` and `working` never wake you. `from_whom`
-    optionally waits for a yielded turn from that one specific peer.
+    optionally waits for a yielded turn from that one specific peer; a turn for
+    you from anyone else meanwhile is kept, and your next chat_await returns it.
 
     It never blocks on yourself: if the turn is already yours it returns at once
     (`already_received`, with that turn's text), and if your own last message was
@@ -1132,8 +1160,11 @@ def _log_exit() -> None:
     global _exit_logged
     if not _exit_logged:
         _exit_logged = True
-        events.record("server_exit", handle=_me_now(),
-                      project=config.load().get("chat_handle") if not _me_now() else None)
+        try:
+            project = None if _me_now() else config.load().get("chat_handle")
+        except Exception:  # noqa: BLE001 - a bad config mustn't stop the exit
+            project = None
+        events.record("server_exit", handle=_me_now(), project=project)
 
 
 def _disconnected() -> None:
@@ -1144,7 +1175,12 @@ def _disconnected() -> None:
     chat.SHUTDOWN.set()
 
     def finish() -> None:
-        time.sleep(1.0)  # let a reply in flight go out
+        # Let calls in progress finish - a chat_await returns at once; a long
+        # post would otherwise stop halfway, leaving its peer an unfinished turn.
+        time.sleep(1.0)
+        deadline = time.monotonic() + FINISH_WAIT
+        while _running and time.monotonic() < deadline:
+            time.sleep(0.1)
         handles.release_all()
         _log_exit()
         os._exit(0)

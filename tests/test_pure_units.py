@@ -8,14 +8,19 @@ worth pinning down directly. Run:  python tests/test_pure_units.py
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 # A config path is only needed so importing `config` never touches a real one.
-os.environ["DISCORDINATOR_CONFIG"] = str(
-    Path(tempfile.mkdtemp(prefix="discordinator-units-")) / "config.json")
+_TMP = Path(tempfile.mkdtemp(prefix="discordinator-units-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
+os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -110,9 +115,15 @@ def test_transport_normalization() -> None:
     for val in ("local", "LOCAL", " local ", "file", "offline"):
         check(config.transport({"relay_transport": val}, "relay") == "local",
               f"'{val}' normalizes to local")
-    for val in ("discord", "DISCORD", "garbage"):
+    for val in ("discord", "DISCORD", " discord "):
         check(config.transport({"chat_transport": val}, "chat") == "discord",
-              f"{val!r} normalizes to discord (any non-local, non-empty value)")
+              f"{val!r} normalizes to discord")
+    for val in ("locla", "garbage"):
+        try:
+            config.transport({"chat_transport": val}, "chat")
+            raise AssertionError(f"{val!r} should raise, not quietly mean discord")
+        except config.ConfigError:
+            check(True, f"a misspelt transport {val!r} is an error, not discord")
     check(config.is_local({"relay_transport": "local"}, "relay") is True, "is_local True for local")
     # Unset / empty is NOT a silent default — it's an explicit error.
     for empty in ({}, {"relay_transport": ""}, {"relay_transport": None}):
@@ -250,7 +261,34 @@ def test_split_turn_survives_trimming() -> None:
           "blank lines and trailing spaces survive")
 
 
+def test_event_log_rotation() -> None:
+    print("the event log rotates without losing or repeating events for a follower:")
+    from discordinator import events
+    old = events.ROTATE_AT
+    events.ROTATE_AT = 2000
+    try:
+        events.record("first", n=0)
+        seen, cur = events.read(0)
+        for n in range(1, 60):
+            events.record("tick", n=n, pad="x" * 40)
+            if n % 7 == 0:  # the follower polls now and then
+                got, cur = events.read(cur)
+                seen += got
+        got, cur = events.read(cur)
+        seen += got
+        check(events._rotated().exists(), "the log rotated")
+        check(events.log_path().stat().st_size <= events.ROTATE_AT + 200,
+              "the live log stays small (no rewrite of the whole history)")
+        ns = [e.get("n") for e in seen]
+        kept = [e.get("n") for e in events.read(0)[0]]
+        check(ns == list(range(60)), f"the follower saw every event once, in order ({len(ns)})")
+        check(kept == sorted(kept) and kept[-1] == 59, "a fresh read gets the kept events in order")
+    finally:
+        events.ROTATE_AT = old
+
+
 def main() -> int:
+    test_event_log_rotation()
     test_chunk_content()
     test_simplify_message()
     test_transport_normalization()

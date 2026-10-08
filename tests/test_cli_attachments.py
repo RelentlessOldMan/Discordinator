@@ -8,12 +8,17 @@ storage under a throwaway dir.  Run:  python tests/test_cli_attachments.py
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-cli-att-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
 os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"

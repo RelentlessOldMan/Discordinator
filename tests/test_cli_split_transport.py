@@ -12,12 +12,17 @@ Run:  python tests/test_cli_split_transport.py
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-cli-split-"))
+os.chdir(_TMP)  # never the repo: a .env there would be loaded into the test
+atexit.register(lambda: (os.chdir(tempfile.gettempdir()),
+                         shutil.rmtree(_TMP, ignore_errors=True)))
 os.environ["DISCORDINATOR_CONFIG"] = str(_TMP / "config.json")
 for _k in ("DISCORDINATOR_TRANSPORT", "DISCORDINATOR_RELAY_TRANSPORT",
            "DISCORDINATOR_CHAT_TRANSPORT", "DISCORD_BOT_TOKEN"):
@@ -83,11 +88,66 @@ def test_relay_cli_uses_relay_transport() -> None:
 def test_chat_cli_uses_chat_transport() -> None:
     print("a chat CLI command runs on the chat transport (local), no network:")
     check(cli.main(["config", "set-chat-transport", "local"]) == 0, "set-chat-transport local ok")
+    from discordinator import chat
+    chat.send_chat(LocalClient("S"), "chatroom", "A", "over", "a chat going on", to="B")
     rc = cli.main(["interject", "hiya chat", "--channel", "chatroom"])
     check(rc == 0, "interject succeeded over the local chat transport")
     msgs = LocalClient("probe").read_messages("chatroom", limit=5)
     check(any("hiya chat" in (m.get("content") or "") for m in msgs),
           "the human interjection landed in the LOCAL chat room")
+
+
+def test_local_viewers_never_use_discord() -> None:
+    print("watch/interject/stop act on local rooms even when this shell's chat is on Discord:")
+    import contextlib
+    import io
+    from discordinator import chat
+    from discordinator.discord_client import DiscordClient
+
+    def no_discord(*_a, **_k):
+        raise AssertionError("a local viewer talked to Discord")
+
+    old = DiscordClient.read_messages, DiscordClient.send_message
+    DiscordClient.read_messages = DiscordClient.send_message = no_discord  # type: ignore[assignment]
+    try:
+        check(cli.main(["config", "set-chat-transport", "discord"]) == 0, "chat on discord here")
+        # A session chatting locally (transport set in its .mcp.json) and one
+        # chatting on Discord: only the local room is remembered for the human.
+        chat.send_chat(LocalClient("S"), "workroom", "A", "over", "local turn", to="B")
+        chat.note_room("workroom", True)
+        chat.note_room("1553829813624643634", False)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.main(["watch", "--no-events"])
+        check(rc == 0, "watch with no room exits 0")
+        check("#workroom" in out.getvalue() and "local turn" in out.getvalue(),
+              "watch shows the local room the sessions last used, not the Discord one")
+        check(cli.main(["interject", "steer"]) == 0, "interject works with chat on discord")
+        check(cli.main(["stop"]) == 0, "stop works with chat on discord")
+        msgs = [m.get("content") or "" for m in LocalClient("probe").read_messages("workroom", limit=5)]
+        check("steer" in msgs and any(chat.is_human_stop(m) for m in msgs),
+              "the interjection and the stop landed in that local room")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.main(["watch", "--all", "--no-events"])
+        check(rc == 0 and "local turn" in out.getvalue(), "watch --all works with chat on discord")
+    finally:
+        DiscordClient.read_messages, DiscordClient.send_message = old  # type: ignore[assignment]
+
+
+def test_local_room_names_as_defaults() -> None:
+    print("on local, set-default / set-chat-channel take any room name:")
+    check(cli.main(["config", "set-relay-transport", "local"]) == 0, "relay on local")
+    check(cli.main(["config", "set-chat-transport", "local"]) == 0, "chat on local")
+    check(cli.main(["config", "set-chat-channel", "claudes-chatroom"]) == 0,
+          "set-chat-channel accepts a plain room name")
+    check(cli.main(["config", "set-default", "myroom"]) == 0, "set-default accepts a plain room name")
+    cfg = config.load()
+    check(config.resolve_chat_channel(cfg, None) == "claudes-chatroom"
+          and config.resolve_channel(cfg, None) == "myroom", "and they're the defaults now")
+    check(cli.main(["config", "set-relay-transport", "discord"]) == 0, "relay on discord")
+    check(cli.main(["config", "set-default", "nosuch"]) == 1,
+          "on Discord an unknown name still needs add-channel first")
 
 
 def main() -> int:
@@ -97,6 +157,8 @@ def main() -> int:
     test_version_shows_each_mode()
     test_relay_cli_uses_relay_transport()
     test_chat_cli_uses_chat_transport()
+    test_local_viewers_never_use_discord()
+    test_local_room_names_as_defaults()
     print(f"\nALL {_passed} CLI-SPLIT-TRANSPORT CHECKS PASSED")
     return 0
 

@@ -87,10 +87,13 @@ hand, someone off working, a human stop) and also shows **session events** that
 never reach the room, from a per-machine log (`~/.discordinator/events.jsonl`):
 a session's server connecting or disconnecting (or vanishing without saying so),
 joining a room, being renamed or taking its name back, a turn sitting under its
-old name, and any tool call that failed, with the reason. `--no-events` hides them. With no room
-named, these act on the room this machine's chat sessions last used (the room is
-usually set in a project's `.mcp.json`, which your shell never sees); each prints
-the room it used. For a full-screen
+old name, and any tool call that failed, with the reason. `--no-events` hides them. These
+commands always act on **local** rooms, whatever chat transport your shell's
+config names (a chat on Discord you watch and steer in Discord itself). With no
+room named, they act on the local room this machine's chat sessions last used
+(the room and transport are usually set in a project's `.mcp.json`, which your
+shell never sees); each prints the room it used, and `stop`/`interject` refuse a
+local room nobody has chatted in. For a full-screen
 view + input box, `pip install -e .[tui]` then `discordinator tui` (type to
 interject, `/stop`, `/quit`). Same hard limit as everywhere: none of this can wake
 a session that has stopped running — `--state` just shows you which one to poke.
@@ -104,7 +107,7 @@ python -m pip install -e .
 1. https://discord.com/developers/applications → New Application → open **Bot** →
    **Reset Token** → copy it.
 2. Invite it to your server (OAuth2 → URL Generator → scope `bot` → permissions:
-   View Channels, Send Messages, Read Message History), or use:
+   View Channels, Send Messages, Read Message History, Add Reactions), or use:
    `https://discord.com/api/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=68672`
 3. **Enable the Message Content Intent** (Bot → Privileged Gateway Intents →
    MESSAGE CONTENT INTENT → on). It's required: without it, reads of messages the
@@ -167,7 +170,9 @@ give the same project a distinct handle in that machine's `.mcp.json` (e.g.
 Relay tools (`send_message`, `get_new_messages`, `read_messages`) default to
 `DISCORDINATOR_RELAY_CHANNEL`; chat tools (`chat_*`) default to `DISCORDINATOR_CHAT_CHANNEL`
 — two separate defaults so the async mailbox and the live chat never collide on one
-channel. (CLI equivalents: `config set-default` and `config set-chat-channel`.)
+channel. Set both: with no chat channel set, chat falls back to the relay default
+(on local, to room `chat` only when neither is set). (CLI equivalents: `config
+set-default` and `config set-chat-channel`; on local they take any room name.)
 
 **Or via CLI** (`-s user` = all projects; omit for current project only):
 ```powershell
@@ -184,7 +189,7 @@ Confirm inside Claude Code with `/mcp`.
 - **Chat (live two-way):** two agents talk in real time; `chat_await` blocks until
   the other finishes a turn (no human shuttling). Tools: `chat_begin`, `chat_say`,
   `chat_await`. See [Chat mode](#chat-mode-agent--agent) and the worked
-  [example](../docs/example-chat.md).
+  [example](docs/example-chat.md).
 
 ## MCP tools (relay + utilities)
 - `send_message(text, channel?, label?)` — post (long text auto-split; label on
@@ -219,7 +224,10 @@ Safety net: each session claims its handle machine-wide. If another **live**
 session on this machine already holds it, you get `CodeCarver-2` and `chat_begin`
 returns a `note` saying so (repeated as `handle_note` on every chat result) —
 two sessions can never silently share a name and ignore each other's turns. A
-session keeps its name for as long as it runs; claims free up when it exits. Handles are
+session keeps its name for as long as it runs; claims free up when it exits; a session
+that switches from the plain project name to a role frees the plain name. `human`
+and the broadcast words (`all`, `everyone`, `any`, `anyone`, `*`) can't be
+handles. Handles are
 case-insensitive (`Convex` = `convex`). A turn addressed to a project's bare
 handle (`to="ProjectB"`) reaches the session talking as `ProjectB/<role>` when
 it's the only session of that project around and nobody posts as plain
@@ -242,7 +250,12 @@ This works when the server is started directly (`python -m ...`) or through
 the `discordinator-mcp` launcher, a venv's python or `py`: the session is the
 process above those. (Any other wrapper in between - `cmd /c`, `uvx` - counts
 as the session itself, so a restart there starts over under a new name. So
-does a python whose command line can't be read, e.g. on Windows before 8.1.)
+does a python whose command line can't be read, e.g. on Windows before 8.1.
+On macOS the processes are looked up with `ps`.) A host that can't tell its
+sessions apart this way can set `DISCORDINATOR_SESSION_ID` in each session's
+server env - a different value per session: two live servers given the same
+one are told apart anyway (the newer one keeps the name, the older one becomes
+`-2`), so share it only between a session's restarts.
 While it restarts, the name it goes by stays its own - another session
 starting in that moment gets `-2` instead of taking it (and the replies meant
 for it).
@@ -282,7 +295,8 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
 > Because the room is shared, other chats may be going on in it. Each
 > conversation is kept to itself: its turns, its floor and its ending never reach
 > sessions talking in another one (a conversation is the sessions linked by
-> addressed turns). Replies are addressed automatically (below), so only the
+> addressed turns - so one turn addressed across two conversations joins them,
+> and an `end` in either then ends both). Replies are addressed automatically (below), so only the
 > **opener** needs care: if you know your peer's handle, address it
 > (`to="<peer>"`). An unaddressed opener is open to any session not already in a
 > conversation. `chat_begin` adds a `note` when another chat is in progress.
@@ -317,7 +331,8 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   cap_reached, next}` (plus `floor, pending_requests, waiting, suggest_next` when the
   floor comes to you in a multiparty room). A turn addressed to a *different* peer
   doesn't wake you — you hold until the floor is yours. `from_whom` narrows waking to
-  one peer. **If `timed_out` and not `ended`, call it again** — the other side is
+  one peer; a turn for you from anyone else meanwhile is kept, and your next
+  `chat_await` hands it over. **If `timed_out` and not `ended`, call it again** — the other side is
   still busy, and waiting a long time is fine; the timeout `note` shows what they
   said they're working on. (A session that owes a reply and sends it with
   `send_message` to the chat room has it posted as its chat turn to that peer. Any
@@ -340,7 +355,7 @@ returns the reply), other `chat_await`; then each side just keeps calling
 `chat_say(..., "over")` with its answer. **Every result has a `next` line — the
 exact next step; follow it.** **Don't** have both `chat_await` first (deadlock).
 End is mutual: one `wrap`, the other `end`. **The human can type `stop` (or
-`[[STOP]]`) in the channel to halt** - a message that is just a stop word ("stop",
+`[[STOP]]`) in the channel to halt** every chat in that room - a message that is just a stop word ("stop",
 "halt!", "end chat now"); a remark that merely starts with one ("Stop arguing and
 look at the test") is an ordinary remark. `chat_await` returns `ended` with
 `stop_reason="human"`, and a session that rejoins afterwards is told the chat was
@@ -571,7 +586,9 @@ python release.py "one-line summary" --bullet "detail" --bullet "detail"
 ## Gotchas
 - **Token stays local** — home config / git-ignored `.env` / MCP `env` block.
   Never commit it. `.env`, `config.json`, `state.json` are git-ignored.
-- **`.env` auto-load is cwd-based** — only helps when run from inside this repo.
+- **`.env` auto-load** — only this repo's own `.env`, and only when run from
+  inside the repo (a dev convenience). Another project's `.env` is never read,
+  so its `DISCORD_BOT_TOKEN` can't replace yours.
   For MCP launched from other projects, rely on the home config file.
 - **Python env** — `python -m discordinator.mcp_server` needs the package
   installed for that interpreter; pin a fixed path in `.mcp.json` for per-project

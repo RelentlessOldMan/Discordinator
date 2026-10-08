@@ -296,7 +296,14 @@ def transport(cfg: dict[str, Any], mode: str) -> str:
             f"or export {env}=<discord|local>."
         )
     val = str(val).strip().lower()
-    return "local" if val in ("local", "file", "offline") else "discord"
+    if val in ("local", "file", "offline"):
+        return "local"
+    if val == "discord":
+        return "discord"
+    raise ConfigError(
+        f"{key} is {val!r}, which isn't a transport - use 'discord' or 'local' "
+        f"(discordinator config set-{mode}-transport <discord|local>)."
+    )
 
 
 def is_local(cfg: dict[str, Any], mode: str) -> bool:
@@ -333,14 +340,17 @@ def _parse_env_file(path: Path) -> None:
 
 
 def load_dotenv() -> None:
-    """Search the current directory and its parents for a .env file and load
-    the nearest one. Lets you keep a project-local, git-ignored token file."""
-    start = Path.cwd()
-    for directory in (start, *start.parents):
-        env_file = directory / ".env"
-        if env_file.exists():
-            _parse_env_file(env_file)
-            return
+    """Load this repo's git-ignored .env when run from inside the repo (a dev
+    convenience). Never another project's .env: a session started in some
+    project whose .env holds its own DISCORD_BOT_TOKEN would otherwise post as
+    that project's bot."""
+    root = Path(__file__).resolve().parents[2]
+    try:
+        Path.cwd().resolve().relative_to(root)
+    except (ValueError, OSError):
+        return
+    if (root / ".env").exists():
+        _parse_env_file(root / ".env")
 
 
 def load_file() -> dict[str, Any]:
@@ -613,6 +623,24 @@ def set_cursor(channel_id: str, message_id: str, reader: Optional[str] = None) -
             mine[reader] = str(message_id)
         else:
             state.setdefault("cursors", {})[str(channel_id)] = str(message_id)
+
+
+SENT_KEEP = 500  # per reader: plenty for any backlog a read returns
+
+
+def note_sent(session: str, ids: list[str]) -> None:
+    """Remember relay messages a session (handles.session_key) sent, so its
+    inbox skips them even after its server restarts."""
+    if not ids:
+        return
+    with update_state() as state:
+        sent = state.setdefault("relay_sent", {})
+        kept = [i for i in sent.get(session) or [] if i not in ids] + list(ids)
+        sent[session] = kept[-SENT_KEEP:]
+
+
+def sent_ids(session: str) -> set[str]:
+    return set((load_state().get("relay_sent") or {}).get(session) or [])
 
 
 def clear_cursor(channel_id: str, reader: Optional[str] = None) -> None:
