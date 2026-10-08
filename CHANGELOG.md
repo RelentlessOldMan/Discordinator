@@ -8,6 +8,15 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.40] - 2026-10-08
+A bare project handle stays ambiguous with two roles running; Python MCP hosts are their own session
+- A turn to a project's bare handle counts the roles running on this machine, so two live roles stay ambiguous after their earlier chats ended (v1.0.39 woke both)
+- A bare turn keeps the role it meant when sent (or the role that answered it); an ended chat's turns aren't handed to a newer role
+- An end addressed to the bare handle ends its role's chat
+- Only a python.exe that runs the server (venv shim, py launcher) is walked past; a Python MCP host is its own session, so two hosts from one shell don't share a name
+- A running session keeps only the name it goes by now reserved
+- AGENTS.md: which launchers a restart sees through
+
 ## [1.0.39] - 2026-10-08
 Sessions keep their name behind a launcher and through the restart gap; slow replies go to their asker
 - Session restore works when the server is started through discordinator-mcp.exe or a venv python (the session is the process above any launcher)
