@@ -300,7 +300,7 @@ class LocalClient:
         path = self._room_path(channel_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         # Copy attachments BEFORE taking the room lock (a big copy could outlast
-        # the stale-lock limit and let another writer in). They go in a folder
+        # the other writers' wait and fail their posts). They go in a folder
         # named for the id this message will almost always get; if another
         # writer got in first, the files simply stay there (each attachment's
         # url says where, and retention cleanup follows the urls). Nothing is

@@ -259,7 +259,7 @@ closes the conversation it was sent in, and a human stop closes all of them.
 | A session owes a chat reply and sends it with `send_message` to the chat room | It's posted as that session's chat turn to the peer it owes, instead of an untagged message the room had to guess about (which could be credited to another chat). |
 | Two sessions on one machine relay with the same label | Each skips only the messages it sent itself, and each project keeps its own read position. |
 | A long relay message is cut | Each cut drops at most the one newline it falls on, and never leaves whitespace Discord would trim; blank lines and indentation survive. |
-| A session holding a shared file's lock stalls | Waiters no longer go ahead unlocked after 15s (which could lose an update). The lock holds its holder's pid: an exited holder's lock is taken at once, a live one's only after 2 minutes, and a waiter that runs out of time gets an error ("nothing was posted - try again"). |
+| A session holding a shared file's lock stalls | Waiters no longer go ahead unlocked after 15s (which could lose an update); a waiter that runs out of time gets an error ("nothing was posted - try again"). (Superseded in v1.0.44: locks are now OS locks, released when the holder exits.) |
 | A local delete while sessions read the room nonstop | If Windows won't allow the room to be rewritten, a deletion record is appended instead; reads skip those messages and the next rewrite drops them. A delete no longer fails. |
 
 ## A session is its Claude Code process (v1.0.36)
@@ -299,3 +299,15 @@ now drives real server processes over stdio.
 | Addressing a peer whose last post is 100+ messages back | No "nobody called that" warning. |
 | The client disconnects while a long `chat_say` is posting | The server lets calls in progress finish (up to 20s) before it exits. |
 | `watch` / `tui` / `interject` / `stop` with this shell's chat on Discord | They always act on local rooms (a Discord chat is watched in Discord), defaulting to the local room this machine's sessions last used. |
+
+## Locks the operating system releases (v1.0.44)
+
+Shared files (`state.json`, local rooms, the event log, the per-room post lock)
+used to be locked by creating a `.lock` file, with waiters taking over the file
+of a holder that had exited. On Linux and macOS, three or more waiters in a
+precise order could move a live lock aside and let two sessions write at once.
+Locks are now `flock` (Linux/macOS) or `LockFileEx` (Windows) on a `.flock`
+file: the operating system releases one the moment its holder exits, so there
+is no takeover step left to race. A holder that hangs while holding one (it
+never has, holds are a file read and write) keeps others waiting; each waiter
+errors after its timeout, naming the pid, instead of taking the lock away.

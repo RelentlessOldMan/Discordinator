@@ -4,7 +4,8 @@ The happy-path relay/chat round-trips live in test_local_transport.py. This file
 targets the failure and resource-management paths that are easy to regress and
 costly when they break: the tail-read fast path for id assignment on large
 rooms, tolerance of a torn trailing line, delete on a missing room, and the
-cross-process append lock's stale-steal / give-up-and-proceed behavior.
+cross-process append lock (released with its holder; a waiter errors
+rather than writing unlocked).
 Run:  python tests/test_local_client_extra.py
 """
 
@@ -105,39 +106,25 @@ def test_delete_missing_room_noop() -> None:
     check(True, "deleting from a missing room does not raise")
 
 
-def test_append_lock_stale_steal() -> None:
-    print("_AppendLock steals a stale lock (previous holder crashed):")
+def test_append_lock_released_on_exit() -> None:
+    print("_AppendLock: a released lock is free again, and a leftover lock file isn't a lock:")
     c = LocalClient(label="lock")
     room = "lockroom"
-    c.post(room, "seed")  # ensure the room file exists
+    c.post(room, "seed")
     target = c._room_path(room)
-    lockpath = Path(str(target) + ".lock")
-    lockpath.write_text("", encoding="utf-8")
-    old = time.time() - 120  # 2 minutes old -> older than the 30s stale window
-    os.utime(lockpath, (old, old))
-    with _AppendLock(target, timeout=1.0, stale=30.0) as lk:
-        check(lk.fd is not None, "a stale lock is stolen and the lock is genuinely acquired")
-    check(not lockpath.exists(), "stealing then releasing removes the lock file")
-
-
-def test_append_lock_steal_is_safe() -> None:
-    print("_AppendLock: a crashed holder's lock is stolen before anyone writes unlocked:")
-    lk = _AppendLock(_TMP / "steal.jsonl")
-    check(lk.stale < lk.timeout, f"default stale ({lk.stale}s) < timeout ({lk.timeout}s)")
-    lockpath = Path(str(_TMP / "steal.jsonl") + ".lock")
-    # Another waiter replaced the stale lock with a fresh one between our age
-    # check and our steal: the fresh lock must be put back, not deleted.
-    lockpath.write_text("", encoding="utf-8")
-    lk._steal()
-    check(lockpath.exists(), "a fresh lock grabbed by mistake is put back")
-    old = time.time() - 120
-    os.utime(lockpath, (old, old))
-    lk._steal()
-    check(not lockpath.exists(), "a stale lock is removed")
-    lk._steal()
-    check(True, "stealing a lock that's already gone is a no-op")
-    leftovers = [p for p in lockpath.parent.iterdir() if p.name.startswith(lockpath.name + ".")]
-    check(not leftovers, "no renamed-aside files left behind")
+    with _AppendLock(target, timeout=1.0) as lk:
+        check(lk.fd is not None, "acquired")
+    lockpath = Path(str(target) + ".flock")
+    check(lockpath.exists(), "the lock file stays (it only holds the last pid)")
+    t0 = time.monotonic()
+    with _AppendLock(target, timeout=1.0) as lk:
+        check(lk.fd is not None and time.monotonic() - t0 < 0.5,
+              "a lock file nobody holds is taken at once")
+    old = Path(str(target) + ".lock")  # what versions before 1.0.44 left behind
+    old.write_text("999999", encoding="utf-8")
+    with _AppendLock(target, timeout=1.0) as lk:
+        check(lk.fd is not None, "an old-style .lock file doesn't block it")
+    old.unlink()
 
 
 def test_read_retries_while_file_swapped() -> None:
@@ -166,23 +153,20 @@ def test_append_lock_timeout_raises() -> None:
     room = "lockroom2"
     c.post(room, "seed")
     target = c._room_path(room)
-    lockpath = Path(str(target) + ".lock")
-    # A FRESH lock held by someone else (recent mtime, not stale). We give up
-    # waiting after `timeout` - with an error, so nothing is written over the
-    # holder's update - and a hung peer still never freezes a chat forever.
-    lockpath.write_text("", encoding="utf-8")
+    holder = _AppendLock(target, timeout=1.0).__enter__()  # its own handle: excludes us too
     start = time.monotonic()
-    lk = _AppendLock(target, timeout=0.2, stale=30.0)
+    lk = _AppendLock(target, timeout=0.2)
     try:
         with lk:
             raise AssertionError("acquired a lock someone else holds")
-    except _config.LockTimeout:
-        pass
+    except _config.LockTimeout as e:
+        check(str(os.getpid()) in str(e), "the error names the holder's pid")
     waited = time.monotonic() - start
     check(lk.fd is None, "gives up acquiring (fd is None) and raises LockTimeout")
     check(0.2 <= waited < 3.0, "waited about the timeout, not indefinitely")
-    check(lockpath.exists(), "an unowned lock is left in place (not deleted)")
-    lockpath.unlink()  # cleanup our manual lock
+    holder.__exit__(None, None, None)
+    with _AppendLock(target, timeout=1.0) as lk:
+        check(lk.fd is not None, "free again once the holder lets go")
 
 
 def test_surface_parity() -> None:
@@ -322,8 +306,7 @@ def main() -> int:
     test_torn_trailing_line_tolerated()
     test_deleting_a_message_keeps_others_files()
     test_delete_missing_room_noop()
-    test_append_lock_stale_steal()
-    test_append_lock_steal_is_safe()
+    test_append_lock_released_on_exit()
     test_read_retries_while_file_swapped()
     test_append_lock_timeout_raises()
     test_surface_parity()
