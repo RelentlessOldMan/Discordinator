@@ -32,13 +32,13 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from . import chat, config, events, handles, use_system_certs
-from .client_factory import Client, make_client, make_client_for_url, read_new
+from .client_factory import Client, make_client, make_client_for_url, purge, purge_targets, read_new
 from .discord_client import DiscordError, simplify_message
 
 # Keep the HTTP client quiet: it logs an INFO line per request to stderr, which
@@ -171,14 +171,16 @@ def send_message(
     if owed is not None:
         me, peer = owed
         out = chat_say(text=text, chatter=me, channel=channel_id, to=peer, wait=False)
-        return (f"Sent as your chat turn to {peer} ({out['sent_messages']} message(s)) - "
+        return (f"Sent as your chat turn to {peer} ({out['sent_messages']} message(s), "
+                f"ids: {', '.join(out.get('message_ids', []))}) - "
                 "you owed them a reply in this chat room. Use chat_say for chat turns; "
                 "call chat_await to wait for their answer.")
     tag = label if label is not None else cfg.get("machine_label")
     with _client("relay") as client:
         sent = client.send_message(channel_id, text, label=tag)
-    _remember_sent(cfg, sent)
-    return f"Sent {len(sent)} message(s) to channel {channel_id}."
+    _remember_sent(cfg, sent, channel_id)
+    ids = ", ".join(str(m.get("id")) for m in sent)
+    return f"Sent {len(sent)} message(s) to channel {channel_id} (ids: {ids})."
 
 
 # Ids of the relay messages this session sent, so its own inbox skips exactly
@@ -194,7 +196,32 @@ def _reader(cfg: dict[str, Any]) -> Optional[str]:
     return config.relay_reader(cfg, handles.current(None, cfg) if handles._resolved else None)
 
 
-def _remember_sent(cfg: dict[str, Any], sent: list[dict[str, Any]]) -> None:
+# This server's posts, for delete_messages (also kept under the session).
+_my_posts: list[dict[str, Any]] = []
+
+
+def _remember_post(mode: str, channel_id: str, sent: list[dict[str, Any]],
+                   handle: Optional[str] = None) -> list[str]:
+    """Record a post (all its pieces) as this session's; returns its ids."""
+    ids = [str(m.get("id")) for m in sent if isinstance(m, dict) and m.get("id") is not None]
+    if not ids:
+        return ids
+    entries = [{"id": i, "channel": str(channel_id), "mode": mode, "post": ids[0],
+                **({"handle": handle} if handle else {})} for i in ids]
+    _my_posts.extend(entries)
+    session = handles.session_key()
+    if session is not None:
+        try:
+            config.note_posts(session, entries)
+        except OSError:
+            pass  # this server still remembers them
+    return ids
+
+
+def _remember_sent(cfg: dict[str, Any], sent: list[dict[str, Any]],
+                   channel_id: Optional[str] = None) -> None:
+    if channel_id is not None:
+        _remember_post("relay", channel_id, sent)
     ids = [str(m.get("id")) for m in sent if isinstance(m, dict)]
     _sent_ids.update(ids)
     session = handles.session_key()
@@ -297,8 +324,10 @@ def send_file(
     file_list = [paths] if isinstance(paths, str) else list(paths)
     with _client("relay") as client:
         sent = client.send_files(channel_id, text, file_list, label=tag)
-    _remember_sent(cfg, sent)
-    return f"Sent {len(sent)} message(s) with {len(file_list)} file(s) to channel {channel_id}."
+    _remember_sent(cfg, sent, channel_id)
+    ids = ", ".join(str(m.get("id")) for m in sent)
+    return (f"Sent {len(sent)} message(s) with {len(file_list)} file(s) to channel "
+            f"{channel_id} (ids: {ids}).")
 
 
 @_tool()
@@ -386,81 +415,137 @@ def get_new_messages(
     return messages
 
 
+def _all_my_posts() -> list[dict[str, Any]]:
+    """This session's posts, oldest first: this server's, plus its earlier
+    servers' (kept under the session)."""
+    session = handles.session_key()
+    saved = config.my_posts(session) if session is not None else []
+    seen: set[str] = set()
+    out = []
+    for e in saved + _my_posts:
+        if str(e.get("id")) not in seen:
+            seen.add(str(e.get("id")))
+            out.append(e)
+    return out
+
+
+@_tool()
+def delete_messages(message_ids: Optional[Union[str, list[str]]] = None,
+                    channel: Optional[str] = None) -> dict[str, Any]:
+    """Delete messages YOU (this session) posted - to fix a mistake, then post
+    the corrected version. With no `message_ids`, deletes your most recent post
+    (every piece of a long one). Ids come back from send_message, send_file and
+    chat_say (`message_ids`); naming one piece deletes its whole post.
+
+    Only your own messages: anything else is refused. To clear a channel of
+    everyone's messages, that's a purge (purge_messages).
+
+    A deleted chat turn is gone from the chat (if it was your turn you hold the
+    floor again) - but if someone already read it, they've seen it: the result
+    says when others have posted since, so you can send a correction too.
+
+    Args:
+        message_ids: id(s) of your messages to delete (default: your latest post).
+        channel: with no ids, your latest post in this channel (default: anywhere).
+    """
+    cfg = config.load()
+    posts = _all_my_posts()
+    if channel is not None:
+        rooms = {config.resolve_channel(cfg, channel)}
+        try:
+            rooms.add(config.resolve_chat_channel(cfg, channel))
+        except config.ConfigError:
+            pass
+        posts = [e for e in posts if e.get("channel") in rooms]
+    if message_ids in (None, "", []):
+        if not posts:
+            raise ValueError("You haven't posted anything this session can delete"
+                             + (" in that channel." if channel else "."))
+        wanted = {posts[-1]["post"]}
+    else:
+        ids = [message_ids] if isinstance(message_ids, str) else [str(i) for i in message_ids]
+        by_id = {str(e["id"]): e for e in posts}
+        foreign = [i for i in ids if i not in by_id]
+        if foreign:
+            raise ValueError(
+                f"Not your message(s): {', '.join(foreign)}. You can only delete what "
+                "this session posted; nothing was deleted. Clearing a channel of "
+                "everyone's messages is a purge (purge_messages).")
+        wanted = {by_id[i]["post"] for i in ids}
+    doomed = [e for e in posts if e["post"] in wanted]
+    groups: dict[tuple[str, str], list[str]] = {}
+    poster: dict[tuple[str, str], Optional[str]] = {}
+    for e in doomed:
+        groups.setdefault((e["mode"], e["channel"]), []).append(str(e["id"]))
+        poster[(e["mode"], e["channel"])] = e.get("handle")
+    deleted, notes = 0, []
+    for (mode, channel_id), ids in groups.items():
+        with _client(mode) as client:
+            if hasattr(client, "delete_messages"):
+                deleted += client.delete_messages(channel_id, ids)
+            else:
+                for i in ids:
+                    try:
+                        client.delete_message(channel_id, i)
+                        deleted += 1
+                    except DiscordError as e:
+                        if "(404)" not in str(e):  # already gone is fine
+                            raise
+            if mode == "chat":
+                since = [chat.parse_msg(simplify_message(m)) for m in
+                         client.read_messages(channel_id, limit=100, after=max(ids, key=int))]
+                me = poster[(mode, channel_id)] or handles._current
+                others = sorted({p["participant"] for p in since if p is not None
+                                 and not chat.same_handle(p["participant"], me)})
+                notes.append(
+                    f"{', '.join(others)} posted since - they may have read it already; "
+                    "post a correction as your next turn." if others else
+                    "Nobody had replied to it - post the corrected version now.")
+    gone = {str(e["id"]) for e in doomed}
+    _my_posts[:] = [e for e in _my_posts if str(e.get("id")) not in gone]
+    session = handles.session_key()
+    if session is not None:
+        config.forget_posts(session, gone)
+    out: dict[str, Any] = {"deleted": deleted, "message_ids": sorted(gone, key=int)}
+    if notes:
+        out["note"] = " ".join(notes)
+    return out
+
+
 @_tool()
 def purge_messages(
     channel: Optional[str] = None,
-    older_than_days: float = 7.0,
-    only_mine: bool = True,
-    scan_limit: int = 200,
     dry_run: bool = True,
+    older_than_days: float = 0,
+    scan_limit: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Delete old messages from a channel (housekeeping; destructive).
+    """Purge a channel: delete EVERY message in it - every machine's and
+    session's, a human's, interjections - any chat going on there included.
 
-    Defaults are safe: dry_run=True (nothing deleted, just reports what would be),
-    only_mine=True, and messages older than 7 days. Pass older_than_days=0 to
-    clear the channel regardless of age (that includes any chat going on in it
-    right now). Set dry_run=False to actually delete. Deleting other users'
-    messages (only_mine=False) requires the Manage Messages permission.
-
-    "Mine" is the bot's (on a local room: this machine label's) messages - every
-    machine posts as the same bot, and every session on a machine shares its
-    label, so it is NOT just this session's messages.
+    dry_run=True (default) only reports how many would go; call again with
+    dry_run=False to delete. On Discord, messages a person typed need the bot to
+    have the Manage Messages permission (the result says if any were left).
 
     Args:
         channel: Configured channel name or raw id. Defaults to the default channel.
-        older_than_days: Only affect messages older than this many days (0 = all).
-        only_mine: If true (default), only delete the bot's / label's messages.
-        scan_limit: How many recent messages to scan.
         dry_run: If true (default), report but do not delete.
+        older_than_days: Only messages older than this many days (0 = all, default).
+        scan_limit: Only the newest this many messages (default: all of them).
 
-    Returns a summary dict with counts and (on dry-run) the matched message ids.
+    Returns a summary: how many would be / were deleted, and anything left.
     """
-    from datetime import datetime, timedelta, timezone
-
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, channel)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
-
     with _client("relay") as client:
-        my_id = client.whoami().get("id")
-        collected: list[dict[str, Any]] = []
-        before: Optional[str] = None
-        while len(collected) < scan_limit:
-            batch = client.read_messages(
-                channel_id, limit=min(100, scan_limit - len(collected)), before=before
-            )
-            if not batch:
-                break
-            collected.extend(batch)
-            before = batch[-1]["id"]
-            if len(batch) < 100:
-                break
-
-        matched: list[dict[str, Any]] = []
-        for raw in collected:
-            m = simplify_message(raw)
-            if only_mine and m["author_id"] != my_id:
-                continue
-            ts = datetime.fromisoformat(m["timestamp"]) if m["timestamp"] else None
-            if ts is None or ts > cutoff:
-                continue
-            matched.append(m)
-
+        matched = purge_targets(client, channel_id, older_than_days * 86400 or None, scan_limit)
         if dry_run:
-            return {
-                "dry_run": True,
-                "would_delete": len(matched),
-                "message_ids": [m["id"] for m in matched],
-            }
-
-        if hasattr(client, "delete_messages"):  # local: one rewrite for all of them
-            deleted = client.delete_messages(channel_id, [m["id"] for m in matched])
-        else:
-            deleted = 0
-            for m in matched:
-                client.delete_message(channel_id, m["id"])
-                deleted += 1
-        return {"dry_run": False, "deleted": deleted}
+            return {"dry_run": True, "would_delete": len(matched),
+                    "message_ids": [m["id"] for m in matched]}
+        deleted, problems = purge(client, channel_id, matched)
+    out: dict[str, Any] = {"dry_run": False, "deleted": deleted}
+    if problems:
+        out["not_deleted"] = problems
+    return out
 
 
 @_tool()
@@ -801,17 +886,21 @@ def chat_say(
                 sent = chat.send_chat(client, channel_id, me, status, text, to=target,
                                       files=file_list)
             except Exception as e:
+                _remember_post("chat", channel_id, getattr(e, "chat_sent", []), me)
                 raise _send_failed(e, status) from e
+            message_ids = _remember_post("chat", channel_id, sent, me)
         finally:
             lock.__exit__(None, None, None)
         try:
-            return _after_post(client, channel_id, me, status, target, sent, shared,
-                               handle_note, auto_note, to_note, wait, timeout)
+            out = _after_post(client, channel_id, me, status, target, sent, shared,
+                              handle_note, auto_note, to_note, wait, timeout)
+            out["message_ids"] = message_ids
+            return out
         except Exception as e:
             # The message IS out - the others can see it. Say so, so it isn't
             # sent twice; the reply (if any) is fetched with chat_await.
-            out = {"sent_messages": len(sent), "status": status, "to": target,
-                   "posted": True, "ended": status in chat.TERMINAL_STATUSES,
+            out = {"sent_messages": len(sent), "message_ids": message_ids,
+                   "status": status, "to": target, "posted": True, "ended": status in chat.TERMINAL_STATUSES,
                    "error": f"{type(e).__name__}: {e}"}
             if status in chat.TERMINAL_STATUSES:
                 out["next"] = "The chat has ended. You may stop."
@@ -917,6 +1006,7 @@ def _after_post(client: Client, channel_id: str, me: str, status: str,
     _, cap = chat.get_meta(channel_id, me)
     out = {
         "sent_messages": len(sent),
+        "message_ids": [str(m.get("id")) for m in sent if isinstance(m, dict)],
         "status": status,
         "to": target,
         "my_turns": turns,

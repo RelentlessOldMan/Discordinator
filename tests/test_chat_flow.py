@@ -682,7 +682,7 @@ def test_purge_floor() -> None:
     room = "purgeall"
     c.send_message(room, "one")
     chat.send_chat(c, room, "A", "over", "a chat turn", to="B")
-    out = mcp.purge_messages(channel=room, older_than_days=0, only_mine=False, dry_run=False)
+    out = mcp.purge_messages(channel=room, dry_run=False)
     check(c.read_messages(room, limit=10) == [], f"room is empty: {out}")
 
 
@@ -712,7 +712,7 @@ def test_errors_reach_the_model() -> None:
     check(err is None and res is not None, "a working tool still returns its result")
     tools = asyncio.run(mcp.mcp.list_tools())
     say = next(t for t in tools if t.name == "chat_say")
-    check(len(tools) == 12 and {"text", "chatter", "status", "to"} <= set(say.input_schema["properties"]),
+    check(len(tools) == 13 and {"text", "chatter", "status", "to"} <= set(say.input_schema["properties"]),
           "every tool still registers with its parameters")
 
 

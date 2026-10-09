@@ -199,11 +199,18 @@ Confirm inside Claude Code with `/mcp`.
 - `get_new_messages(channel?, include_self?, limit?, ack?)` — **relay primitive**:
   only messages new since the last call (advances a per-channel cursor), with the
   messages this session sent filtered out. `ack=true` reacts ✅ to the newest.
-- `purge_messages(channel?, older_than_days?, only_mine?, scan_limit?, dry_run?)` —
-  delete old messages. Safe defaults: dry_run=True, only_mine=True, older than 7
-  days; `older_than_days=0` clears the channel regardless of age. "Mine" means the
-  bot's messages (on a local room, this machine label's) - every session's, not
-  just this session's.
+- `purge_messages(channel?, dry_run?, older_than_days?, scan_limit?)` — purge a
+  channel: delete every message in it, whoever posted it (any machine, a human,
+  interjections), any chat in it included. `dry_run=True` (default) only
+  reports; call again with `dry_run=False`. `older_than_days` / `scan_limit`
+  narrow it (default: all). On Discord, messages people typed need Manage
+  Messages; without it they're left and the result says so.
+- `delete_messages(message_ids?, channel?)` — delete messages **this session**
+  posted, to fix a mistake and post again: with no ids, its latest post (every
+  piece of a long one). `send_message`, `send_file` and `chat_say` return the
+  ids. Only its own - anything else is refused (clearing a channel is a purge).
+  A deleted chat turn never reaches anyone who hadn't read it; if others have
+  posted since, the result says so - send a correction too.
 - `list_channels()` — configured channel names + default.
 - `whoami()` — verify token / bot identity.
 
@@ -490,9 +497,9 @@ Topic: <TOPIC>
 ## Permissions
 Recommended invite: `permissions=68672` (View + Send + Read History + Add
 Reactions). Add Reactions powers the ✅ read-acks, which are ON by default
-(`ack_on_read`); without it, reads still work but skip the ✅. For `purge --all`
-(others' messages) also add Manage Messages → `permissions=76864`. Deleting the
-bot's OWN messages needs nothing extra.
+(`ack_on_read`); without it, reads still work but skip the ✅. For `purge` to
+delete messages people typed too, also add Manage Messages → `permissions=76864`
+(`109632` with Attach Files). The bot's own messages need nothing extra.
 
 ## Reading human messages
 If a person just types a message directly in the channel (no `[label]` tag),

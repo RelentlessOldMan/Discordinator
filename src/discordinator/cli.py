@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import __version__, chat, config, events, use_system_certs
-from .client_factory import make_client, read_new
+from .client_factory import make_client, purge, purge_targets, read_new
 from .discord_client import DiscordClient, DiscordError, simplify_message
 from .local_client import local_dir
 
@@ -616,75 +616,33 @@ def cmd_stop(args: argparse.Namespace) -> int:
 def cmd_purge(args: argparse.Namespace) -> int:
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, args.channel)
-
-    cutoff = None
-    if args.older_than:
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=_parse_duration(args.older_than))
+    older = _parse_duration(args.older_than) if args.older_than else None
 
     with make_client(cfg, "relay") as client:
-        my_id = client.whoami().get("id")
-
-        # Page back through history up to --limit messages.
-        collected: list[dict[str, Any]] = []
-        before: Optional[str] = None
-        while len(collected) < args.limit:
-            batch = client.read_messages(
-                channel_id, limit=min(100, args.limit - len(collected)), before=before
-            )
-            if not batch:
-                break
-            collected.extend(batch)
-            before = batch[-1]["id"]
-            if len(batch) < 100:
-                break
-
-        candidates: list[dict[str, Any]] = []
-        for raw in collected:
-            m = simplify_message(raw)
-            if not args.all and m["author_id"] != my_id:
-                continue  # default: only the bot's own messages
-            if cutoff is not None:
-                ts = datetime.fromisoformat(m["timestamp"]) if m["timestamp"] else None
-                if ts is None or ts > cutoff:
-                    continue  # not old enough
-            candidates.append(m)
-
-        if not candidates:
+        targets = purge_targets(client, channel_id, older, args.limit)
+        if not targets:
             print("nothing to delete.")
             return 0
-
-        scope = "all users'" if args.all else "the bot's own"
         window = f" older than {args.older_than}" if args.older_than else ""
         if args.dry_run:
-            print(f"[dry-run] would delete {len(candidates)} of {scope} message(s){window}:")
-            _print_messages(candidates)
+            print(f"[dry-run] would delete all {len(targets)} message(s){window}:")
+            _print_messages(list(reversed(targets)))
             return 0
-
         if not args.yes:
             if not sys.stdin.isatty():
-                return _err(
-                    f"{len(candidates)} {scope} message(s){window} match. "
-                    "Re-run with --yes to delete, or --dry-run to preview."
-                )
-            confirm = input(f"Delete {len(candidates)} {scope} message(s){window}? [y/N] ").strip().lower()
+                return _err(f"{len(targets)} message(s){window} would be deleted. "
+                            "Re-run with --yes to delete, or --dry-run to preview.")
+            confirm = input(f"Delete all {len(targets)} message(s){window}? [y/N] ").strip().lower()
             if confirm not in ("y", "yes"):
                 print("aborted.")
                 return 0
-
-        deleted = 0
-        if hasattr(client, "delete_messages"):  # local: one rewrite for all of them
-            try:
-                deleted = client.delete_messages(channel_id, [m["id"] for m in candidates])
-            except OSError as exc:
-                return _err(f"could not delete: {exc} (nothing was deleted; try again)")
-        else:
-            for m in candidates:
-                try:
-                    client.delete_message(channel_id, m["id"])
-                    deleted += 1
-                except DiscordError as exc:
-                    print(f"warning: could not delete {m['id']}: {exc}", file=sys.stderr)
-        print(f"deleted {deleted} message(s).")
+        try:
+            deleted, problems = purge(client, channel_id, targets)
+        except OSError as exc:
+            return _err(f"could not delete: {exc} (nothing was deleted; try again)")
+    for p in problems:
+        print(f"warning: {p}", file=sys.stderr)
+    print(f"deleted {deleted} message(s).")
     return 0
 
 
@@ -947,11 +905,11 @@ def build_parser() -> argparse.ArgumentParser:
     tp.add_argument("-n", "--limit", type=int, default=200, help="how many recent messages to load first (default 200)")
     tp.set_defaults(func=cmd_tui)
 
-    pp = sub.add_parser("purge", help="delete the bot's messages (all of them in the last --limit unless --older-than; asks first unless --yes)")
+    pp = sub.add_parser("purge", help="purge a channel: delete every message in it, whoever posted it (asks first unless --yes)")
     pp.add_argument("-c", "--channel", help="channel name (from config) or raw id")
     pp.add_argument("--older-than", help="only delete messages older than this (e.g. 7d, 24h, 30m)")
-    pp.add_argument("--all", action="store_true", help="delete everyone's messages, not just the bot's (needs Manage Messages)")
-    pp.add_argument("-n", "--limit", type=int, default=200, help="how many recent messages to scan (default 200)")
+    pp.add_argument("--all", action="store_true", help=argparse.SUPPRESS)  # always all now
+    pp.add_argument("-n", "--limit", type=int, default=None, help="only the newest N messages (default: all)")
     pp.add_argument("--dry-run", action="store_true", help="show what would be deleted without deleting")
     pp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     pp.set_defaults(func=cmd_purge)
