@@ -586,6 +586,14 @@ GitHub Actions (`.github/workflows/tests.yml`) runs every suite on each push and
 pull request, on Windows and Linux with Python 3.10 and 3.12. Check it's green
 before cutting a release.
 
+Those suites never reach Discord (a mock server stands in). Before a release,
+also run the **live suite** against a channel kept for testing - it posts,
+chats, deletes and **purges** there, so the channel's name must contain `test`
+(it refuses otherwise). It uses your configured token and a throwaway config:
+```powershell
+$env:DISCORDINATOR_LIVE_CHANNEL = "<test channel id>"; python tests/live/test_discord_live.py
+```
+
 ## Releasing
 Versioning is `1.0.x` (bump the patch each release). Once your code changes are
 committed, cut a release with the helper — it bumps `__version__`, prepends a
