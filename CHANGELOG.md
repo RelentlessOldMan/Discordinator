@@ -8,6 +8,14 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.46] - 2026-10-09
+Everything has a name: relay tags show machine and chat name; anything unset shows DefaultMachineName / DefaultChatName
+- Relay messages (send_message, send_file, CLI send) are tagged [machine/chat name], e.g. [Home/CodeCarver] or [Home/CodeCarver/ui] once the session has chatted with a role.
+- No machine label set: DefaultMachineName. No project chat handle and no chatter: the session is DefaultChatName (it was an error).
+- AGENTS.md has a table of all 8 machine/project/role combinations.
+- CLI relay still hides this machine's own messages (old [Home] and new [Home/...] tags).
+- Restart every session's server after updating.
+
 ## [1.0.45] - 2026-10-09
 Deleted turns stay deleted, partial sends can be cleaned up, purge reaches local chat rooms and bulk-deletes on Discord, abandoned chats don't swallow new openers
 - A chat turn deleted or purged after a session set it aside (waiting for someone else) is never handed to it; deleted pieces of an unfinished turn are dropped too.
