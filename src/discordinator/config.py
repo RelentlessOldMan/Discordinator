@@ -97,111 +97,109 @@ def pid_alive(pid: Any) -> bool:
     return True
 
 
-class FileLock:
-    """Cross-process lock via an ``O_EXCL`` lock file beside ``target``, which
-    holds the holder's pid.
+# Where the OS lock sits in a lock file: past the holder's pid (bytes 0-31),
+# so on Windows - where a locked range can't be read - waiters can still read
+# who holds it.
+_LOCK_BYTE = 4096
 
-    Holds are short, so contention is brief. A lock whose holder has exited is
-    taken over at once; one with no readable pid (being written, or from an
-    older version) after ``stale`` seconds; one whose holder is still running
-    only after ``hung`` seconds (no real hold lasts that long). A waiter that
-    can't get the lock within ``timeout`` raises :class:`LockTimeout` - never
-    goes ahead without it, which could write over the holder's update.
+
+class FileLock:
+    """Cross-process lock: an OS lock (``flock`` on Linux/macOS, ``LockFileEx``
+    via ``msvcrt.locking`` on Windows) on a lock file beside ``target``.
+
+    The operating system releases it the moment its holder exits or crashes, so
+    there's nothing to take over and no stale lock to clean up: the lock file
+    stays (it holds the last holder's pid, for the error message). Each
+    ``FileLock`` opens the file itself, so two in one process exclude each other
+    too. A waiter that can't get the lock within ``timeout`` raises
+    :class:`LockTimeout` - never goes ahead without it, which could write over
+    the holder's update.
     """
 
-    def __init__(self, target: Path, timeout: float = 15.0, stale: float = 8.0,
-                 hung: float = 120.0):
-        self.lockpath = str(target) + ".lock"
+    def __init__(self, target: Path, timeout: float = 15.0):
+        # Not ".lock": versions before 1.0.44 created and deleted that one.
+        self.lockpath = str(target) + ".flock"
         self.timeout = timeout
-        self.stale = stale
-        self.hung = hung
         self.fd: Optional[int] = None
 
     def __enter__(self) -> "FileLock":
         Path(self.lockpath).parent.mkdir(parents=True, exist_ok=True)
         start = time.monotonic()
         while True:
+            fd: Optional[int] = None
             try:
-                self.fd = os.open(self.lockpath, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                try:
-                    os.write(self.fd, str(os.getpid()).encode())
-                except OSError:
-                    pass  # an unreadable pid only means waiters fall back to `stale`
-                return self
-            except FileExistsError:
-                try:
-                    if self._abandoned(self.lockpath):
-                        self._steal()
-                except OSError:
-                    pass
+                fd = os.open(self.lockpath, os.O_RDWR | os.O_CREAT, 0o644)
+                if _try_lock(fd):
+                    self.fd = fd
+                    try:
+                        os.ftruncate(fd, 0)
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        os.write(fd, str(os.getpid()).encode())
+                    except OSError:
+                        pass  # only the error message's pid
+                    return self
             except PermissionError:
-                pass  # Windows: the lock file is mid-delete; try again
-            # Check the deadline and pause on EVERY path - a lock we fail to
-            # steal (its holder still has it open) must not spin forever.
+                pass  # Windows: e.g. a scanner has the file open; try again
+            if fd is not None:
+                os.close(fd)
+            # Check the deadline and pause on every path, so a held lock
+            # never spins.
             if time.monotonic() - start > self.timeout:
                 raise LockTimeout(
                     f"{self.lockpath} is held by another process (pid "
                     f"{self._holder(self.lockpath) or 'unknown'}) for over "
-                    f"{self.timeout:.0f}s; nothing was changed - try again.")
+                    f"{self.timeout:g}s; nothing was changed - try again.")
             time.sleep(0.02)
 
     @staticmethod
     def _holder(path: str) -> Optional[int]:
         try:
-            with open(path, "rb") as fh:
+            # Unbuffered: a buffered read takes 8KB, which on Windows runs into
+            # the locked byte and is refused.
+            with open(path, "rb", buffering=0) as fh:
                 return int(fh.read(32).decode().strip() or "x")
         except (OSError, ValueError):
             return None
 
-    def _abandoned(self, path: str) -> bool:
-        """May this lock be taken over? Its holder has exited, or it has been
-        held far longer than any real hold."""
-        age = time.time() - os.path.getmtime(path)
-        pid = self._holder(path)
-        if pid is None:
-            return age > self.stale
-        if pid == os.getpid() or pid_alive(pid):
-            return age > self.hung
-        return True
-
-    def _steal(self) -> None:
-        """Remove an abandoned lock. Renamed aside first (atomic: only one waiter
-        can win), then re-checked - if another waiter had just replaced it with
-        a live lock, that one is put back instead of deleted."""
-        aside = f"{self.lockpath}.{os.getpid()}.{time.monotonic_ns()}"
-        try:
-            os.rename(self.lockpath, aside)
-        except OSError:
-            return  # someone else got there first, or the holder still has it open
-        try:
-            if self._abandoned(aside):
-                os.remove(aside)
-            else:
-                os.rename(aside, self.lockpath)
-        except OSError:
-            try:
-                os.remove(aside)
-            except OSError:
-                pass
-
     def __exit__(self, *exc: object) -> None:
         if self.fd is not None:
+            fd, self.fd = self.fd, None
             try:
-                os.close(self.fd)
+                _unlock(fd)
+            except OSError:
+                pass  # closing releases it anyway
+            try:
+                os.close(fd)
             except OSError:
                 pass
-            self.fd = None
-            # Windows refuses the delete while a waiter is reading the pid out
-            # of it (a moment): retry, or the lock would be left behind with a
-            # live pid in it and everyone would wait it out.
-            for _ in range(_IO_RETRIES):
-                try:
-                    os.remove(self.lockpath)
-                    return
-                except FileNotFoundError:
-                    return
-                except OSError:
-                    time.sleep(_IO_PAUSE)
+
+
+if os.name == "nt":
+    import msvcrt
+
+    def _try_lock(fd: int) -> bool:
+        os.lseek(fd, _LOCK_BYTE, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+
+    def _unlock(fd: int) -> None:
+        os.lseek(fd, _LOCK_BYTE, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _try_lock(fd: int) -> bool:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def _atomic_write(path: Path, text: str, restrict: bool = False) -> None:

@@ -4,8 +4,9 @@ Every session on a machine shares ``state.json`` (each its own cursors), and
 the local rooms / handle registry share one lock implementation. Regression for:
 unlocked read-modify-write that let one session's save wipe another's fresh
 cursor (and crash on Windows with "Access is denied" while another process had
-the file open), a transient read error being taken as "empty state", and a lock
-whose holder can't be dislodged spinning past its timeout.
+the file open), a transient read error being taken as "empty state", a lock
+spinning past its timeout, and two writers both holding a lock (the old
+takeover race): locks are OS locks, released when the holder exits.
 Run:  python tests/test_shared_state.py
 """
 
@@ -148,57 +149,73 @@ def test_replace_retries_sharing_violation() -> None:
     check(fails["n"] == 0 and chat.get_cursor("busy", "A") == "9", "saved after 3 refusals")
 
 
-def test_lock_unstealable_still_times_out() -> None:
-    print("a stale lock that can't be stolen (holder still has it open) waits, then gives up:")
+_HOLD = r"""
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from discordinator import config
+lk = config.FileLock(config.Path(sys.argv[2]), timeout=5).__enter__()
+print("holding", flush=True)
+time.sleep(60)
+"""
+
+
+def test_lock_held_by_live_process_times_out() -> None:
+    print("a lock another process holds is waited for, then the waiter gives up:")
     target = _TMP / "held.jsonl"
-    lock = Path(str(target) + ".lock")
-    lock.write_text("", encoding="utf-8")
-    old = time.time() - 60
-    os.utime(lock, (old, old))
-    lk = config.FileLock(target, timeout=0.5, stale=0.1)
-    tries = {"n": 0}
-
-    def cant_steal() -> None:
-        tries["n"] += 1  # the rename fails while the holder has it open
-
-    lk._steal = cant_steal
-    t0 = time.monotonic()
+    holder = subprocess.Popen([sys.executable, "-c", _HOLD, _SRC, str(target)],
+                              stdout=subprocess.PIPE, text=True)
     try:
-        with lk:
-            raise AssertionError("got a lock that is still held")
-    except config.LockTimeout:
-        pass
-    took = time.monotonic() - t0
-    check(0.4 < took < 3.0, f"gave up at the timeout ({took:.2f}s), not past it")
-    check(tries["n"] < 100, f"paused between attempts ({tries['n']} tries, no busy spin)")
-    check(lk.fd is None and lock.exists(), "raised (never went ahead unlocked); the holder's lock untouched")
-    lock.unlink()
+        check(holder.stdout.readline().strip() == "holding", "another process holds it")
+        lk = config.FileLock(target, timeout=0.5)
+        t0 = time.monotonic()
+        try:
+            with lk:
+                raise AssertionError("got a lock that is still held")
+        except config.LockTimeout as e:
+            check(str(holder.pid) in str(e), "the error names the holder's pid")
+        took = time.monotonic() - t0
+        check(0.4 < took < 3.0, f"gave up at the timeout ({took:.2f}s), not past it")
+        check(lk.fd is None, "raised (never went ahead unlocked)")
+    finally:
+        holder.kill()
+        holder.wait()
 
 
 def test_lock_follows_its_holder() -> None:
-    print("a lock is taken over when its holder has exited - and never from a live one:")
+    print("a lock is free the moment its holder dies (even killed mid-hold):")
     target = _TMP / "owned.jsonl"
-    lock = Path(str(target) + ".lock")
-    gone = subprocess.Popen([sys.executable, "-c", "pass"])
-    gone.wait()
-    lock.write_text(str(gone.pid), encoding="utf-8")  # fresh, but its holder exited
+    holder = subprocess.Popen([sys.executable, "-c", _HOLD, _SRC, str(target)],
+                              stdout=subprocess.PIPE, text=True)
+    check(holder.stdout.readline().strip() == "holding", "another process holds it")
+    holder.kill()  # no cleanup runs
+    holder.wait()
     t0 = time.monotonic()
-    lk = config.FileLock(target, timeout=2, stale=30)
-    with lk:
+    with config.FileLock(target, timeout=5) as lk:
         took = time.monotonic() - t0
-        check(lk.fd is not None and took < 1.0,
-              f"an exited holder's lock is taken over at once ({took:.2f}s)")
-    alive = os.getppid()
-    lock.write_text(str(alive), encoding="utf-8")
-    old = time.time() - 60
-    os.utime(lock, (old, old))  # older than `stale`, but its holder is running
-    try:
-        with config.FileLock(target, timeout=0.5, stale=8):
-            raise AssertionError("took a lock from a live holder")
-    except config.LockTimeout as e:
-        check(str(alive) in str(e), "a live holder's lock isn't taken; the error names its pid")
-    check(lock.read_text(encoding="utf-8") == str(alive), "and the holder's lock is left as it was")
-    lock.unlink()
+        check(lk.fd is not None and took < 2.0, f"taken over at once ({took:.2f}s)")
+
+
+_BUMP = r"""
+import sys
+sys.path.insert(0, sys.argv[1])
+from discordinator import config
+for _ in range(int(sys.argv[2])):
+    with config.update_state() as state:
+        state["count"] = state.get("count", 0) + 1
+"""
+
+
+def test_many_processes_lose_no_update() -> None:
+    print("six processes updating state.json at once lose no update:")
+    with config.update_state() as state:
+        state["count"] = 0
+    procs = [subprocess.Popen([sys.executable, "-c", _BUMP, _SRC, "40"], env=os.environ.copy())
+             for _ in range(6)]
+    for p in procs:
+        p.wait(timeout=120)
+    check(all(p.returncode == 0 for p in procs), "every writer finished without an error")
+    got = config.load_state().get("count")
+    check(got == 240, f"every update is there ({got}/240)")
 
 
 _STALLED = r"""
@@ -246,7 +263,8 @@ def main() -> int:
     test_unreadable_state_is_not_empty()
     test_corrupt_state_recovers()
     test_replace_retries_sharing_violation()
-    test_lock_unstealable_still_times_out()
+    test_lock_held_by_live_process_times_out()
+    test_many_processes_lose_no_update()
     print(f"\nALL {_passed} SHARED-STATE CHECKS PASSED")
     return 0
 
