@@ -86,6 +86,31 @@ def read_new(client: Client, channel_id: str, reader: Optional[str],
     return messages
 
 
+def purge_room(cfg: dict[str, Any], channel: Optional[str]) -> tuple[str, str]:
+    """The (mode, channel id) a purge of ``channel`` acts on. When relay and
+    chat run on different transports, the configured chat room - or a name only
+    the chat transport knows (any name, on local) - is purged where the chats
+    happen; anything else, and no channel, is the relay channel."""
+    try:
+        split = config.transport(cfg, "chat") != config.transport(cfg, "relay")
+    except config.ConfigError:
+        split = False  # an unset mode: only the relay channel
+    if channel is None or not split:
+        return "relay", config.resolve_channel(cfg, channel)
+    try:
+        chat_id: Optional[str] = config.resolve_chat_channel(cfg, channel)
+    except config.ConfigError:
+        chat_id = None
+    if chat_id is not None and str(channel) == str(cfg.get("chat_channel") or ""):
+        return "chat", chat_id
+    try:
+        return "relay", config.resolve_channel(cfg, channel)
+    except config.ConfigError:
+        if chat_id is None:
+            raise
+        return "chat", chat_id
+
+
 def purge_targets(client: Client, channel_id: str, older_than: Optional[float] = None,
                   limit: Optional[int] = None) -> list[dict[str, Any]]:
     """Every message in the channel - whoever posted it (any machine, a human,
@@ -113,6 +138,40 @@ def purge_targets(client: Client, channel_id: str, older_than: Optional[float] =
     return out
 
 
+# Discord bulk-deletes only messages younger than this (its limit is 14 days;
+# a margin for clock skew and the time the purge itself takes).
+BULK_MAX_AGE = 13.5 * 86400
+
+
+def _bulk_delete(client: DiscordClient, channel_id: str,
+                 messages: list[dict[str, Any]]) -> set[str]:
+    """Delete what Discord lets go 100 at a time (recent messages, with Manage
+    Messages); returns their ids. The rest - or all, without the permission -
+    are left for one-by-one deletes."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    recent = []
+    for m in messages:
+        try:
+            age = (now - datetime.fromisoformat(m["timestamp"])).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if age < BULK_MAX_AGE:
+            recent.append(str(m["id"]))
+    done: set[str] = set()
+    for start in range(0, len(recent), 100):
+        chunk = recent[start:start + 100]
+        if len(chunk) < 2:
+            break  # Discord's minimum; one goes on its own
+        try:
+            client.bulk_delete(channel_id, chunk)
+        except DiscordError:
+            break  # e.g. no Manage Messages: one by one instead
+        done.update(chunk)
+    return done
+
+
 def purge(client: Client, channel_id: str,
           messages: list[dict[str, Any]]) -> tuple[int, list[str]]:
     """Delete ``messages``; returns (how many were deleted, why the rest
@@ -122,13 +181,17 @@ def purge(client: Client, channel_id: str,
         return client.delete_messages(channel_id, [m["id"] for m in messages]), []
     me = client.whoami().get("id")
     deleted, problems, no_perm = 0, [], False
+    done = _bulk_delete(client, channel_id, messages)
+    deleted += len(done)
     for m in messages:
-        if no_perm and m["author_id"] != me:
+        if m["id"] in done or (no_perm and m["author_id"] != me):
             continue
         try:
             client.delete_message(channel_id, m["id"])
             deleted += 1
         except DiscordError as e:
+            if "(404)" in str(e):
+                continue  # already gone
             if "(403)" in str(e) and m["author_id"] != me:
                 no_perm = True
             else:

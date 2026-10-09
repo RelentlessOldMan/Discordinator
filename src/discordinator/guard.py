@@ -62,7 +62,14 @@ def _chat_tool(name: str) -> Optional[str]:
     if not name.startswith("mcp__"):
         return None
     short = name.rsplit("__", 1)[-1]
-    return short if short in CHAT_TOOLS else None
+    return short if short in CHAT_TOOLS or short == "send_message" else None
+
+
+def _sent_as_turn(content: Any) -> bool:
+    """A send_message that went out as the session's owed chat turn (it says so)."""
+    if isinstance(content, list):
+        content = "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return isinstance(content, str) and "Sent as your chat turn to" in content
 
 
 def _result_obj(content: Any) -> Optional[dict]:
@@ -166,6 +173,8 @@ def evaluate(payload: dict) -> Optional[str]:
                 if _unreadable(b):
                     unreadable.add(b.get("tool_use_id"))
 
+    # A send_message is a chat call only when it was posted as a chat turn.
+    calls = [c for c in calls if c[1] != "send_message" or _sent_as_turn(results.get(c[0]))]
     if not calls:
         return None  # no chat activity this turn: not our business
 
@@ -207,6 +216,9 @@ def _decide(payload: dict, key: str, calls: list, results: dict,
         return None
 
     res = _result_obj(results.get(call_id))
+    if tool == "send_message":
+        res = {"next": "Your send_message went out as your chat turn (don't send it again "
+                       "with chat_say) - call chat_await to wait for the reply."}
     if tool == "chat_say" and args.get("status") in ("end", "impasse") and (
             res is not None or call_id not in results):
         return None  # ended it (or the call never returned): nothing to strand

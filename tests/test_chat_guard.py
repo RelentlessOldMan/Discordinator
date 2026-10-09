@@ -201,6 +201,23 @@ def test_ignores_other_tools_and_subagents() -> None:
     check(run(p3) == "", "chat_status alone isn't participation")
 
 
+def test_send_message_as_chat_turn() -> None:
+    print("a reply sent with send_message (posted as the chat turn) means: now wait:")
+    sent = {"result": "Sent as your chat turn to B (1 message(s), ids: 7) - you owed them "
+                      "a reply in this chat room. Use chat_say for chat turns; call "
+                      "chat_await to wait for their answer."}
+    turn = dict(WAITING, reply={"your_turn": True, "ended": False,
+                                "next": "It's YOUR turn. Reply with chat_say."})
+    p = transcript(user("go"), call("chat_await", {}, turn["reply"]),
+                   call("send_message", {"text": "done"}, sent))
+    out = json.loads(run(p))
+    check(out["decision"] == "block" and "call chat_await" in out["reason"]
+          and "Reply with chat_say" not in out["reason"],
+          "blocked with 'call chat_await', not 'reply with chat_say' (a second turn)")
+    p2 = transcript(user("go"), call("send_message", {"text": "fyi"}, {"result": "Sent 1 message(s)"}))
+    check(run(p2) == "", "a plain relay send_message is still not chat activity")
+
+
 def test_result_shapes() -> None:
     print("tolerates every MCP result shape:")
     blocks = [{"type": "text", "text": json.dumps(WAITING)}]
@@ -322,6 +339,7 @@ def main() -> int:
     test_allows_when_ended()
     test_only_current_turn_counts()
     test_ignores_other_tools_and_subagents()
+    test_send_message_as_chat_turn()
     test_result_shapes()
     test_cut_short_result_isnt_an_error()
     test_never_breaks()

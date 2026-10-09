@@ -205,6 +205,37 @@ for _ in range(int(sys.argv[2])):
 """
 
 
+def test_lock_never_leaks_its_handle() -> None:
+    print("an unexpected error while locking closes the lock file, and is raised:")
+    import errno
+    target = _TMP / "leak.jsonl"
+    opened: list = []
+    real_open, real_try = os.open, config._try_lock
+
+    def spy_open(*a, **k):
+        fd = real_open(*a, **k)
+        opened.append(fd)
+        return fd
+
+    def broken(fd):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    os.open, config._try_lock = spy_open, broken
+    try:
+        with config.FileLock(target, timeout=1):
+            raise AssertionError("locked without a lock")
+    except OSError as e:
+        check(e.errno == errno.ENOLCK, "the real error comes out (not a timeout)")
+    finally:
+        os.open, config._try_lock = real_open, real_try
+    try:
+        os.fstat(opened[0])
+        closed = False
+    except OSError:
+        closed = True
+    check(len(opened) == 1 and closed, "and the lock file it opened is closed")
+
+
 def test_many_processes_lose_no_update() -> None:
     print("six processes updating state.json at once lose no update:")
     with config.update_state() as state:
@@ -265,6 +296,7 @@ def main() -> int:
     test_replace_retries_sharing_violation()
     test_lock_held_by_live_process_times_out()
     test_many_processes_lose_no_update()
+    test_lock_never_leaks_its_handle()
     print(f"\nALL {_passed} SHARED-STATE CHECKS PASSED")
     return 0
 

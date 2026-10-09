@@ -186,6 +186,128 @@ def test_delete_own_messages() -> None:
         handles._SESSION_KEY = None
 
 
+def test_deleted_turn_never_delivered() -> None:
+    print("a turn deleted (or purged) after a session set it aside never reaches it:")
+    for how in ("delete", "purge", "keep"):
+        r = f"held-{how}"
+        a, b, c = (f"{how}-{x}" for x in "abc")  # names no earlier test claimed
+        for h in (a, b, c):
+            mcp.chat_begin(chatter=h, channel=r)
+        out = mcp.chat_say(text="SECRET typo", chatter=a, channel=r, to=b, wait=False)
+        got = mcp.chat_await(chatter=b, channel=r, timeout=0.3, poll=0.02, nudge_after=0,
+                             from_whom=c)
+        check(got["timed_out"] and "handle_note" not in got,
+              f"{how}: {b}, waiting for {c}, sets {a}'s turn aside")
+        if how == "delete":
+            mcp.delete_messages(message_ids=out["message_ids"])
+        elif how == "purge":
+            mcp.purge_messages(channel=r, dry_run=False)
+        got = mcp.chat_await(chatter=b, channel=r, timeout=0.3, poll=0.02, nudge_after=0)
+        if how == "keep":
+            check(got["your_turn"] and got["text"] == "SECRET typo",
+                  "a turn set aside and not deleted still is handed over")
+        else:
+            check(not got["your_turn"] and "SECRET" not in (got.get("text") or ""),
+                  f"{how}: {b}'s next wait doesn't hand it over")
+
+
+def test_partly_failed_send_can_be_deleted() -> None:
+    print("a long send that fails partway: the pieces that went out are still deletable:")
+    from discordinator import handles
+    handles._SESSION_KEY = "id:partial"
+    real = LocalClient._append
+    n = [0]
+
+    def flaky(self, *a, **k):
+        n[0] += 1
+        if n[0] == 3:
+            raise OSError("disk hiccup")
+        return real(self, *a, **k)
+
+    LocalClient._append = flaky
+    try:
+        mcp.send_message("y" * 4500, channel="part-sent")
+        check(False, "the send should fail")
+    except OSError as e:
+        check("2 message(s) of it were already posted" in str(e) and "delete_messages" in str(e),
+              f"the error says what went out and how to remove it: {e}")
+    finally:
+        LocalClient._append = real
+    check(len(_contents("part-sent")) == 2, "two pieces are in the room")
+    res = mcp.delete_messages(channel="part-sent")
+    check(res["deleted"] == 2 and _contents("part-sent") == [], "and delete_messages removes both")
+
+
+def test_purge_reaches_the_chat_room() -> None:
+    print("with relay and chat on different transports, purge finds the chat room:")
+    from discordinator.client_factory import purge_room
+    cfg = {"relay_transport": "discord", "chat_transport": "local",
+           "channels": {"ops": "123"}, "default_channel": "ops", "chat_channel": "lounge"}
+    check(purge_room(cfg, None) == ("relay", "123"), "no channel: the relay default")
+    check(purge_room(cfg, "ops") == ("relay", "123"), "a relay channel: relay")
+    check(purge_room(cfg, "lounge") == ("chat", "lounge"), "the chat room: chat (local)")
+    check(purge_room(cfg, "scratch") == ("chat", "scratch"),
+          "a name only the local chat transport knows: chat")
+    flip = {**cfg, "relay_transport": "local", "chat_transport": "discord",
+            "channels": {"lounge": "456"}}
+    check(purge_room(flip, "lounge") == ("chat", "456"), "reversed: the chat room on Discord")
+    check(purge_room(flip, "notes") == ("relay", "notes"), "and other names are local relay rooms")
+    same = {**cfg, "relay_transport": "local", "chat_transport": "local"}
+    check(purge_room(same, "lounge") == ("relay", "lounge"), "one transport: just the room")
+    os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "discord"
+    os.environ["DISCORD_BOT_TOKEN"] = "unused"
+    try:
+        chat.send_chat(LocalClient(), "mixed-chat", "A", "over", "hello", to="B")
+        out = mcp.purge_messages(channel="mixed-chat", dry_run=False)
+        check(out["deleted"] == 1 and _contents("mixed-chat") == [],
+              "the MCP tool purges the local chat room, never touching Discord")
+    finally:
+        os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "local"
+        os.environ.pop("DISCORD_BOT_TOKEN", None)
+
+
+def test_discord_purge_bulk() -> None:
+    print("on Discord, recent messages go 100 at a time; old ones (and leftovers) one by one:")
+    import httpx
+    from discordinator import client_factory, discord_client as dc
+    from discordinator.discord_client import API_BASE, DiscordClient
+    now = datetime.now(timezone.utc)
+    msgs = [{"id": str(1000 - i), "content": f"m{i}",
+             "timestamp": (now - timedelta(days=1 if i < 201 else 20)).isoformat(),
+             "author": {"id": "bot" if i % 2 else "person"}} for i in range(210)]
+    calls: list = []
+
+    def handler(req):
+        if req.url.path.endswith("/users/@me"):
+            return httpx.Response(200, json={"id": "bot"})
+        if req.method == "GET":
+            before = req.url.params.get("before")
+            older = [m for m in msgs if before is None or int(m["id"]) < int(before)]
+            return httpx.Response(200, json=older[:int(req.url.params.get("limit", 50))])
+        if req.url.path.endswith("/bulk-delete"):
+            ids = json.loads(req.content)["messages"]
+            calls.append(("bulk", len(ids)))
+            return httpx.Response(204)
+        calls.append(("one", req.url.path.rsplit("/", 1)[-1]))
+        return httpx.Response(204)
+
+    real_sleep = dc.time.sleep
+    dc.time.sleep = lambda *_a, **_k: None
+    client = DiscordClient(token="test-token")
+    client._client = httpx.Client(base_url=API_BASE, transport=httpx.MockTransport(handler))
+    try:
+        targets = client_factory.purge_targets(client, "chan")
+        deleted, problems = client_factory.purge(client, "chan", targets)
+        bulk = [n for kind, n in calls if kind == "bulk"]
+        ones = [x for kind, x in calls if kind == "one"]
+        check(deleted == 210 and not problems, f"all 210 deleted ({deleted}, {problems})")
+        check(bulk == [100, 100], f"200 of the 201 recent ones in two bulk deletes ({bulk})")
+        check(len(ones) == 10, f"the odd recent one and the 9 old ones go one by one ({len(ones)})")
+    finally:
+        client.close()
+        dc.time.sleep = real_sleep
+
+
 def test_cli_purge() -> None:
     print("CLI purge: durations, preview, refusal without a terminal, --yes:")
     for text, secs in (("7d", 7 * 86400), ("24h", 86400), ("30m", 1800), ("90s", 90), ("2", 2 * 86400)):
@@ -379,6 +501,10 @@ def main() -> int:
     test_mcp_purge_takes_everything()
     test_discord_purge_without_manage_messages()
     test_delete_own_messages()
+    test_deleted_turn_never_delivered()
+    test_partly_failed_send_can_be_deleted()
+    test_purge_reaches_the_chat_room()
+    test_discord_purge_bulk()
     test_cli_purge()
     test_cli_relay()
     test_read_messages_tool()

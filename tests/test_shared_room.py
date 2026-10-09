@@ -404,6 +404,41 @@ def test_long_work_reply_goes_to_its_asker() -> None:
     check(st["your_turn"], "and it's A's turn")
 
 
+def test_opener_after_a_dropped_chat() -> None:
+    print("an opener from someone whose last chat was dropped (no end) is open to all:")
+    r = "dropped"
+    c = LocalClient()
+    for h in ("A", "B", "C"):
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "A", "over", "hi B", to="B")
+    chat.send_chat(c, r, "B", "over", "thanks, bye", to="A")
+    _backdate(r, 60)  # nobody said `end`; an hour passes
+    mcp.chat_begin(chatter="C", channel=r)
+    chat.send_chat(c, r, "B", "over", "new topic, anyone?")
+    got = wait("C", r)
+    check(got["your_turn"] and got["from"] == "B", "C, in no conversation, gets B's opener")
+    r = "not-dropped"
+    for h in ("A", "B", "C"):
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "A", "over", "hi B", to="B")
+    chat.send_chat(c, r, "B", "over", "one more thing", to="A")
+    _backdate(r, 10)  # still a live conversation
+    mcp.chat_begin(chatter="C", channel=r)
+    chat.send_chat(c, r, "B", "over", "and for everyone in this chat")
+    check(wait("C", r, 0.3)["timed_out"], "10 minutes later it's still A and B's chat")
+
+
+def test_dead_role_not_taken_back() -> None:
+    print("a new session takes back a role waiting on its turn - not one from a dead chat:")
+    r = "role-back"
+    c = LocalClient()
+    chat.send_chat(c, r, "ProjectB/convex", "over", "question for X", to="X")
+    check(mcp._left_waiting(c, r, "ProjectB") == ["ProjectB/convex"],
+          "a role waiting on its own recent turn is found")
+    _backdate(r, 3 * 24 * 60)
+    check(mcp._left_waiting(c, r, "ProjectB") == [], "three days later it isn't")
+
+
 def test_disconnect_lets_a_post_finish() -> None:
     print("a server whose client hangs up lets a call in progress finish before exiting:")
     exited = threading.Event()
@@ -437,6 +472,8 @@ def main() -> int:
     test_same_label_sessions_relay()
     test_plain_reply_reaches_its_peer()
     test_long_work_reply_goes_to_its_asker()
+    test_opener_after_a_dropped_chat()
+    test_dead_role_not_taken_back()
     test_disconnect_lets_a_post_finish()
     print(f"\nALL {_passed} SHARED-ROOM CHECKS PASSED")
     return 0

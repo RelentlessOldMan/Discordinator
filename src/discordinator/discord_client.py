@@ -157,7 +157,7 @@ class DiscordClient:
                     retry_after = float(resp.json().get("retry_after", 1.0))
                 except Exception:
                     pass
-                time.sleep(min(retry_after, 10.0))
+                time.sleep(min(retry_after, 30.0))
                 continue
 
             if resp.status_code == 401:
@@ -176,6 +176,13 @@ class DiscordClient:
                 )
             if resp.status_code >= 400:
                 raise DiscordError(f"{resp.status_code} {method} {path}: {resp.text}")
+            if resp.headers.get("X-RateLimit-Remaining") == "0":
+                # The route's allowance is used up: wait it out now rather than
+                # be refused (a purge deleting one by one hits this).
+                try:
+                    time.sleep(min(float(resp.headers.get("X-RateLimit-Reset-After", 0)), 30.0))
+                except ValueError:
+                    pass
             return resp
 
         if last_exc is not None:
@@ -197,13 +204,17 @@ class DiscordClient:
         prefix = f"[{label}] " if label else ""
         body_limit = MAX_MESSAGE_LEN - len(prefix)
         sent: list[dict[str, Any]] = []
-        for piece in chunk_content(content, body_limit, prefixed=bool(prefix)):
-            resp = self._request(
-                "POST",
-                f"/channels/{channel_id}/messages",
-                json={"content": f"{prefix}{piece}", **_nonce()},
-            )
-            sent.append(resp.json())
+        try:
+            for piece in chunk_content(content, body_limit, prefixed=bool(prefix)):
+                resp = self._request(
+                    "POST",
+                    f"/channels/{channel_id}/messages",
+                    json={"content": f"{prefix}{piece}", **_nonce()},
+                )
+                sent.append(resp.json())
+        except Exception as e:
+            e.sent = sent  # type: ignore[attr-defined]  # the pieces that did go out
+            raise
         return sent
 
     def send_files(
@@ -240,8 +251,17 @@ class DiscordClient:
                     f"'{p.name}' is {size} bytes, over the {MAX_UPLOAD_BYTES}-byte "
                     "per-file upload limit (Discord, non-boosted server)."
                 )
-        prefix = f"[{label}] " if label else ""
         sent: list[dict[str, Any]] = []
+        try:
+            return self._send_files(channel_id, content, paths, label, sent)
+        except Exception as e:
+            # The messages that did go out (a failed text piece reports its own).
+            e.sent = sent + list(getattr(e, "sent", []))  # type: ignore[attr-defined]
+            raise
+
+    def _send_files(self, channel_id: str, content: str, paths: list[Path],
+                    label: Optional[str], sent: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        prefix = f"[{label}] " if label else ""
         # Text past one message goes out first; its last piece rides with the files.
         pieces = chunk_content(content, MAX_MESSAGE_LEN - len(prefix),
                                prefixed=bool(prefix)) if content else [""]
@@ -320,6 +340,13 @@ class DiscordClient:
         """Delete a single message. Deleting the bot's OWN messages needs no
         special permission; deleting others' messages requires Manage Messages."""
         self._request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
+
+    def bulk_delete(self, channel_id: str, message_ids: list[str]) -> None:
+        """Delete 2-100 messages in one request. Discord allows it only for
+        messages under 14 days old, and only with Manage Messages (even for
+        the bot's own)."""
+        self._request("POST", f"/channels/{channel_id}/messages/bulk-delete",
+                      json={"messages": list(message_ids)})
 
     def add_reaction(
         self, channel_id: str, message_id: str, emoji: str = "✅"

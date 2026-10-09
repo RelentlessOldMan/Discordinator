@@ -204,11 +204,16 @@ Confirm inside Claude Code with `/mcp`.
   interjections), any chat in it included. `dry_run=True` (default) only
   reports; call again with `dry_run=False`. `older_than_days` / `scan_limit`
   narrow it (default: all). On Discord, messages people typed need Manage
-  Messages; without it they're left and the result says so.
+  Messages; without it they're left and the result says so. (With it, messages
+  under 14 days old go 100 at a time - much faster.) With relay and chat on
+  different transports, naming the chat room (or a room only the chat transport
+  knows) purges it where the chats happen.
 - `delete_messages(message_ids?, channel?)` — delete messages **this session**
   posted, to fix a mistake and post again: with no ids, its latest post (every
   piece of a long one). `send_message`, `send_file` and `chat_say` return the
   ids. Only its own - anything else is refused (clearing a channel is a purge).
+  A long send that fails partway says which pieces went out; they're still
+  yours to delete.
   A deleted chat turn never reaches anyone who hadn't read it; if others have
   posted since, the result says so - send a correction too.
 - `list_channels()` — configured channel names + default.
