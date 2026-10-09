@@ -1,6 +1,6 @@
 """Discordinator — CLI + MCP server for relaying messages through Discord channels."""
 
-__version__ = "1.0.43"
+__version__ = "1.0.44"
 
 
 def use_system_certs() -> None:
