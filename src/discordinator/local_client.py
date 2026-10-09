@@ -365,8 +365,12 @@ class LocalClient:
         prefix = f"[{label}] " if label else ""
         body_limit = MAX_MESSAGE_LEN - len(prefix)
         sent: list[dict[str, Any]] = []
-        for piece in chunk_content(content, body_limit, prefixed=bool(prefix)):
-            sent.append(self._append(channel_id, f"{prefix}{piece}"))
+        try:
+            for piece in chunk_content(content, body_limit, prefixed=bool(prefix)):
+                sent.append(self._append(channel_id, f"{prefix}{piece}"))
+        except Exception as e:
+            e.sent = sent  # type: ignore[attr-defined]  # the pieces that did go out
+            raise
         return sent
 
     def send_files(

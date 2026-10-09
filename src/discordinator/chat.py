@@ -775,15 +775,23 @@ def await_turn(
         cursor0 = seed_cursor(client, channel_id, me)
         set_cursor(channel_id, me, cursor0)
     held = _take_held(channel_id, me, from_whom)
-    while held is not None and not _held_still_open(client, channel_id, me, held):
-        held = _take_held(channel_id, me, from_whom)  # its chat ended since: drop it
-    if held is not None:
-        result = dict(held.get("result") or {})
-        result["note"] = ("This turn came in while you were waiting for someone else - "
-                          "it's your turn to answer it.")
-        if result.get("from"):
-            set_reply_to(channel_id, me, result["from"])
-        return _finish(channel_id, me, result)
+    try:
+        while held is not None and not _held_still_open(client, channel_id, me, held):
+            held = _take_held(channel_id, me, from_whom)  # ended or deleted since: drop it
+        if held is not None:
+            result = dict(held.get("result") or {})
+            result["note"] = ("This turn came in while you were waiting for someone else - "
+                              "it's your turn to answer it.")
+            if result.get("from"):
+                set_reply_to(channel_id, me, result["from"])
+            return _finish(channel_id, me, result)
+    except BaseException:
+        if held is not None:
+            try:
+                _hold(channel_id, me, [held])  # not delivered: the next wait gets it
+            except Exception:
+                pass
+        raise
     fresh = any(
         _wakes(client, channel_id, simplify_message(m), me, from_whom)
         for m in client.read_messages(channel_id, limit=50, after=cursor0))
@@ -828,6 +836,12 @@ def await_turn(
     # turn that's half in when I return - for a timeout, a human, another
     # peer's turn - still arrives whole later.
     pending_by_sender = _load_partial(channel_id, me)
+    if pending_by_sender:
+        # A piece deleted since (or purged) never becomes part of a turn.
+        there = _present(client, channel_id, {str(e.get("id")) for buf in
+                                              pending_by_sender.values() for e in buf})
+        pending_by_sender = {k: [e for e in v if str(e.get("id")) in there]
+                             for k, v in pending_by_sender.items()}
     want = from_whom
     pos = _Position(channel_id, me)
 
@@ -914,6 +928,25 @@ def _take_held(channel_id: str, me: str, from_whom: Optional[str]) -> Optional[d
     return item
 
 
+def _present(client: DiscordClient, channel_id: str, ids: set[str]) -> set[str]:
+    """Which of ``ids`` are still in the room (not deleted or purged)."""
+    want = {i for i in ids if str(i).isdigit()}
+    if not want:
+        return set()
+    found: set[str] = set()
+    top = max(int(i) for i in want)
+    after = str(min(int(i) for i in want) - 1)
+    while True:
+        batch = client.read_messages(channel_id, limit=100, after=after)
+        found |= {str(r["id"]) for r in batch} & want
+        if len(batch) < 100 or found == want:
+            return found
+        newest = max(int(r["id"]) for r in batch)
+        if newest >= top:
+            return found
+        after = str(newest)
+
+
 def _held_still_open(client: DiscordClient, channel_id: str, me: str,
                      item: dict[str, Any]) -> bool:
     """Is a held turn still waiting on me - its chat not ended since (by its
@@ -922,6 +955,10 @@ def _held_still_open(client: DiscordClient, channel_id: str, me: str,
     after = (item.get("message") or {}).get("id")
     if not after:
         return True
+    ids = {str(after)} | {str(x["id"]) for x in (item.get("result") or {}).get("messages") or []
+                          if isinstance(x, dict) and x.get("id")}
+    if _present(client, channel_id, ids) != ids:
+        return False  # deleted (or purged) since: it never reaches me
     for raw in client.read_messages(channel_id, limit=100, after=str(after)):
         m = simplify_message(raw)
         if not m.get("bot") and is_human_stop(m.get("content") or ""):
@@ -1382,6 +1419,8 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
             comp[k] = {k}
             epoch[k] = i
 
+    seen: dict[str, datetime] = {}  # handle -> its latest turn (sent or addressed to it)
+    last: dict[str, tuple[int, str, Optional[str]]] = {}  # handle -> (i, status, to) it sent
     for i, m in enumerate(msgs):
         p = parsed_list[i]
         if p is None:
@@ -1390,7 +1429,25 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
                 room_stop = i
             continue
         k = handle_key(p["participant"])
-        grp(k)
+        g = grp(k)
+        ts = _parse_ts(m["timestamp"])
+        if (_is_broadcast(p["to"]) and p["status"] not in ("ask", "working")
+                and len(g) > 1 and ts is not None):
+            # An opener from a member of a conversation dropped without an `end`
+            # (silent past STALE_AFTER, or WORKING_GRACE after a `working`)
+            # starts a new one: it's open to anyone, not left to the old peers -
+            # unless the old one's last turn is still owed an answer by them.
+            stamps = [seen[h] for h in g if h in seen]
+            final = max((last[h] for h in g if h in last), default=None)
+            window = WORKING_GRACE if final and final[1] == "working" else STALE_AFTER
+            owes = bool(final) and not _is_broadcast(final[2]) and handle_key(final[2]) == k
+            if stamps and ts - max(stamps) > window and not owes:
+                g.discard(k)
+                close([k], i)
+        for h in (k,) if _is_broadcast(p["to"]) else (k, handle_key(p["to"])):
+            if ts is not None:
+                seen[h] = ts
+        last[k] = (i, p["status"], p["to"])
         if not _is_broadcast(p["to"]):
             link(k, handle_key(p["to"]))
             recent = k

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import __version__, chat, config, events, use_system_certs
-from .client_factory import make_client, purge, purge_targets, read_new
+from .client_factory import make_client, purge, purge_room, purge_targets, read_new
 from .discord_client import DiscordClient, DiscordError, simplify_message
 from .local_client import local_dir
 
@@ -615,10 +615,10 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 def cmd_purge(args: argparse.Namespace) -> int:
     cfg = config.load()
-    channel_id = config.resolve_channel(cfg, args.channel)
+    mode, channel_id = purge_room(cfg, args.channel)
     older = _parse_duration(args.older_than) if args.older_than else None
 
-    with make_client(cfg, "relay") as client:
+    with make_client(cfg, mode) as client:
         targets = purge_targets(client, channel_id, older, args.limit)
         if not targets:
             print("nothing to delete.")

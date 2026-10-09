@@ -31,14 +31,16 @@ import re
 import sys
 import threading
 import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Iterator, Optional, Union
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from . import chat, config, events, handles, use_system_certs
-from .client_factory import Client, make_client, make_client_for_url, purge, purge_targets, read_new
+from .client_factory import Client, make_client, make_client_for_url, purge, purge_room, purge_targets, read_new
 from .discord_client import DiscordError, simplify_message
 
 # Keep the HTTP client quiet: it logs an INFO line per request to stderr, which
@@ -176,7 +178,7 @@ def send_message(
                 "you owed them a reply in this chat room. Use chat_say for chat turns; "
                 "call chat_await to wait for their answer.")
     tag = label if label is not None else cfg.get("machine_label")
-    with _client("relay") as client:
+    with _client("relay") as client, _partly_sent(cfg, channel_id):
         sent = client.send_message(channel_id, text, label=tag)
     _remember_sent(cfg, sent, channel_id)
     ids = ", ".join(str(m.get("id")) for m in sent)
@@ -216,6 +218,27 @@ def _remember_post(mode: str, channel_id: str, sent: list[dict[str, Any]],
         except OSError:
             pass  # this server still remembers them
     return ids
+
+
+@contextmanager
+def _partly_sent(cfg: dict[str, Any], channel_id: str) -> Iterator[None]:
+    """A send that failed partway: the pieces that went out are still this
+    session's (delete_messages can remove them), and the error says so."""
+    try:
+        yield
+    except Exception as e:
+        sent = list(getattr(e, "sent", None) or [])
+        if not sent:
+            raise
+        _remember_sent(cfg, sent, channel_id)
+        ids = ", ".join(str(m.get("id")) for m in sent)
+        msg = (f"{e} - {len(sent)} message(s) of it were already posted (ids: {ids}); "
+               "delete them with delete_messages before sending it again.")
+        try:
+            err = type(e)(msg)
+        except Exception:
+            err = RuntimeError(msg)
+        raise err from e
 
 
 def _remember_sent(cfg: dict[str, Any], sent: list[dict[str, Any]],
@@ -322,7 +345,7 @@ def send_file(
     channel_id = config.resolve_channel(cfg, channel)
     tag = label if label is not None else cfg.get("machine_label")
     file_list = [paths] if isinstance(paths, str) else list(paths)
-    with _client("relay") as client:
+    with _client("relay") as client, _partly_sent(cfg, channel_id):
         sent = client.send_files(channel_id, text, file_list, label=tag)
     _remember_sent(cfg, sent, channel_id)
     ids = ", ".join(str(m.get("id")) for m in sent)
@@ -451,11 +474,12 @@ def delete_messages(message_ids: Optional[Union[str, list[str]]] = None,
     cfg = config.load()
     posts = _all_my_posts()
     if channel is not None:
-        rooms = {config.resolve_channel(cfg, channel)}
-        try:
-            rooms.add(config.resolve_chat_channel(cfg, channel))
-        except config.ConfigError:
-            pass
+        rooms = set()
+        for resolve in (config.resolve_channel, config.resolve_chat_channel):
+            try:
+                rooms.add(resolve(cfg, channel))
+            except config.ConfigError:
+                pass
         posts = [e for e in posts if e.get("channel") in rooms]
     if message_ids in (None, "", []):
         if not posts:
@@ -535,8 +559,8 @@ def purge_messages(
     Returns a summary: how many would be / were deleted, and anything left.
     """
     cfg = config.load()
-    channel_id = config.resolve_channel(cfg, channel)
-    with _client("relay") as client:
+    mode, channel_id = purge_room(cfg, channel)
+    with _client(mode) as client:
         matched = purge_targets(client, channel_id, older_than_days * 86400 or None, scan_limit)
         if dry_run:
             return {"dry_run": True, "would_delete": len(matched),
@@ -641,8 +665,12 @@ def _left_waiting(client: Any, channel_id: str, base: str) -> list[str]:
             continue
         st = chat.compute_state(client, channel_id, h)
         pending = st.get("pending_turn")
+        sent = chat._parse_ts((pending or {}).get("ts"))
         if (pending and chat.same_handle(pending["from"], h) and not st.get("ended")
-                and not st.get("your_turn")):
+                and not st.get("your_turn")
+                # A chat dead this long isn't one to come back to (as for a
+                # turn owed to a session).
+                and sent is not None and sent > datetime.now(timezone.utc) - chat.OWED_EXPIRY):
             out.append(h)
     return out
 

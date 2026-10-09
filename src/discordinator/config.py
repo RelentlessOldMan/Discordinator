@@ -127,6 +127,7 @@ class FileLock:
         start = time.monotonic()
         while True:
             fd: Optional[int] = None
+            cant_open: Optional[OSError] = None
             try:
                 fd = os.open(self.lockpath, os.O_RDWR | os.O_CREAT, 0o644)
                 if _try_lock(fd):
@@ -138,13 +139,19 @@ class FileLock:
                     except OSError:
                         pass  # only the error message's pid
                     return self
-            except PermissionError:
-                pass  # Windows: e.g. a scanner has the file open; try again
-            if fd is not None:
-                os.close(fd)
+            except PermissionError as e:
+                # Windows: e.g. a scanner has the file open; try again.
+                cant_open = e if fd is None else None
+            finally:
+                if fd is not None and self.fd != fd:
+                    os.close(fd)  # not held (or an unexpected error): never leak it
             # Check the deadline and pause on every path, so a held lock
             # never spins.
             if time.monotonic() - start > self.timeout:
+                if cant_open is not None:
+                    raise LockTimeout(
+                        f"can't open the lock file {self.lockpath} ({cant_open.strerror}) "
+                        f"for over {self.timeout:g}s; nothing was changed.")
                 raise LockTimeout(
                     f"{self.lockpath} is held by another process (pid "
                     f"{self._holder(self.lockpath) or 'unknown'}) for over "
