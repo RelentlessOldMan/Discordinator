@@ -80,11 +80,7 @@ def test_compose() -> None:
     check(handles.compose("A", None) == "A", "no base -> chatter as-is")
     check(handles.compose("", "Base") == "Base", "empty chatter treated as omitted")
     check(len(handles.compose("x" * 40, "Proj")) == 32, "composed handle capped at 32 chars")
-    try:
-        handles.compose(None, None)
-        raise AssertionError("no chatter and no base must error")
-    except ConfigError as exc:
-        check("DISCORDINATOR_CHAT_HANDLE" in str(exc), "neither -> ConfigError naming the fix")
+    check(handles.compose(None, None) == "DefaultChatName", "neither -> the obvious placeholder name")
 
 
 def test_pid_alive() -> None:
@@ -235,7 +231,7 @@ def test_status_uses_session_name_without_claiming() -> None:
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
     _fresh()
-    check(handles.current(None, {}) is None, "no handle configured and no chatter -> None")
+    check(handles.current(None, {}) == "DefaultChatName", "no handle configured and no chatter -> DefaultChatName")
 
 
 def test_suffix_respects_length() -> None:

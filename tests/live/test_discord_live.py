@@ -66,6 +66,7 @@ import discordinator.mcp_server as mcp  # noqa: E402
 from discordinator import client_factory, config  # noqa: E402
 from discordinator.discord_client import DiscordClient, DiscordError  # noqa: E402
 
+TAG = "[live-a/DefaultChatName] "  # machine live-a, no project name set
 _passed = 0
 _notes: list[str] = []
 
@@ -120,7 +121,7 @@ def test_relay() -> None:
     print("relay: send, read, inbox skips only my own:")
     out = mcp.send_message("hello from live-a")
     check(out.startswith("Sent 1 message"), "send_message posts")
-    check(contents()[-1] == "[live-a] hello from live-a", "and it reads back, labelled")
+    check(contents()[-1] == TAG + "hello from live-a", "and it reads back, labelled")
     mcp.get_new_messages()  # position the inbox at now
     with other() as c:
         c.send_message(CHANNEL, "hello from live-b", label="live-b")
@@ -138,7 +139,7 @@ def test_long_message() -> None:
     check(n >= 3, f"{len(text)} characters go out as {n} messages")
     pieces = contents()[-n:]
     check(all(len(p) <= 2000 for p in pieces), "each within Discord's 2000")
-    bodies = [p[len("[live-a] "):] for p in pieces]
+    bodies = [p[len(TAG):] for p in pieces]
     check("".join(bodies).replace("\n", "") == text.replace("\n", ""), "every character is there")
 
 
@@ -148,7 +149,7 @@ def test_burst_is_paced() -> None:
     for i in range(8):
         mcp.send_message(f"burst {i}")
     took = time.monotonic() - t0
-    check(contents()[-8:] == [f"[live-a] burst {i}" for i in range(8)], f"all 8 posted in order ({took:.1f}s)")
+    check(contents()[-8:] == [f"{TAG}burst {i}" for i in range(8)], f"all 8 posted in order ({took:.1f}s)")
 
 
 def test_delete_own() -> None:
@@ -160,7 +161,7 @@ def test_delete_own() -> None:
     res = mcp.delete_messages()
     check(res["deleted"] == 3, f"the 3 pieces of my long post go ({res['deleted']})")
     wait_for(lambda: len(contents()) == before - 3, "the pieces to disappear")
-    check(contents()[-1] == "[live-a] keep me", "the post before it stays")
+    check(contents()[-1] == TAG + "keep me", "the post before it stays")
     with other() as c:
         theirs = c.send_message(CHANNEL, "not yours", label="live-b")[0]["id"]
     try:

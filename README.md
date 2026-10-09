@@ -181,7 +181,7 @@ This installs two commands: `discordinator` (CLI) and `discordinator-mcp` (MCP s
 discordinator config set-token <YOUR_BOT_TOKEN>
 discordinator config add-channel relay      123456789012345678   # first channel becomes default
 discordinator config add-channel projectx   987654321098765432
-discordinator config set-label  laptop        # optional: tags your messages as [laptop]
+discordinator config set-label  laptop        # this machine's name: messages are tagged [laptop/<project>]
 discordinator config set-relay-transport discord   # REQUIRED: relay tools' transport
 discordinator config set-chat-transport  discord   # REQUIRED: chat tools' transport (use 'local' to chat on-box)
 discordinator config show

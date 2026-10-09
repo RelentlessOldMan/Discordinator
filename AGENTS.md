@@ -62,10 +62,39 @@ Two sessions on one machine can relay to each other even with the same label:
 each skips only the messages it sent itself, and each session keeps its own read
 position (by its chat handle, e.g. `CodeCarver/ui`), so one session reading its
 inbox doesn't use up another's messages. (Two sessions of one project that only
-relay and never chat share their project's position; give each its own label.) To tell them apart in the channel,
-give each project its own label in its `.mcp.json` env
-(`"DISCORDINATOR_LABEL": "<SESSION_LABEL>"`); `config set-label` sets the one
-label every session on the machine shares.
+relay and never chat share their project's position; give each its own role.)
+
+**Names.** Everything has a name - anything not set shows an obvious
+placeholder, never nothing. Three settings make them up:
+- **machine name** - `config set-label <name>` (one per machine, e.g. `Home`,
+  `Work`). `DISCORDINATOR_LABEL` in a project's `.mcp.json` env overrides it
+  for that project. Not set: `DefaultMachineName`.
+- **project name** - `DISCORDINATOR_CHAT_HANDLE` in the project's `.mcp.json`
+  env, e.g. `CodeCarver`. Not set: `DefaultChatName`.
+- **role** - the `chatter` a session passes to its `chat_*` calls, e.g. `ui`.
+  Optional; for two sessions of one project.
+
+A relay message (`send_message`, `send_file`, CLI `send`) is tagged
+`[machine/chat name]`, where the chat name is the session's name in chats.
+Chat turns carry only the chat name (`[CodeCarver/ui>peer|over]`).
+
+| machine | project | role | relay tag | chat name |
+|---|---|---|---|---|
+| `Home` | `CodeCarver` | `ui` | `[Home/CodeCarver/ui]` | `CodeCarver/ui` |
+| `Home` | `CodeCarver` | - | `[Home/CodeCarver]` | `CodeCarver` |
+| `Home` | - | `ui` | `[Home/ui]` | `ui` |
+| `Home` | - | - | `[Home/DefaultChatName]` | `DefaultChatName` |
+| - | `CodeCarver` | `ui` | `[DefaultMachineName/CodeCarver/ui]` | `CodeCarver/ui` |
+| - | `CodeCarver` | - | `[DefaultMachineName/CodeCarver]` | `CodeCarver` |
+| - | - | `ui` | `[DefaultMachineName/ui]` | `ui` |
+| - | - | - | `[DefaultMachineName/DefaultChatName]` | `DefaultChatName` |
+
+The role shows in relay tags once the session has used it in a chat call
+(`send_message` takes no `chatter`). A session renamed because its name was
+taken (`CodeCarver-2`) is tagged with that name. `label=` on `send_message`
+(or `--label` on the CLI) replaces the whole tag for that one message. A
+`DefaultMachineName` or `DefaultChatName` in the channel means something
+wasn't set up - fix it with `config set-label` or the project's `.mcp.json`.
 For a mode on `local`, skip steps 2–3 for it (no bot/token/channels): relay
 defaults to room `relay`, chat to room `chat`; pass any `channel="..."` for
 another room. The rest of this doc's tool usage is identical on both transports.
@@ -230,7 +259,8 @@ read cursor. **Your handle is the project's `DISCORDINATOR_CHAT_HANDLE`**, and
   `chatter="ui"` / `chatter="api"` → `CodeCarver/ui`, `CodeCarver/api`
 - pass the same `chatter` on every `chat_*` call of that session (if a call
   omits it, the session keeps the role it last used)
-- no project handle configured → `chatter` is used as-is (required)
+- no project handle configured → `chatter` is used as-is; with no `chatter`
+  either, the session is `DefaultChatName` (see **Names** above)
 
 Safety net: each session claims its handle machine-wide. If another **live**
 session on this machine already holds it, you get `CodeCarver-2` and `chat_begin`
@@ -314,8 +344,8 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
 > conversation. `chat_begin` adds a `note` when another chat is in progress.
 
 - `chat_begin(chatter?, channel?, turn_cap=20)` — both sides call first; each
-  resolves to a DISTINCT handle (project handle, `project/role`, or e.g. "A"/"B"
-  when no project handle is set). The result's `chatter` is your handle. Seeds read position to now, resets turn count.
+  resolves to a DISTINCT handle (project handle, `project/role`, a bare role
+  when no project handle is set, or `DefaultChatName` with neither). The result's `chatter` is your handle. Seeds read position to now, resets turn count.
 - `chat_say(text, chatter?, status="over", channel?, to?, wait=True, timeout=120)` —
   send with an explicit status — **almost always `over`** (the default). `say` (only to split one long turn; never end on it — if you call `chat_await` with a turn left on `say`, it refuses and tells you to send `over`), `working` ("hold on, I'm going
   to go do something" — keeps the floor, tells the others you're busy; post the

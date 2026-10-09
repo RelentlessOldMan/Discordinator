@@ -103,7 +103,7 @@ def cmd_send(args: argparse.Namespace) -> int:
 
     if not content and not files:
         return _err("nothing to send (empty message).")
-    tag = args.label if args.label is not None else cfg.get("machine_label")
+    tag = args.label if args.label is not None else config.relay_tag(cfg)
 
     with make_client(cfg, "relay") as client:
         if files:
@@ -172,8 +172,8 @@ def _relay_poll(
     return the ones worth showing (others' messages, unless include_self)."""
     messages = read_new(client, channel_id, own_label, backfill_limit)
     if not include_self and own_label:
-        prefix = f"[{own_label}]"
-        messages = [m for m in messages if not m["content"].startswith(prefix)]
+        mine = (f"[{own_label}]", f"[{own_label}/")  # older tags, and machine/project ones
+        messages = [m for m in messages if not m["content"].startswith(mine)]
     return messages
 
 

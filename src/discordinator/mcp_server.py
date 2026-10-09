@@ -161,7 +161,7 @@ def send_message(
         channel: A configured channel name or a raw channel id. Defaults to the
             configured default channel if omitted.
         label: Optional tag prefixed to the message (e.g. the machine/session
-            name). Falls back to the configured machine_label.
+            name). Defaults to machine/project, e.g. "Home/CodeCarver".
 
     Sent to a chat room where this session owes a chat reply, it goes out as
     that reply (a chat turn back to whoever handed you the turn), so a reply
@@ -177,12 +177,18 @@ def send_message(
                 f"ids: {', '.join(out.get('message_ids', []))}) - "
                 "you owed them a reply in this chat room. Use chat_say for chat turns; "
                 "call chat_await to wait for their answer.")
-    tag = label if label is not None else cfg.get("machine_label")
+    tag = label if label is not None else _tag(cfg)
     with _client("relay") as client, _partly_sent(cfg, channel_id):
         sent = client.send_message(channel_id, text, label=tag)
     _remember_sent(cfg, sent, channel_id)
     ids = ", ".join(str(m.get("id")) for m in sent)
     return f"Sent {len(sent)} message(s) to channel {channel_id} (ids: {ids})."
+
+
+def _tag(cfg: dict[str, Any]) -> str:
+    """This session's relay tag: machine, then its chat name (with its role
+    once it has used one in a chat call)."""
+    return config.relay_tag(cfg, handles.current(None, cfg) if handles._resolved else None)
 
 
 # Ids of the relay messages this session sent, so its own inbox skips exactly
@@ -338,12 +344,12 @@ def send_file(
         paths: a file path, or a list of file paths, to upload.
         text: optional message body (rides the first message).
         channel: configured channel name or raw id; defaults to the default channel.
-        label: tag prefixed to the message; falls back to the configured machine_label.
+        label: tag prefixed to the message; defaults to machine/project (e.g. "Home/CodeCarver").
     """
     cfg = config.load()
     config.require_send_attachments(cfg)  # raises if this machine hasn't opted in
     channel_id = config.resolve_channel(cfg, channel)
-    tag = label if label is not None else cfg.get("machine_label")
+    tag = label if label is not None else _tag(cfg)
     file_list = [paths] if isinstance(paths, str) else list(paths)
     with _client("relay") as client, _partly_sent(cfg, channel_id):
         sent = client.send_files(channel_id, text, file_list, label=tag)
