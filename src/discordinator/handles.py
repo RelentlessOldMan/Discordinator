@@ -347,10 +347,7 @@ def compose(chatter: Optional[str], base: Optional[str]) -> str:
     chatter = None if chatter in (None, "") else str(chatter).strip()
     base = None if base in (None, "") else str(base).strip()
     if not chatter and not base:
-        raise config.ConfigError(
-            "No chat handle: pass chatter=\"...\", or (recommended) give this project "
-            "a fixed handle by setting DISCORDINATOR_CHAT_HANDLE in its .mcp.json env."
-        )
+        base = config.DEFAULT_CHAT_NAME  # no name set anywhere: an obvious placeholder
     if not base:
         return chat.check_own_handle(chat.sanitize_handle(chatter))
     if not chatter or chat.same_handle(chatter, base):

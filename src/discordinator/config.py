@@ -601,6 +601,24 @@ def get_cursor(channel_id: str, reader: Optional[str] = None) -> Optional[str]:
     return (state.get("cursors") or {}).get(str(channel_id))
 
 
+# What an unnamed machine or project goes by: never nothing, and never a name
+# that could pass for a real one.
+DEFAULT_MACHINE_NAME = "DefaultMachineName"
+DEFAULT_CHAT_NAME = "DefaultChatName"
+
+
+def machine_name(cfg: dict[str, Any]) -> str:
+    """This machine's label (``config set-label``, or DISCORDINATOR_LABEL)."""
+    return str(cfg.get("machine_label") or DEFAULT_MACHINE_NAME)
+
+
+def relay_tag(cfg: dict[str, Any], handle: Optional[str] = None) -> str:
+    """The tag on a relay message: the machine, then the session's chat name -
+    ``Home/CodeCarver``, or with a role ``Home/CodeCarver/ui``. ``handle`` is
+    the session's name once it has chatted; else the project's."""
+    return f"{machine_name(cfg)}/{handle or cfg.get('chat_handle') or DEFAULT_CHAT_NAME}"
+
+
 def relay_reader(cfg: dict[str, Any], session: Optional[str] = None) -> Optional[str]:
     """Whose relay read position this is: the label, plus the session's chat
     handle (``session``, e.g. "CodeCarver/ui" or "CodeCarver-2") or else the

@@ -158,7 +158,7 @@ def test_delete_own_messages() -> None:
         mid = mcp.send_message("second", channel=r).split("ids: ")[1].rstrip(").")
         mcp._my_posts.clear()  # the session's server restarted
         res = mcp.delete_messages(message_ids=[mid])
-        check(res["deleted"] == 1 and "[me] first" in _contents(r) and "[me] second" not in _contents(r),
+        check(res["deleted"] == 1 and "[me/DefaultChatName] first" in _contents(r) and "[me/DefaultChatName] second" not in _contents(r),
               "after a restart it can still delete a post it names")
         try:
             mcp.delete_messages(message_ids=[mid])
@@ -308,6 +308,49 @@ def test_discord_purge_bulk() -> None:
         dc.time.sleep = real_sleep
 
 
+def test_everything_has_a_name() -> None:
+    print("relay tags: machine, then project and role - every combination named:")
+    from discordinator import handles
+    cases = [  # (machine, project, role) -> tag; the table in AGENTS.md
+        ("Home", "CodeCarver", "ui", "Home/CodeCarver/ui"),
+        ("Home", "CodeCarver", None, "Home/CodeCarver"),
+        ("Home", None, "ui", "Home/ui"),
+        ("Home", None, None, "Home/DefaultChatName"),
+        (None, "CodeCarver", "ui", "DefaultMachineName/CodeCarver/ui"),
+        (None, "CodeCarver", None, "DefaultMachineName/CodeCarver"),
+        (None, None, "ui", "DefaultMachineName/ui"),
+        (None, None, None, "DefaultMachineName/DefaultChatName"),
+    ]
+    saved = os.environ.pop("DISCORDINATOR_LABEL")
+    try:
+        for i, (machine, project, role, want) in enumerate(cases):
+            handles.registry_path().unlink(missing_ok=True)
+            handles._resolved.clear()
+            handles._last_chatter = None
+            handles._SESSION_KEY = "id:names"  # one session, trying each setup
+            for k, v in (("DISCORDINATOR_LABEL", machine), ("DISCORDINATOR_CHAT_HANDLE", project)):
+                if v:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+            if role:
+                mcp.chat_begin(chatter=role, channel=f"names-chat-{i}")
+            room = f"names-{i}"
+            mcp.send_message("hi", channel=room)
+            check(_contents(room) == [f"[{want}] hi"], f"{machine or '-'} / {project or '-'} / "
+                  f"{role or '-'} -> [{want}]")
+        os.environ["DISCORDINATOR_LABEL"] = "Home"
+        os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CodeCarver"
+        _run(["send", "--channel", "names-cli", "from the CLI"])
+        check(_contents("names-cli") == ["[Home/CodeCarver] from the CLI"],
+              "the CLI tags machine/project too")
+    finally:
+        os.environ["DISCORDINATOR_LABEL"] = saved
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE", None)
+        handles._resolved.clear()
+        handles._last_chatter = None
+
+
 def test_cli_purge() -> None:
     print("CLI purge: durations, preview, refusal without a terminal, --yes:")
     for text, secs in (("7d", 7 * 86400), ("24h", 86400), ("30m", 1800), ("90s", 90), ("2", 2 * 86400)):
@@ -384,7 +427,7 @@ def test_get_new_messages_options() -> None:
     mcp.send_message("mine", channel=r)
     LocalClient("x").send_message(r, "theirs", label="them")
     got = [m["content"] for m in mcp.get_new_messages(channel=r, include_self=True)]
-    check(got == ["[me] mine", "[them] theirs"], f"include_self shows my own too: {got}")
+    check(got == ["[me/DefaultChatName] mine", "[them] theirs"], f"include_self shows my own too: {got}")
     for n in range(150):
         LocalClient("x").send_message(r, f"n{n}", label="them")
     first = mcp.get_new_messages(channel=r)
@@ -450,6 +493,8 @@ def test_deleting_the_last_read_message_replays_nothing() -> None:
 def test_sessions_sharing_a_label_see_each_other() -> None:
     print("two sessions with one label and no chat handle still get each other's messages:")
     from discordinator import handles
+    handles._resolved.clear()  # sessions that haven't chatted: tagged by project
+    handles._last_chatter = None
     r = "shared-label"
     try:
         handles._SESSION_KEY = "id:session-a"
@@ -458,7 +503,7 @@ def test_sessions_sharing_a_label_see_each_other() -> None:
         handles._SESSION_KEY = "id:session-b"  # another Claude Code session
         mcp._sent_ids.clear()
         got = [m["content"] for m in mcp.get_new_messages(channel=r)]
-        check(got == ["[me] hello from A"], f"B gets A's message: {got}")
+        check(got == ["[me/DefaultChatName] hello from A"], f"B gets A's message: {got}")
         handles._SESSION_KEY = "id:session-a"  # A again, after a restart
         mcp._sent_ids.clear()
         mcp.send_message("more from A", channel=r)
@@ -505,6 +550,7 @@ def main() -> int:
     test_partly_failed_send_can_be_deleted()
     test_purge_reaches_the_chat_room()
     test_discord_purge_bulk()
+    test_everything_has_a_name()
     test_cli_purge()
     test_cli_relay()
     test_read_messages_tool()

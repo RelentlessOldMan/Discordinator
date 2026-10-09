@@ -183,10 +183,10 @@ def test_configured_handle() -> None:
     print("chatter defaults to the project's fixed DISCORDINATOR_CHAT_HANDLE:")
     room = "handled"
     try:
-        mcp.chat_begin(channel=room)
-        raise AssertionError("no handle anywhere should be an error")
-    except ConfigError as exc:
-        check("DISCORDINATOR_CHAT_HANDLE" in str(exc), "no handle -> error naming the fix")
+        out = mcp.chat_begin(channel=room)
+        check(out["chatter"] == "DefaultChatName", "no handle anywhere -> the obvious placeholder name")
+    except ConfigError:
+        raise AssertionError("no handle anywhere should still give a name, not an error")
     os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CodeCarver"
     try:
         out = mcp.chat_begin(channel=room)

@@ -209,6 +209,8 @@ def test_relay_between_two_sessions() -> None:
 
     sent: dict[str, set] = {}
     current = {"label": None}
+    handles._resolved.clear()  # sessions that haven't chatted: tagged by project
+    handles._last_chatter = None
 
     def as_session(label: str) -> None:
         # Each session is its own MCP server process: its own label (set per
@@ -227,12 +229,12 @@ def test_relay_between_two_sessions() -> None:
         check(mcp.get_new_messages(channel="relay-room") == [], "A sees nothing new (its own post)")
         as_session("sessB")
         got = mcp.get_new_messages(channel="relay-room")
-        check([m["content"] for m in got] == ["[sessA] handoff: please review PR 42"],
+        check([m["content"] for m in got] == ["[sessA/DefaultChatName] handoff: please review PR 42"],
               "B still gets A's message after A checked its inbox")
         mcp.send_message("done", channel="relay-room")
         as_session("sessA")
         got = mcp.get_new_messages(channel="relay-room")
-        check([m["content"] for m in got] == ["[sessB] done"], "and A gets B's answer")
+        check([m["content"] for m in got] == ["[sessB/DefaultChatName] done"], "and A gets B's answer")
         check(mcp.get_new_messages(channel="relay-room") == [], "each read moves only its own position")
     finally:
         os.environ.pop("DISCORDINATOR_LABEL", None)
@@ -332,6 +334,8 @@ def test_same_label_sessions_relay() -> None:
         mcp._sent_ids.update(sent)
         handles._SESSION_KEY = "id:" + handle  # its own Claude Code session
 
+    handles._resolved.clear()  # sessions that haven't chatted: tagged by project
+    handles._last_chatter = None
     os.environ["DISCORDINATOR_LABEL"] = "laptop"  # shared, e.g. from `config set-label`
     try:
         as_session("ProjA", set())
@@ -340,13 +344,13 @@ def test_same_label_sessions_relay() -> None:
         check(mcp.get_new_messages(channel="label-room") == [], "A doesn't see its own message")
         as_session("ProjB", set())
         got = mcp.get_new_messages(channel="label-room")
-        check([m["content"] for m in got] == ["[laptop] A: please review"],
+        check([m["content"] for m in got] == ["[laptop/ProjA] A: please review"],
               "B sees A's message though they share a label")
         mcp.send_message("B: done", channel="label-room")
         b_sent = set(mcp._sent_ids)
         as_session("ProjA", a_sent)
         got = mcp.get_new_messages(channel="label-room")
-        check([m["content"] for m in got] == ["[laptop] B: done"], "and A sees B's answer")
+        check([m["content"] for m in got] == ["[laptop/ProjB] B: done"], "and A sees B's answer")
         as_session("ProjB", b_sent)
         check(mcp.get_new_messages(channel="label-room") == [], "neither re-reads or loses anything")
     finally:
