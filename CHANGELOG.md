@@ -8,6 +8,11 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.44] - 2026-10-09
+Locks the operating system releases: no lock-takeover race on Linux/macOS
+- Shared files are locked with flock (Linux/macOS) or LockFileEx (Windows); a lock is freed the moment its holder exits, so the three-waiter takeover race is gone
+- Lock files are now .flock and stay in place; restart every session's server so old and new versions don't use different locks
+
 ## [1.0.43] - 2026-10-08
 Purge clears the whole channel; a session can delete its own posts and repost
 - purge_messages and CLI purge delete every message in the channel - every machine's and session's, people's, interjections - any age, every page; only the preview/confirm step stays (--older-than / scan_limit narrow it on request)
