@@ -8,6 +8,19 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.45] - 2026-10-09
+Deleted turns stay deleted, partial sends can be cleaned up, purge reaches local chat rooms and bulk-deletes on Discord, abandoned chats don't swallow new openers
+- A chat turn deleted or purged after a session set it aside (waiting for someone else) is never handed to it; deleted pieces of an unfinished turn are dropped too.
+- A long relay send that fails partway records the pieces that went out, so delete_messages can remove them; the error lists their ids.
+- Purge (MCP and CLI) reaches the chat room when relay and chat use different transports (e.g. relay on Discord, chat local).
+- Discord purge deletes messages under 14 days old 100 at a time (needs Manage Messages; falls back to one by one) and every Discord request waits out the rate limit instead of being refused.
+- An unaddressed opener from someone whose last chat went silent for 30+ minutes without an end is open to anyone, not only their old peer.
+- A new session no longer takes back a role from a chat whose turn is older than 4 hours.
+- chat-guard: after a reply sent with send_message (posted as the chat turn), the next step is chat_await, not a second chat_say.
+- Locks close their file on any error and say plainly when the lock file can't be opened; a set-aside turn whose delivery fails is kept.
+- New live suite tests/live/test_discord_live.py runs relay, chat, delete, attachments and purge against a real test channel.
+- Restart every session's server after updating.
+
 ## [1.0.44] - 2026-10-09
 Locks the operating system releases: no lock-takeover race on Linux/macOS
 - Shared files are locked with flock (Linux/macOS) or LockFileEx (Windows); a lock is freed the moment its holder exits, so the three-waiter takeover race is gone
