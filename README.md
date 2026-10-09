@@ -133,8 +133,8 @@ primitives as `watch` + `interject`, just a single-screen front-end. Local only.
    - Scopes: `bot`
    - Bot Permissions: **View Channels**, **Send Messages**, **Read Message
      History**, **Add Reactions** (`permissions=68672`). Add Reactions powers the
-     ✅ read-acks, which are **on by default**. For `purge --all` also add
-     **Manage Messages** → `permissions=76864`.
+     ✅ read-acks, which are **on by default**. For `purge` to delete messages
+     people typed too, also add **Manage Messages** → `permissions=76864`.
    - To **upload attachments** (`send --file/--image`, `send_file`) the bot also
      needs **Attach Files** → `permissions=101440` (or `109632` with Manage
      Messages too). This is a *separate* permission from Send Messages: without
@@ -153,8 +153,9 @@ primitives as `watch` + `interject`, just a single-screen front-end. Local only.
    instant; no verification needed, and no re-invite or restart required.
 
 Read-acks degrade gracefully: if the bot lacks Add Reactions, reads still work,
-they just skip the ✅. Deleting the bot's *own* messages (`purge`, the default)
-needs no extra permission; only `--all` does.
+they just skip the ✅. `purge` deletes the bot's own messages with no extra
+permission; the ones people typed need Manage Messages (without it they're left,
+and purge says so).
 
 ### Getting channel ids
 
@@ -239,13 +240,12 @@ discordinator version
 discordinator relay --ack
 discordinator read --ack
 
-# PURGE old messages (on request). Only the bot's own messages unless --all; with no
-# --older-than it takes every one in the last --limit (200) scanned, whatever its age.
-# It always asks first (unless --yes). Preview first:
-discordinator purge --channel test --older-than 7d --dry-run
-discordinator purge --channel test --older-than 7d          # prompts, then deletes
-discordinator purge --channel test --older-than 7d --yes    # no prompt
-discordinator purge --channel test --older-than 7d --all    # everyone's (needs Manage Messages)
+# PURGE a channel (on request): every message in it, whoever posted it. It asks
+# first (unless --yes). Preview first:
+discordinator purge --channel test --dry-run
+discordinator purge --channel test                     # prompts, then deletes all
+discordinator purge --channel test --yes               # no prompt
+discordinator purge --channel test --older-than 7d     # only messages older than 7 days
 ```
 
 ### Notes on messages
@@ -315,7 +315,8 @@ you can omit the `env` block — the server reads the same config file.
 | `read_messages(channel?, limit?, after?, before?, newest_first?)` | Read recent messages. Each attachment is returned as `{url, filename, content_type, size, width, height, is_image}`. |
 | `download_attachment(url, dest?)` | Fetch an attachment (by url from a read result) to local disk. **Gated**: needs the per-machine receive opt-in (off by default). |
 | `get_new_messages(channel?, include_self?, limit?, ack?)` | **Relay primitive** — only messages new since the last call (advances a per-channel cursor), with your own messages filtered out. `ack` reacts ✅ to the newest. |
-| `purge_messages(channel?, older_than_days?, only_mine?, scan_limit?, dry_run?)` | Delete old messages. Safe defaults (dry-run, only the bot's own, 7-day floor). |
+| `delete_messages(message_ids?, channel?)` | Delete this session's own post(s) to fix a mistake (default: its latest post). Only its own. |
+| `purge_messages(channel?, dry_run?, older_than_days?, scan_limit?)` | Purge a channel: every message, whoever posted it. A dry run unless `dry_run=False`. |
 | `list_channels()` | Show configured channel names + default. |
 | `whoami()` | Verify the token / show the bot identity. |
 | `chat_begin` / `chat_say` / `chat_await` / `chat_status` | **Chat mode** — a separate turn-based agent↔agent protocol with per-participant handles (a fixed per-project `DISCORDINATOR_CHAT_HANDLE`, plus an optional per-session role like `Project/ui`; auto-suffixed `-2` if another live session on the machine has the same name; case-insensitive), explicit turn `status` (over/wrap/end/impasse, plus `working` for "hold on, doing the work"), `chat_say` that posts AND waits for the reply in one call, a `next` step on every result, a Stop-hook guard (`discordinator chat-guard`) so a session can't drop out mid-chat, human `stop`, and `chat_status` for stall recovery. Several chats can share one room, each seeing only its own turns and ending. Scales past two: address a turn with `to=` (a derived **floor token** wakes only the addressee), raise a hand with `status="ask"`, plus built-in anti-starvation (`suggest_next` + a nudge). A turn can carry attachments: `chat_say(..., files=[...])` (gated by the send opt-in) rides them on the turn's final message, and `chat_await` returns them in `attachments`; on a local chat the files' full paths are added to the message instead (no copy, no opt-in). If `chat_say` fails, the error says nothing was posted and the turn is still yours. Replies go back to whoever handed over the turn, so separate chats can share the room. See [`AGENTS.md`](AGENTS.md#chat-mode-agent--agent) and the [protocol notes](docs/chat-protocol-notes.md). |

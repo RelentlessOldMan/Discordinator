@@ -639,6 +639,30 @@ def note_sent(session: str, ids: list[str]) -> None:
         sent[session] = kept[-SENT_KEEP:]
 
 
+POSTS_KEEP = 500  # per session: what delete_messages can find
+
+
+def note_posts(session: str, entries: list[dict[str, Any]]) -> None:
+    """Record a session's posts ({id, channel, mode, post}), so it can delete
+    its own (and only its own) later, after a restart too."""
+    if not entries:
+        return
+    with update_state() as state:
+        posts = state.setdefault("posts", {})
+        posts[session] = (list(posts.get(session) or []) + entries)[-POSTS_KEEP:]
+
+
+def my_posts(session: str) -> list[dict[str, Any]]:
+    return [e for e in (load_state().get("posts") or {}).get(session) or [] if isinstance(e, dict)]
+
+
+def forget_posts(session: str, ids: set[str]) -> None:
+    with update_state() as state:
+        posts = state.setdefault("posts", {})
+        posts[session] = [e for e in posts.get(session) or []
+                          if isinstance(e, dict) and str(e.get("id")) not in ids]
+
+
 def sent_ids(session: str) -> set[str]:
     return set((load_state().get("relay_sent") or {}).get(session) or [])
 

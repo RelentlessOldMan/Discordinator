@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any, Optional, Union
 
 from . import config
-from .discord_client import DiscordClient, simplify_message
+from .discord_client import DiscordClient, DiscordError, simplify_message
 from .local_client import LocalClient
 
 Client = Union[DiscordClient, LocalClient]
@@ -84,3 +84,58 @@ def read_new(client: Client, channel_id: str, reader: Optional[str],
     if messages:
         config.set_cursor(channel_id, messages[-1]["id"], reader)
     return messages
+
+
+def purge_targets(client: Client, channel_id: str, older_than: Optional[float] = None,
+                  limit: Optional[int] = None) -> list[dict[str, Any]]:
+    """Every message in the channel - whoever posted it (any machine, a human,
+    an interjection) - optionally only those older than ``older_than`` seconds,
+    and at most the newest ``limit``. Simplified, newest first."""
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=older_than)
+              if older_than else None)
+    out: list[dict[str, Any]] = []
+    before: Optional[str] = None
+    while limit is None or len(out) < limit:
+        want = 100 if limit is None else min(100, limit - len(out))
+        batch = client.read_messages(channel_id, limit=want, before=before)
+        if not batch:
+            break
+        for raw in batch:
+            m = simplify_message(raw)
+            ts = datetime.fromisoformat(m["timestamp"]) if m["timestamp"] else None
+            if cutoff is None or (ts is not None and ts <= cutoff):
+                out.append(m)
+        before = batch[-1]["id"]
+        if len(batch) < want:
+            break
+    return out
+
+
+def purge(client: Client, channel_id: str,
+          messages: list[dict[str, Any]]) -> tuple[int, list[str]]:
+    """Delete ``messages``; returns (how many were deleted, why the rest
+    weren't). On Discord, other authors' messages need Manage Messages: once
+    one is refused, the rest of theirs are skipped rather than each refused."""
+    if hasattr(client, "delete_messages"):  # local: one rewrite for all of them
+        return client.delete_messages(channel_id, [m["id"] for m in messages]), []
+    me = client.whoami().get("id")
+    deleted, problems, no_perm = 0, [], False
+    for m in messages:
+        if no_perm and m["author_id"] != me:
+            continue
+        try:
+            client.delete_message(channel_id, m["id"])
+            deleted += 1
+        except DiscordError as e:
+            if "(403)" in str(e) and m["author_id"] != me:
+                no_perm = True
+            else:
+                problems.append(f"{m['id']}: {e}")
+    others = sum(1 for m in messages if m["author_id"] != me)
+    if no_perm:
+        problems.insert(0, f"{others} message(s) by people (or other bots) weren't deleted: "
+                           "the bot needs the Manage Messages permission (re-invite it "
+                           "with permissions=109632).")
+    return deleted, problems

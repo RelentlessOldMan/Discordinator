@@ -75,20 +75,115 @@ def _run(argv: list[str], stdin: str = "") -> tuple[int, str]:
     return rc, out.getvalue()
 
 
-def test_mcp_purge_defaults() -> None:
-    print("purge_messages defaults: a dry run of my own messages older than 7 days:")
+def test_mcp_purge_takes_everything() -> None:
+    print("purge_messages purges the whole channel - every author, any age - after a dry run:")
     r = "purge-mcp"
-    LocalClient("me").send_message(r, "my old")
-    LocalClient("me").send_message(r, "my new")
-    LocalClient("other").send_message(r, "their old")
-    _age(r, {"my old", "their old"}, 10)
+    LocalClient("me").send_message(r, "mine")
+    LocalClient("other").send_message(r, "another machine's")
+    chat.send_chat(LocalClient("me"), r, "A", "over", "a chat turn", to="B")
+    LocalClient("me").post_human(r, "an interjection")
+    for n in range(130):
+        LocalClient("other").send_message(r, f"n{n}")
     out = mcp.purge_messages(channel=r)
-    check(out["dry_run"] and out["would_delete"] == 1, f"only my old message matches: {out}")
-    check(len(_contents(r)) == 3, "a dry run deletes nothing")
+    check(out["dry_run"] and out["would_delete"] == 134, f"the dry run counts all of them: {out['would_delete']}")
+    check(len(LocalClient("p").read_messages(r, limit=100)) == 100, "and deletes nothing")
     out = mcp.purge_messages(channel=r, dry_run=False)
-    check(out["deleted"] == 1 and _contents(r) == ["my new", "their old"], "then just that one goes")
-    out = mcp.purge_messages(channel=r, dry_run=False, only_mine=False, older_than_days=0)
-    check(out["deleted"] == 2 and _contents(r) == [], "older_than_days=0, only_mine=False clears it")
+    check(out["deleted"] == 134 and _contents(r) == [] and "not_deleted" not in out,
+          "then every one goes, past the first 100 too")
+    LocalClient("me").send_message(r, "old")
+    LocalClient("me").send_message(r, "new")
+    _age(r, {"old"}, 10)
+    out = mcp.purge_messages(channel=r, dry_run=False, older_than_days=7)
+    check(_contents(r) == ["new"], "older_than_days narrows it when asked")
+
+
+def test_discord_purge_without_manage_messages() -> None:
+    print("on Discord without Manage Messages: the bot's own go, people's are reported once:")
+    import httpx
+    from discordinator import client_factory, discord_client as dc
+    from discordinator.discord_client import API_BASE, DiscordClient
+    msgs = [{"id": str(10 - i), "content": f"m{i}", "timestamp": "2026-01-01T00:00:00+00:00",
+             "author": {"id": "bot" if i % 2 == 0 else "person", "bot": i % 2 == 0}}
+            for i in range(6)]
+    deletes: list = []
+
+    def handler(req):
+        if req.url.path.endswith("/users/@me"):
+            return httpx.Response(200, json={"id": "bot"})
+        if req.method == "GET":
+            return httpx.Response(200, json=msgs if "before" not in req.url.params else [])
+        mid = req.url.path.rsplit("/", 1)[-1]
+        deletes.append(mid)
+        author = next(m["author"]["id"] for m in msgs if m["id"] == mid)
+        return httpx.Response(204) if author == "bot" else httpx.Response(403, json={})
+
+    real_sleep = dc.time.sleep
+    dc.time.sleep = lambda *_a, **_k: None
+    client = DiscordClient(token="test-token")
+    client._client = httpx.Client(base_url=API_BASE, transport=httpx.MockTransport(handler))
+    try:
+        targets = client_factory.purge_targets(client, "chan")
+        check(len(targets) == 6, "every message is a target, the people's too")
+        deleted, problems = client_factory.purge(client, "chan", targets)
+        check(deleted == 3, f"the bot's own 3 were deleted ({deleted})")
+        check(len(problems) == 1 and "Manage Messages" in problems[0] and "3 message" in problems[0],
+              f"one note says why 3 were left: {problems}")
+        check(len(deletes) == 4, f"only one refused delete was tried, not three ({len(deletes)})")
+    finally:
+        client.close()
+        dc.time.sleep = real_sleep
+
+
+def test_delete_own_messages() -> None:
+    print("delete_messages: a session deletes its own posts (and only its own), then reposts:")
+    from discordinator import handles
+    handles._SESSION_KEY = "id:deleter"
+    try:
+        r = "del-own"
+        out = mcp.send_message("tpyo here", channel=r)
+        check("ids:" in out, f"send_message reports the ids: {out}")
+        LocalClient("x").send_message(r, "someone else's", label="them")
+        LocalClient("x").post_human(r, "a human's")
+        res = mcp.delete_messages(channel=r)
+        check(res["deleted"] == 1 and _contents(r) == ["[them] someone else's", "a human's"],
+              "no ids: my latest post goes, nothing else")
+        others = [m["id"] for m in LocalClient("p").read_messages(r, limit=10)]
+        try:
+            mcp.delete_messages(message_ids=others[0], channel=r)
+            check(False, "someone else's message should be refused")
+        except ValueError as e:
+            check("Not your message" in str(e) and "purge" in str(e) and len(_contents(r)) == 2,
+                  "another's message (or a human's) is refused, nothing deleted")
+        mcp.send_message("first", channel=r)
+        mid = mcp.send_message("second", channel=r).split("ids: ")[1].rstrip(").")
+        mcp._my_posts.clear()  # the session's server restarted
+        res = mcp.delete_messages(message_ids=[mid])
+        check(res["deleted"] == 1 and "[me] first" in _contents(r) and "[me] second" not in _contents(r),
+              "after a restart it can still delete a post it names")
+        try:
+            mcp.delete_messages(message_ids=[mid])
+            check(False, "deleting it twice should be refused")
+        except ValueError:
+            check(True, "once deleted it's no longer listed as its own")
+
+        rc = "del-chat"
+        mcp.chat_begin(chatter="A", channel=rc)
+        mcp.chat_begin(chatter="B", channel=rc)
+        out = mcp.chat_say(text="x" * 4500, chatter="A", channel=rc, to="B", wait=False)
+        check(len(out["message_ids"]) == 3, "chat_say returns the ids of all its pieces")
+        res = mcp.delete_messages(message_ids=out["message_ids"][1])
+        check(res["deleted"] == 3 and "Nobody had replied" in res["note"],
+              "naming one piece deletes the whole turn; nobody had answered it")
+        b = mcp.chat_await(chatter="B", channel=rc, timeout=0.3, poll=0.02, nudge_after=0)
+        check(b["timed_out"] and not b["your_turn"], "the deleted turn never reaches B")
+        out = mcp.chat_say(text="the right question", chatter="A", channel=rc, to="B", wait=False)
+        b = mcp.chat_await(chatter="B", channel=rc, timeout=1, poll=0.02, nudge_after=0)
+        check(b["text"] == "the right question", "the reposted turn does")
+        mcp.chat_say(text="an answer", chatter="B", channel=rc, wait=False)
+        res = mcp.delete_messages(message_ids=out["message_ids"])
+        check("B posted since" in res["note"], "deleting after a reply says B may have read it")
+    finally:
+        handles._SESSION_KEY = None
 
 
 def test_cli_purge() -> None:
@@ -104,17 +199,19 @@ def test_cli_purge() -> None:
     LocalClient("me").send_message(r, "mine old")
     LocalClient("me").send_message(r, "mine new")
     LocalClient("other").send_message(r, "theirs old")
+    LocalClient("me").post_human(r, "a human")
     _age(r, {"mine old", "theirs old"}, 10)
-    rc, out = _run(["purge", "-c", r, "--older-than", "7d", "--dry-run"])
-    check(rc == 0 and "would delete 1" in out and len(_contents(r)) == 3, "--dry-run previews only")
-    rc, out = _run(["purge", "-c", r, "--older-than", "7d"])
-    check(rc == 1 and "--yes" in out and len(_contents(r)) == 3,
+    rc, out = _run(["purge", "-c", r, "--dry-run"])
+    check(rc == 0 and "would delete all 4" in out and len(_contents(r)) == 4, "--dry-run previews only")
+    rc, out = _run(["purge", "-c", r])
+    check(rc == 1 and "--yes" in out and len(_contents(r)) == 4,
           "without a terminal to confirm on, it refuses and deletes nothing")
     rc, out = _run(["purge", "-c", r, "--older-than", "7d", "--yes"])
-    check(rc == 0 and _contents(r) == ["mine new", "theirs old"], "--yes deletes just my old one")
+    check(rc == 0 and _contents(r) == ["mine new", "a human"], "--older-than takes only the old ones, anyone's")
     rc, out = _run(["purge", "-c", r, "--yes"])
-    check(rc == 0 and _contents(r) == ["theirs old"],
-          "with no --older-than it takes all of mine, whatever their age")
+    check(rc == 0 and _contents(r) == [], "plain purge takes everything left")
+    rc, out = _run(["purge", "-c", r, "--all", "--yes"])
+    check(rc == 0 and "nothing to delete" in out, "--all is still accepted")
 
 
 def test_cli_relay() -> None:
@@ -279,7 +376,9 @@ def test_stop_needs_a_local_room() -> None:
 
 
 def main() -> int:
-    test_mcp_purge_defaults()
+    test_mcp_purge_takes_everything()
+    test_discord_purge_without_manage_messages()
+    test_delete_own_messages()
     test_cli_purge()
     test_cli_relay()
     test_read_messages_tool()

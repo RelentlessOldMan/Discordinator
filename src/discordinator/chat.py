@@ -513,6 +513,7 @@ def send_chat(client: DiscordClient, channel_id: str, me: str, status: str, text
             # Tell the caller how far it got, so a retry doesn't repeat pieces.
             e.chat_pieces_sent, e.chat_pieces_total = i, len(pieces)  # type: ignore[attr-defined]
             e.chat_rest = join_pieces(pieces[i:])  # type: ignore[attr-defined]
+            e.chat_sent = list(sent)  # type: ignore[attr-defined]
             raise
     _posted(channel_id, me, status, sent, to)
     return sent
