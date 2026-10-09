@@ -8,6 +8,14 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.43] - 2026-10-08
+Purge clears the whole channel; a session can delete its own posts and repost
+- purge_messages and CLI purge delete every message in the channel - every machine's and session's, people's, interjections - any age, every page; only the preview/confirm step stays (--older-than / scan_limit narrow it on request)
+- On Discord, messages people typed need Manage Messages (permissions=109632): the rest are deleted and one note says what was left
+- New delete_messages tool: a session deletes its own posts (default: its latest, every piece of a long one) to fix a mistake and repost; anything else is refused; works after a restart
+- A deleted chat turn never reaches anyone who hadn't read it; if others posted since, the result says so
+- send_message, send_file and chat_say return the ids of what they posted
+
 ## [1.0.42] - 2026-10-08
 Local viewers never use Discord; download path, local file and .env safety; chat waits survive busy rooms, from_whom and restarts
 - watch, tui, interject and stop always act on local rooms (a Discord chat is watched in Discord); stop/interject refuse a local room nobody chats in
