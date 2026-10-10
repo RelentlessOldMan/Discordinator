@@ -8,6 +8,15 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.47] - 2026-10-09
+Names survive restarts, unnamed sessions can't take another's turn, read positions follow name changes
+- A restarted server's relay tag keeps the session's role (or -2 name), and an owed reply sent with send_message is still its chat turn
+- A session going by DefaultChatName is warned on every chat call and is never handed a turn sent to that name before it took it
+- Taking a role or another name keeps the session's relay read position; nothing is read twice
+- get_new_messages leaves out the session's own chat turns
+- A turn owed to a name the session went by before (e.g. DefaultChatName) is pointed out
+- Tags use the project's chat name as chats show it; rename hints show a matching example
+
 ## [1.0.46] - 2026-10-09
 Everything has a name: relay tags show machine and chat name; anything unset shows DefaultMachineName / DefaultChatName
 - Relay messages (send_message, send_file, CLI send) are tagged [machine/chat name], e.g. [Home/CodeCarver] or [Home/CodeCarver/ui] once the session has chatted with a role.
