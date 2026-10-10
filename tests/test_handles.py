@@ -207,6 +207,13 @@ def test_renamed_handle_passed_back() -> None:
               "chatter='CodeCarver-2' is the same session, and gets its turn")
         slots = config.load_state()["chat"]["cc2"]
         check("codecarver/codecarver-2" not in slots, f"no stray role handle: {sorted(slots)}")
+        cfg = config.load()
+        check(handles.current(None, cfg) == "CodeCarver-2"
+              and mcp._tag(cfg).endswith("/CodeCarver-2")
+              and mcp._reader(cfg).endswith("|CodeCarver-2"),
+              f"its relay tag and inbox stay CodeCarver-2's: {mcp._tag(cfg)}, {mcp._reader(cfg)}")
+        st = mcp.chat_status(chatter="CodeCarver-2", channel="cc2")
+        check(st["your_turn"], "chat_status(chatter='CodeCarver-2') answers for itself")
     finally:
         other.kill()
         other.wait()
@@ -391,7 +398,7 @@ def test_name_taken_meanwhile_isnt_shared() -> None:
         h2, note = handles.resolve("ProjQ/ui", cfg)
         check(h2 == "ProjQ/ui-2", f"this session moves to ProjQ/ui-2, not a shared name: {h2}")
         check(note and "ProjQ/ui-2" in note, "and is told so")
-        check("/ui/ui" not in note and "'ProjQ/api'" in note.split("e.g.")[1],
+        check("/ui/ui" not in note and "chatter=\"api\" -> 'ProjQ/api'" in note.split("e.g.")[1],
               f"the note's example is a real handle nobody holds: {note.split('e.g.')[1]}")
         again, _ = handles.resolve("ProjQ/ui-2", cfg)
         check(again == "ProjQ/ui-2", "and it keeps that name")
@@ -575,6 +582,63 @@ def test_plain_name_freed_when_a_role_is_taken() -> None:
     check(handles.resolve("ui", cfg)[0] == "ProjQ/ui", "then a role")
     held = handles.live_handles()
     check("ProjQ" not in held and "ProjQ/ui" in held, f"only the role is held now: {held}")
+    _fresh()
+    check(handles.resolve(None, {})[0] == "DefaultChatName", "with no project name: the placeholder")
+    check(handles.resolve("ui", {})[0] == "ui", "then a name of its own")
+    held = handles.live_handles()
+    check("DefaultChatName" not in held and "ui" in held, f"the placeholder is freed too: {held}")
+
+
+def test_unnamed_session_isnt_handed_anothers_turn() -> None:
+    print("an unnamed session is warned, and never handed a turn sent to DefaultChatName "
+          "before it had that name:")
+    from discordinator import chat
+    from discordinator.local_client import LocalClient
+    _fresh()
+    c, room = LocalClient(), "unnamed"
+    chat.send_chat(c, room, "DefaultChatName", "over", "Peer: should Foo drop v1?", to="Peer")
+    chat.send_chat(c, room, "Peer", "over", "yes - delete Foo's v1 endpoints", to="DefaultChatName")
+    time.sleep(0.05)  # another project's session starts afterwards
+    b = mcp.chat_begin(channel=room)
+    check(b["chatter"] == "DefaultChatName", "it goes by the placeholder")
+    check(not b["recovered_pending_turn"] and "no chat name" in b.get("note", ""),
+          "isn't handed the earlier session's turn, and is told it has no name")
+    got = mcp.chat_await(channel=room, timeout=0.3, poll=0.02, nudge_after=0)
+    check(got["timed_out"] and "Foo" not in (got.get("text") or ""),
+          "its wait doesn't hand it over either")
+    check("no chat name" in got.get("handle_note", ""), "the warning is on every chat result")
+    st = mcp.chat_status(channel=room)
+    check(not st["your_turn"] and "no chat name" in st.get("note", ""), "chat_status agrees")
+    chat.send_chat(c, room, "Peer", "over", "now one for you", to="DefaultChatName")
+    got = mcp.chat_await(channel=room, timeout=1, poll=0.02, nudge_after=0)
+    check(got["your_turn"] and got["text"] == "now one for you",
+          "a turn sent to the name once it has it is its own")
+
+
+def test_turn_owed_to_the_placeholder_before_a_name() -> None:
+    print("a turn owed to DefaultChatName is pointed out once the project has a name:")
+    from discordinator import chat
+    from discordinator.local_client import LocalClient
+    _fresh()
+    handles.sessions_path().unlink(missing_ok=True)  # no other sessions running
+    c, room = LocalClient(), "named-later"
+    handles._SESSION_KEY = "id:named-later"
+    try:
+        b = mcp.chat_begin(channel=room)
+        check(b["chatter"] == "DefaultChatName", f"first unnamed: {b['chatter']}")
+        mcp.chat_say(text="Peer, what's the plan?", channel=room, to="Peer", wait=False)
+        chat.send_chat(c, room, "Peer", "over", "here's the plan", to="DefaultChatName")
+        _restart()  # the project gets a name; the server is reconnected
+        handles._restored = False  # (the new server looks up the session's names)
+        os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CodeCarver"
+        b = mcp.chat_begin(channel=room)
+        check(b["chatter"] == "CodeCarver", "now it has the project's name")
+        check("'DefaultChatName'" in b.get("note", "") and "read_messages" in b["note"],
+              f"and is told a turn is owed to its old name, and how to answer: {b.get('note')}")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE", None)
+        handles._SESSION_KEY = None
+        handles.sessions_path().unlink(missing_ok=True)
 
 
 def test_process_info_without_proc() -> None:
@@ -626,6 +690,8 @@ def main() -> int:
     test_claims_say_since_when()
     test_two_live_servers_of_one_session_dont_share()
     test_plain_name_freed_when_a_role_is_taken()
+    test_unnamed_session_isnt_handed_anothers_turn()
+    test_turn_owed_to_the_placeholder_before_a_name()
     test_process_info_without_proc()
     print(f"\nALL {_passed} HANDLE CHECKS PASSED")
     return 0

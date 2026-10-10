@@ -583,22 +583,44 @@ def update_state() -> Iterator[dict[str, Any]]:
 # with no position of its own yet starts from the old shared one ("cursors").
 
 
+def _reader_keys(reader: str) -> list[str]:
+    """"label|project/role" (one session), then "label|project", then "label":
+    a session's first read starts where its project (or machine) left off."""
+    label, _, handle = reader.partition("|")
+    keys = [reader]
+    for cut in ("/", "-"):
+        if handle and cut in handle:
+            keys.append(f"{label}|{handle.split(cut)[0]}")
+    keys.append(label)
+    return keys
+
+
 def get_cursor(channel_id: str, reader: Optional[str] = None) -> Optional[str]:
     state = load_state()
     if reader:
         mine = (state.get("relay_cursors") or {}).get(str(channel_id)) or {}
-        # "label|project/role" (one session), then "label|project", then "label":
-        # a session's first read starts where its project (or machine) left off.
-        label, _, handle = reader.partition("|")
-        keys = [reader]
-        for cut in ("/", "-"):
-            if handle and cut in handle:
-                keys.append(f"{label}|{handle.split(cut)[0]}")
-        keys.append(label)
-        for key in keys:
+        for key in _reader_keys(reader):
             if key in mine:
                 return mine[key] or None  # None: reset, read from scratch
     return (state.get("cursors") or {}).get(str(channel_id))
+
+
+def carry_cursors(old: str, new: str) -> None:
+    """A session whose read position changes key (it took a role, or another
+    name) has read what it read under the old one: the new one starts no
+    earlier, so nothing comes back to it twice."""
+    with update_state() as state:
+        for mine in (state.get("relay_cursors") or {}).values():
+            if not isinstance(mine, dict):
+                continue
+            have = next((mine[k] for k in _reader_keys(old) if k in mine), None)
+            now = next((mine[k] for k in _reader_keys(new) if k in mine), None)
+            try:
+                if not have or (now is not None and int(now) >= int(have)):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            mine[new] = str(have)
 
 
 # What an unnamed machine or project goes by: never nothing, and never a name
@@ -607,16 +629,36 @@ DEFAULT_MACHINE_NAME = "DefaultMachineName"
 DEFAULT_CHAT_NAME = "DefaultChatName"
 
 
+def is_default_chat_name(handle: Optional[str]) -> bool:
+    """Is ``handle`` the placeholder an unnamed session goes by (or a "-2" of it)?"""
+    key = str(handle or "").strip().casefold()
+    base = DEFAULT_CHAT_NAME.casefold()
+    return key == base or (key.startswith(base + "-") and key[len(base) + 1:].isdigit())
+
+
 def machine_name(cfg: dict[str, Any]) -> str:
     """This machine's label (``config set-label``, or DISCORDINATOR_LABEL)."""
     return str(cfg.get("machine_label") or DEFAULT_MACHINE_NAME)
+
+
+def project_name(cfg: dict[str, Any]) -> Optional[str]:
+    """The project's chat name (DISCORDINATOR_CHAT_HANDLE) as chats show it -
+    trimmed, without []|>, at most 32 characters - or None if it has none."""
+    from .chat import sanitize_handle  # (chat imports this module)
+    raw = cfg.get("chat_handle")
+    if raw in (None, ""):
+        return None
+    try:
+        return sanitize_handle(raw)
+    except ValueError:
+        return None  # nothing left of it
 
 
 def relay_tag(cfg: dict[str, Any], handle: Optional[str] = None) -> str:
     """The tag on a relay message: the machine, then the session's chat name -
     ``Home/CodeCarver``, or with a role ``Home/CodeCarver/ui``. ``handle`` is
     the session's name once it has chatted; else the project's."""
-    return f"{machine_name(cfg)}/{handle or cfg.get('chat_handle') or DEFAULT_CHAT_NAME}"
+    return f"{machine_name(cfg)}/{handle or project_name(cfg) or DEFAULT_CHAT_NAME}"
 
 
 def relay_reader(cfg: dict[str, Any], session: Optional[str] = None) -> Optional[str]:
@@ -625,7 +667,7 @@ def relay_reader(cfg: dict[str, Any], session: Optional[str] = None) -> Optional
     project's - so sessions on one machine have their own position even if
     they share a label."""
     label = cfg.get("machine_label")
-    handle = session or cfg.get("chat_handle")
+    handle = session or project_name(cfg)
     if label and handle:
         return f"{label}|{handle}"
     return label or (f"|{handle}" if handle else None)

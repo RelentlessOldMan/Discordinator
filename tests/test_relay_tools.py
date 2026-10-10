@@ -344,6 +344,10 @@ def test_everything_has_a_name() -> None:
         _run(["send", "--channel", "names-cli", "from the CLI"])
         check(_contents("names-cli") == ["[Home/CodeCarver] from the CLI"],
               "the CLI tags machine/project too")
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")  # a shell never sees .mcp.json
+        _run(["send", "--channel", "names-shell", "from a shell"])
+        check(_contents("names-shell") == ["[Home/DefaultChatName] from a shell"],
+              "from a plain shell: DefaultChatName, as AGENTS.md says")
     finally:
         os.environ["DISCORDINATOR_LABEL"] = saved
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE", None)
@@ -384,16 +388,19 @@ def test_cli_relay() -> None:
     r = "relay-cli"
     LocalClient("x").send_message(r, "from them", label="them")
     LocalClient("x").send_message(r, "from me", label="me")
+    LocalClient("x").send_message(r, "from a session here", label="me/CodeCarver")
+    LocalClient("x").send_message(r, "from meadow", label="meadow/CodeCarver")
     rc, out = _run(["relay", "-c", r, "--json"])
     got = [m["content"] for m in json.loads(out)]
-    check(rc == 0 and got == ["[them] from them"], f"first run: theirs, not mine: {got}")
+    check(rc == 0 and got == ["[them] from them", "[meadow/CodeCarver] from meadow"],
+          f"first run: theirs, not this machine's (old or new tags): {got}")
     rc, out = _run(["relay", "-c", r])
     check(rc == 0 and "no new messages" in out, "second run: nothing new")
     LocalClient("x").send_message(r, "again", label="them")
     rc, out = _run(["relay", "-c", r, "--json"])
     check([m["content"] for m in json.loads(out)] == ["[them] again"], "then only the new one")
     rc, out = _run(["relay", "-c", r, "--reset", "--json"])
-    check(len(json.loads(out)) == 2, "--reset shows recent ones again")
+    check(len(json.loads(out)) == 3, "--reset shows recent ones again")
 
 
 def test_read_messages_tool() -> None:
@@ -515,6 +522,118 @@ def test_sessions_sharing_a_label_see_each_other() -> None:
         mcp._sent_ids.clear()
 
 
+def _new_server(session: str) -> None:
+    """As if session ``session``'s MCP server (re)started: nothing in memory."""
+    from discordinator import handles
+    handles.release_all()
+    handles._resolved.clear()
+    handles._since.clear()
+    handles._last_chatter = None
+    handles._current = None
+    handles._restored = False
+    handles._SESSION_KEY = "id:" + session
+    mcp._sent_ids.clear()
+    mcp._my_posts.clear()
+
+
+def _end_sessions() -> None:
+    from discordinator import handles
+    handles.release_all()
+    handles.sessions_path().unlink(missing_ok=True)  # long gone
+    handles._resolved.clear()
+    handles._since.clear()
+    handles._last_chatter = None
+    handles._current = None
+    handles._SESSION_KEY = None
+
+
+def test_restart_keeps_the_name() -> None:
+    print("after a restart, the relay tag keeps the session's role, and an owed reply "
+          "sent with send_message is still its chat turn:")
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CodeCarver"
+    try:
+        _new_server("restarts")
+        mcp.chat_begin(chatter="ui", channel="rs-chat")
+        chat.send_chat(LocalClient("peer"), "rs-chat", "Peer", "over", "question?",
+                       to="CodeCarver/ui")
+        got = mcp.chat_await(channel="rs-chat", timeout=1, poll=0.02, nudge_after=0)
+        check(got["your_turn"], "the session has Peer's question")
+        _new_server("restarts")  # /mcp reconnect
+        mcp.send_message("first after restart", channel="rs-relay")
+        check(_contents("rs-relay") == ["[me/CodeCarver/ui] first after restart"],
+              f"its first send is still tagged with its role: {_contents('rs-relay')}")
+        _new_server("restarts")
+        out = mcp.send_message("the answer", channel="rs-chat")
+        check(out.startswith("Sent as your chat turn to Peer")
+              and _contents("rs-chat")[-1] == "[CodeCarver/ui>Peer|over] the answer",
+              "its first call, an owed reply via send_message, is posted as its turn")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        _end_sessions()
+
+
+def test_new_name_keeps_the_read_position() -> None:
+    print("a session that takes a role reads on from where it was - nothing comes twice:")
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Carry"
+    r = "carry"
+    try:
+        _new_server("yesterday")
+        for i in (1, 2, 3):
+            LocalClient("x").send_message(r, f"m{i}", label="them")
+        mcp.chat_begin(chatter="ui", channel="carry-chat")
+        check(len(mcp.get_new_messages(channel=r)) == 3, "yesterday's Carry/ui read m1-m3")
+        _end_sessions()
+        _new_server("today")
+        for i in (4, 5, 6):
+            LocalClient("x").send_message(r, f"m{i}", label="them")
+        check(len(mcp.get_new_messages(channel=r)) == 6, "today's session reads m1-m6 as Carry")
+        check(mcp.chat_begin(chatter="ui", channel="carry-chat")["chatter"] == "Carry/ui",
+              "then takes the role ui")
+        got = [m["content"] for m in mcp.get_new_messages(channel=r)]
+        check(got == [], f"and isn't handed m4-m6 again from yesterday's place: {got}")
+        LocalClient("x").send_message(r, "m7", label="them")
+        got = [m["content"] for m in mcp.get_new_messages(channel=r)]
+        check(got == ["[them] m7"], "new messages still come")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        _end_sessions()
+
+
+def test_long_project_name_tag_stays_put() -> None:
+    print("a project name chats would shorten is tagged (and read) the same before and after chatting:")
+    long_name = "CompanyInternalToolsMonorepoProject"  # 35 characters; chat names stop at 32
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = long_name
+    r = "long-name"
+    try:
+        _new_server("long")
+        LocalClient("x").send_message(r, "m1", label="them")
+        check(len(mcp.get_new_messages(channel=r)) == 1, "reads m1 before chatting")
+        mcp.send_message("before", channel=r)
+        mcp.chat_begin(channel="long-chat")
+        mcp.send_message("after", channel=r)
+        tags = {c.split("]")[0] for c in _contents(r)[1:]}
+        check(tags == {f"[me/{long_name[:32]}"}, f"one tag, the chat name: {tags}")
+        check(mcp.get_new_messages(channel=r) == [], "and m1 isn't read again")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        _end_sessions()
+
+
+def test_own_chat_turns_not_in_the_inbox() -> None:
+    print("get_new_messages leaves out the session's own chat turns, as well as its relay posts:")
+    r = "own-turns"  # chat and relay in one room (no chat channel set)
+    try:
+        _new_server("own")
+        mcp.chat_begin(chatter="solo", channel=r)
+        mcp.chat_say(text="my turn", chatter="solo", channel=r, to="all", wait=False)
+        mcp.send_message("my note", channel=r)
+        LocalClient("x").send_message(r, "theirs", label="them")
+        got = [m["content"] for m in mcp.get_new_messages(channel=r)]
+        check(got == ["[them] theirs"], f"only the other side's: {got}")
+    finally:
+        _end_sessions()
+
+
 def test_event_log_open_elsewhere() -> None:
     print("an event is still logged when the log is open elsewhere at rotation time:")
     import time
@@ -559,6 +678,10 @@ def main() -> int:
     test_chat_say_fails_part_way()
     test_deleting_the_last_read_message_replays_nothing()
     test_sessions_sharing_a_label_see_each_other()
+    test_restart_keeps_the_name()
+    test_new_name_keeps_the_read_position()
+    test_long_project_name_tag_stays_put()
+    test_own_chat_turns_not_in_the_inbox()
     test_event_log_open_elsewhere()
     test_stop_needs_a_local_room()
     print(f"\nALL {_passed} RELAY-TOOL CHECKS PASSED")

@@ -22,7 +22,7 @@ Discordinator has two distinct modes — pick per task:
 | **Pacing** | Human-paced — one side posts and moves on; the other reads later (often after you say "check the channel"). Nobody blocks. | Turn-based — `chat_say` hands over the turn and waits for the reply (`chat_await` keeps waiting if it takes longer). No human shuttling. |
 | **Who drives it** | A human nudges the other side to read | The agents themselves, autonomously |
 | **Tools** | `send_message`, `get_new_messages`, `read_messages` (CLI: `send` / `read` / `relay`) | `chat_begin`, `chat_say`, `chat_await` |
-| **Protocol** | Just messages, optionally tagged with a machine label | Turn `status` (over/working/ask/wrap/end/impasse) + human `stop` |
+| **Protocol** | Just messages, tagged with the machine and chat name (`[Home/CodeCarver]`) | Turn `status` (over/working/ask/wrap/end/impasse) + human `stop` |
 
 **Relay** is the original two-machine hand-off: leave a message, get on with your work, the other session picks it up when kicked. **Chat** is a structured back-and-forth conversation the two agents run themselves.
 
@@ -181,7 +181,7 @@ This installs two commands: `discordinator` (CLI) and `discordinator-mcp` (MCP s
 discordinator config set-token <YOUR_BOT_TOKEN>
 discordinator config add-channel relay      123456789012345678   # first channel becomes default
 discordinator config add-channel projectx   987654321098765432
-discordinator config set-label  laptop        # this machine's name: messages are tagged [laptop/<project>]
+discordinator config set-label  laptop        # this machine's name: messages are tagged [laptop/<chat name>]
 discordinator config set-relay-transport discord   # REQUIRED: relay tools' transport
 discordinator config set-chat-transport  discord   # REQUIRED: chat tools' transport (use 'local' to chat on-box)
 discordinator config show

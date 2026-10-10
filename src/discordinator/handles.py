@@ -470,10 +470,13 @@ def claim(desired: str) -> str:
             t = prev.get("since") if same else None
             _since[key] = float(t) if isinstance(t, (int, float)) else now
         # Prune dead/expired claims while we hold the lock - and, taking a role
-        # of a project, the plain project name this session went by before: it
-        # would block the next session that wants it and look like a session
-        # still running under it.
+        # of a project, the plain project name this session went by before (or,
+        # taking any name, the placeholder it went by with none): it would block
+        # the next session that wants it and look like a session still running
+        # under it.
         bare = _resolved.get(chat.handle_key(handle.split("/", 1)[0])) if "/" in handle else None
+        if bare is None and not config.is_default_chat_name(handle):
+            bare = _resolved.get(chat.handle_key(config.DEFAULT_CHAT_NAME))
         dropped = chat.handle_key(bare) if bare and "/" not in bare else None
         reg = {k: v for k, v in reg.items()
                if isinstance(v, dict) and (k != dropped if v.get("pid") == me
@@ -527,12 +530,19 @@ def resolve(chatter: Optional[str], cfg: dict[str, Any],
 
 def _rename_note(desired: str, handle: str, cfg: dict[str, Any]) -> str:
     taken = {chat.handle_key(h) for h in live_handles()}
-    example = next((e for e in (compose(r, cfg.get("chat_handle"))
-                                for r in ("ui", "api", "docs", "tests", "review", "work"))
-                    if chat.handle_key(e) not in taken), compose("role2", cfg.get("chat_handle")))
+    role, example = next(
+        ((r, e) for r, e in ((r, compose(r, cfg.get("chat_handle")))
+                             for r in ("ui", "api", "docs", "tests", "review", "work"))
+         if chat.handle_key(e) not in taken),
+        ("role2", compose("role2", cfg.get("chat_handle"))))
     return (f"'{desired}' is already in use by another live session on this "
             f"machine, so you are '{handle}'. Pass chatter=\"<role>\" to pick a "
-            f"clearer name (e.g. chatter=\"ui\" -> '{example}').")
+            f"clearer name (e.g. chatter=\"{role}\" -> '{example}').")
+
+
+def held_since(handle: Optional[str]) -> Optional[float]:
+    """When this session took ``handle`` (unix time), or None if it never has."""
+    return _since.get(chat.handle_key(handle))
 
 
 def current(chatter: Optional[str], cfg: dict[str, Any]) -> Optional[str]:
@@ -541,6 +551,11 @@ def current(chatter: Optional[str], cfg: dict[str, Any]) -> Optional[str]:
     restore()
     if chatter in (None, "") and _last_chatter is not None:
         chatter = _last_chatter
+    # A name this session already has (e.g. "CodeCarver-2" passed back) is
+    # itself, as in resolve - not a role "CodeCarver/CodeCarver-2".
+    mine = next((h for h in _resolved.values() if chat.same_handle(h, chatter)), None)
+    if mine is not None:
+        return mine
     try:
         desired = compose(chatter, cfg.get("chat_handle"))
     except config.ConfigError:
