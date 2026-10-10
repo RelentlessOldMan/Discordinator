@@ -1329,7 +1329,8 @@ def compute_state(
             if ended and last_turn else None),
     }
     if me_norm is not None:
-        owed = None if ended else _owed_to(turns, me_norm, last_turn_index_by)
+        owed = None if ended else _owed_to(turns, me_norm, last_turn_index_by,
+                                           _named_since(me_norm))
         state["your_turn"] = owed is not None
         state["_owed_turn"] = (
             {k: owed[k] for k in ("from", "to", "status", "id", "ts")} if owed else None)
@@ -1586,13 +1587,25 @@ def _wakes(client: DiscordClient, channel_id: str, m: dict[str, Any], me: str,
     return _means_me(client, channel_id, p["to"], me, m["id"])
 
 
-def _owed_to(turns: list[dict[str, Any]], me: str,
-             last_by: dict[str, int]) -> Optional[dict[str, Any]]:
+def _named_since(me: str) -> Optional[datetime]:
+    """For a session going by the placeholder name (no chat name set up): when
+    it took that name. Every unnamed session goes by it, so a turn sent to it
+    before then was another one's. None for a real name."""
+    if not config.is_default_chat_name(me):
+        return None
+    from . import handles  # (imports this module)
+    t = handles.held_since(me)
+    return datetime.fromtimestamp(t if t is not None else time.time(), timezone.utc)
+
+
+def _owed_to(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
+             not_before: Optional[datetime] = None) -> Optional[dict[str, Any]]:
     """The turn owed to ``me``: the latest yield that targets me, that I haven't
     answered since (no completed turn of mine after it), and whose sender hasn't
     moved on (it's still their latest turn). Worked out per caller, so two
     conversations sharing one room don't hide each other's owed turns. An
-    unaddressed turn counts as answered once anyone else replies to it."""
+    unaddressed turn counts as answered once anyone else replies to it.
+    A turn addressed to ``me`` before ``not_before`` isn't (see _named_since)."""
     mine = last_by.get(me, -1)
     horizon = datetime.now(timezone.utc) - OWED_EXPIRY
     for t in reversed(turns):
@@ -1601,6 +1614,9 @@ def _owed_to(turns: list[dict[str, Any]], me: str,
         ts = _parse_ts(t.get("ts"))
         if ts is not None and ts < horizon:
             return None  # long dead: nothing older is owed either
+        if (not_before is not None and not _is_broadcast(t["to"])
+                and (ts is None or ts < not_before)):
+            continue  # sent to this name before this session had it
         if same_handle(t["from"], me) or t["status"] not in YIELD_STATUSES:
             continue
         if not _targets(t["to"], me) or last_by.get(t["from"]) != t["i"]:

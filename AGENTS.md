@@ -62,7 +62,9 @@ Two sessions on one machine can relay to each other even with the same label:
 each skips only the messages it sent itself, and each session keeps its own read
 position (by its chat handle, e.g. `CodeCarver/ui`), so one session reading its
 inbox doesn't use up another's messages. (Two sessions of one project that only
-relay and never chat share their project's position; give each its own role.)
+relay and never chat share their project's position; give each its own role
+with one `chat_begin(chatter="<role>")`, which posts nothing. A session that
+takes a role or another name carries on from where it had read to.)
 
 **Names.** Everything has a name - anything not set shows an obvious
 placeholder, never nothing. Three settings make them up:
@@ -90,11 +92,24 @@ Chat turns carry only the chat name (`[CodeCarver/ui>peer|over]`).
 | - | - | - | `[DefaultMachineName/DefaultChatName]` | `DefaultChatName` |
 
 The role shows in relay tags once the session has used it in a chat call
-(`send_message` takes no `chatter`). A session renamed because its name was
-taken (`CodeCarver-2`) is tagged with that name. `label=` on `send_message`
-(or `--label` on the CLI) replaces the whole tag for that one message. A
+(`send_message` takes no `chatter`), and stays after a restart. A session
+renamed because its name was taken (`CodeCarver-2`) is tagged with that name.
+`label=` on `send_message` (or `--label` on the CLI) replaces the whole tag
+for that one message. The CLI runs in your shell, which never sees a
+project's `.mcp.json`: a CLI `send` is tagged `[<machine>/DefaultChatName]`
+unless the shell sets `DISCORDINATOR_CHAT_HANDLE` (or you pass `--label`). A
 `DefaultMachineName` or `DefaultChatName` in the channel means something
 wasn't set up - fix it with `config set-label` or the project's `.mcp.json`.
+
+A session chatting as `DefaultChatName` is told so on every chat result.
+Every unnamed session gets that name, so a chat can't tell two of them apart:
+two on different machines would each take the other's turns for its own. (On
+one machine a second one running at the same time is `DefaultChatName-2`,
+and a session is never handed a turn sent to the name before it took it -
+that was another session's.) Once the project has a name and its server is
+reconnected, a turn still owed to the old name is pointed out on the next
+chat call, so the session can answer it.
+
 For a mode on `local`, skip steps 2–3 for it (no bot/token/channels): relay
 defaults to room `relay`, chat to room `chat`; pass any `channel="..."` for
 another room. The rest of this doc's tool usage is identical on both transports.

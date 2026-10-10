@@ -188,6 +188,7 @@ def send_message(
 def _tag(cfg: dict[str, Any]) -> str:
     """This session's relay tag: machine, then its chat name (with its role
     once it has used one in a chat call)."""
+    handles.restore()  # a restarted server: the name the session had
     return config.relay_tag(cfg, handles.current(None, cfg) if handles._resolved else None)
 
 
@@ -265,6 +266,7 @@ def _remember_sent(cfg: dict[str, Any], sent: list[dict[str, Any]],
 def _owed_chat_reply(cfg: dict[str, Any], channel_id: str) -> Optional[tuple[str, str]]:
     """(my handle, the peer) if this session is chatting in this room and owes
     a reply there - a send_message there is that reply. Else None."""
+    handles.restore()  # a restarted server: the name the session had
     if not handles._resolved:
         return None  # this session hasn't chatted
     try:
@@ -406,11 +408,12 @@ def get_new_messages(
     A per-channel cursor is stored and advanced on each call, so repeated calls
     return only fresh messages (not the whole history). Each session (label +
     its chat handle, e.g. "CodeCarver/ui") has its own cursor, so two sessions
-    on one machine don't consume each other's messages - for two sessions of
-    one project that only relay (never chat), give each its own
-    DISCORDINATOR_LABEL. By default the messages this session sent
-    are filtered out, so you see just what the other session/machine said -
-    another session on this machine is someone else, even with the same label.
+    on one machine don't consume each other's messages - two sessions of one
+    project that only relay (never chat) share one; give each its own role
+    with one chat_begin(chatter="<role>") (it posts nothing). By default the
+    messages this session sent (relay or chat) are filtered out, so you see
+    just what the other session/machine said - another session on this
+    machine is someone else, even with the same label.
 
     Args:
         channel: A configured channel name or raw channel id. Defaults to the
@@ -437,6 +440,8 @@ def get_new_messages(
         if not include_self:
             session = handles.session_key()
             mine = _sent_ids | (config.sent_ids(session) if session else set())
+            mine |= {str(e.get("id")) for e in _all_my_posts()  # its chat turns too
+                     if e.get("mode") == "chat"}
             messages = [m for m in messages if str(m["id"]) not in mine]
 
         if ack:
@@ -621,15 +626,39 @@ def _chatter(chatter: Optional[str], cfg: dict[str, Any],
     doesn't name a role and exactly one `<project handle>/<role>` that no
     running session holds is owed a turn in the room - or is waiting on its own
     unanswered turn there - that was this session: it takes the name back
-    instead of becoming the bare project handle and never seeing the reply."""
+    instead of becoming the bare project handle and never seeing the reply.
+
+    A new name means a new relay read position too: it starts where the old
+    one got to, so the session isn't handed again what it has read."""
+    before = _reader(cfg)
     role = _lost_role(chatter, cfg, channel)
     if role is None:
-        return handles.resolve(chatter, cfg, fresh=fresh and chatter not in (None, ""))
-    me, note = handles.resolve(role, cfg)
-    back = (f"'{me}' has a chat going in this room that no running session holds, "
-            "so this session has taken that name back (its role was forgotten when "
-            f"it restarted). Pass chatter=\"{role}\" on your chat calls.")
-    return me, f"{note} {back}" if note else back
+        me, note = handles.resolve(chatter, cfg, fresh=fresh and chatter not in (None, ""))
+    else:
+        me, note = handles.resolve(role, cfg)
+        back = (f"'{me}' has a chat going in this room that no running session holds, "
+                "so this session has taken that name back (its role was forgotten when "
+                f"it restarted). Pass chatter=\"{role}\" on your chat calls.")
+        note = f"{note} {back}" if note else back
+    after = _reader(cfg)
+    if before and after and before != after:
+        try:
+            config.carry_cursors(before, after)
+        except OSError:
+            pass  # at worst it reads a few messages twice
+    return me, note
+
+
+def _unnamed(note: Optional[str], me: Optional[str]) -> Optional[str]:
+    """``note``, plus a warning on every chat result while this session goes by
+    the placeholder name."""
+    if not config.is_default_chat_name(me):
+        return note
+    warn = (f"This project has no chat name, so you are '{me}', the name every unnamed "
+            "session gets - a chat can't tell two of them apart (on two machines, say), "
+            "so turns can reach the wrong one. Set DISCORDINATOR_CHAT_HANDLE in this "
+            "project's .mcp.json and reconnect (/mcp), or pass chatter=\"<name>\".")
+    return f"{note} {warn}" if note else warn
 
 
 def _lost_role(chatter: Optional[str], cfg: dict[str, Any],
@@ -683,12 +712,13 @@ def _left_waiting(client: Any, channel_id: str, base: str) -> list[str]:
 
 def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any]) -> list[str]:
     """Handles that look like this session's own earlier name - another role of
-    its project, the bare project handle, or its role used as a whole handle
-    (the name before the project got a fixed handle) - that a turn in the room
-    is owed to and no running session on this machine holds."""
+    its project, the bare project handle, its role used as a whole handle
+    (the name before the project got a fixed handle), or a name it went by
+    itself (DefaultChatName, before the project got one) - that a turn in the
+    room is owed to and no running session on this machine holds."""
     base = cfg.get("chat_handle")
     me_key = chat.handle_key(me)
-    looks: set[str] = set()
+    looks: set[str] = {chat.handle_key(h) for h in handles._resolved.values()} - {me_key}
     if base:
         b = chat.handle_key(base)
         looks.add(b)
@@ -789,8 +819,9 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         busy = (f"Another chat is going on in this room ({', '.join(others)}). Address "
                 "your opener (to='<your peer>') so it reaches the right session.")
         note = f"{note} {busy}" if note else busy
-    if note:
-        out["note"] = note
+    shown = _unnamed(note, me)
+    if shown:
+        out["note"] = shown
     events.record("joined", handle=me, room=channel_id, recovered=owed or None)
     if note and (lost or "name" in note):
         events.record("renamed" if not lost else "lost_turn", handle=me, room=channel_id,
@@ -875,6 +906,7 @@ def chat_say(
     cfg = config.load()
     try:
         me, handle_note = _chatter(chatter, cfg, channel)
+        handle_note = _unnamed(handle_note, me)
         if status not in chat.STATUSES:
             raise ValueError(f"status must be one of {chat.STATUSES}, got {status!r}")
         target = chat.sanitize_handle(to) if to else None
@@ -1198,6 +1230,7 @@ def chat_await(
     """
     cfg = config.load()
     me, handle_note = _chatter(chatter, cfg, channel)
+    handle_note = _unnamed(handle_note, me)
     channel_id = config.resolve_chat_channel(cfg, channel)
     with _client("chat") as client:
         result = chat.await_turn(client, channel_id, me, timeout=timeout, poll=poll,
@@ -1264,6 +1297,9 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
                           "that name back.")
     elif lost:
         public["note"] = _lost_note(lost, cfg)
+    note = _unnamed(public.get("note"), me)
+    if note:
+        public["note"] = note
     return public
 
 
