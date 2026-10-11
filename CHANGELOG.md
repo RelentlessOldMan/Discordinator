@@ -8,6 +8,13 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.48] - 2026-10-11
+Full names everywhere: every session is machine:chat name in relay tags and chat turns alike
+- One name per session, machine first (Harbinger:CodeCarver/ui), the same in relay tags and chat turns - sessions on different machines are never confused, even with the same project name
+- to= without a machine is filled in from who has posted or runs here; refused (nothing posted) when it could be two sessions or nobody is known by it
+- Sessions here under different machine labels can share a name; a machine rename or this upgrade keeps each session's place in its chats
+- Update every machine and reconnect every session: older versions don't recognise full names
+
 ## [1.0.47] - 2026-10-09
 Names survive restarts, unnamed sessions can't take another's turn, read positions follow name changes
 - A restarted server's relay tag keeps the session's role (or -2 name), and an owed reply sent with send_message is still its chat turn
