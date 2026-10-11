@@ -236,7 +236,8 @@ def _decide(payload: dict, key: str, calls: list, results: dict,
             # A wait (or a re-join) that failed once, mid-chat: the chat is
             # still going - a transient error is no reason to drop out.
             step = (f"Your last {tool} returned an error, but the chat is still "
-                    "going. Call chat_await again to keep waiting. If it keeps "
+                    "going. Call chat_await again to keep waiting - if the error says "
+                    "what to change (e.g. which name to give), change that first. If it keeps "
                     "failing, send chat_say(status='impasse') so the others aren't "
                     "left waiting.")
         else:

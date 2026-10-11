@@ -341,8 +341,11 @@ def _remember() -> None:
         with _AppendLock(path):
             data = _load(path)
             data = {k: v for k, v in data.items() if _session_alive(k, now, v)}
+            before = data.get(key) if isinstance(data.get(key), dict) else {}
             data[key] = {"chatter": _last_chatter, "resolved": dict(_resolved),
-                         "handle": _current, "since": dict(_since), "ts": now,
+                         # (a restarted server that hasn't made a chat call yet
+                         # still goes by the name its session had)
+                         "handle": _current if _current is not None else before.get("handle"), "since": dict(_since), "ts": now,
                          "full": list(_full_used), "label": last_label,
                          "pid": os.getpid(), "started": _my_start(), "machine": _machine(),
                          "own_label": _own_label()}
@@ -507,7 +510,7 @@ def _machine_in(entry: Any) -> Optional[str]:
     `config set-label` before its next call records the new one. None for a
     record from before v1.0.48."""
     if isinstance(entry, dict) and entry.get("own_label") is False:
-        return _config_machine()
+        return _config_machine() or _recorded_machine(entry)
     return _recorded_machine(entry)
 
 
@@ -517,8 +520,20 @@ def _own_label() -> bool:
     return bool(os.environ.get("DISCORDINATOR_LABEL"))
 
 
-def _config_machine() -> str:
-    return config.machine_name(config.load_file())
+_config_machine_cache: list[Any] = [None, None]  # (config file mtime, name)
+
+
+def _config_machine() -> Optional[str]:
+    """This machine's name as the config file has it now (read again only
+    when the file changes); None if it can't be read."""
+    try:
+        path = config.config_path()
+        mtime = path.stat().st_mtime_ns if path.exists() else None
+        if _config_machine_cache[0] != mtime or _config_machine_cache[1] is None:
+            _config_machine_cache[:] = [mtime, config.machine_name(config.load_file())]
+        return _config_machine_cache[1]
+    except Exception:  # noqa: BLE001 - mid-write or malformed: as recorded
+        return None
 
 
 def _machine() -> str:

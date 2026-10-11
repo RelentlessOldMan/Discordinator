@@ -666,6 +666,7 @@ def test_set_label_keeps_running_names() -> None:
     finally:
         config.save({**config.load_file(), "machine_label": None})
         os.environ["DISCORDINATOR_LABEL"] = label
+        handles.last_label = None
         _drop_claim("Old:Keeper")
         _fresh()
 
@@ -711,6 +712,108 @@ def test_relay_position_after_a_rename() -> None:
     finally:
         config.save({**config.load_file(), "machine_label": None})
         os.environ["DISCORDINATOR_LABEL"] = label
+        handles.last_label = None
+
+
+def test_an_old_name_someone_else_now_has() -> None:
+    print("once another session posts under this session's old name, its turns are that one's:")
+    _fresh()
+    r, c = "old-name-taken", LocalClient()
+    try:
+        mcp.chat_begin(chatter="Ra", channel=r)
+        mcp.chat_say(text="hi B", chatter="Ra", channel=r, to="Work:B", wait=False)
+        chat.send_chat(c, r, "Work:B", "over", "thanks", to="Home:Ra")
+        wait(r, chatter="Ra")
+        os.environ["DISCORDINATOR_LABEL"] = "Harbinger"  # this machine renamed...
+        mcp.chat_status(chatter="Ra", channel=r)
+        # ...and another machine is now called Home and runs Ra
+        chat.send_chat(c, r, "Home:Ra", "over", "the other Ra", to="Work:B")
+        chat.send_chat(c, r, "Work:B", "over", "for the other Ra", to="Home:Ra")
+        got = wait(r, 0.3, chatter="Ra")
+        check(not got.get("your_turn"), f"not handed to this session: {got.get('text')}")
+        other = chat.await_turn(c, r, "Home:Ra", timeout=1, poll=0.02, nudge_after=0)
+        check(other["your_turn"] and other["text"] == "for the other Ra", "the other Ra gets it")
+    finally:
+        os.environ["DISCORDINATOR_LABEL"] = "Home"
+
+
+def test_deleting_counts_other_machines_readers() -> None:
+    print("a deleted turn's note names an older version's or an unnamed machine's reader:")
+    _fresh()
+    handles._SESSION_KEY = "id:dr"
+    r, c = "delete-readers", LocalClient()
+    try:
+        handles.note_full("DefaultMachineName:Dr")  # this session was once unnamed
+        mcp.chat_begin(chatter="Dr", channel=r)
+        first = mcp.chat_say(text="hi all", chatter="Dr", channel=r, to="all", wait=False)
+        chat.send_chat(c, r, "Dr", "over", "read it (old version)", to="all")
+        chat.send_chat(c, r, "DefaultMachineName:Dr", "over", "read it (unnamed)", to="all")
+        note = mcp.delete_messages(message_ids=first["message_ids"], channel=r).get("note", "")
+        check("Dr, DefaultMachineName:Dr posted since" in note or
+              "DefaultMachineName:Dr, Dr posted since" in note, f"both named: {note[:60]}")
+    finally:
+        handles._SESSION_KEY = None
+        handles._full_used.clear()
+
+
+def test_an_unrelated_turn_isnt_an_answer() -> None:
+    print("a turn still owed to an older name stays pointed out until it's answered:")
+    _fresh()
+    r, c = "lost-unrelated", LocalClient()
+    chat.send_chat(c, r, "Carver7", "over", "hi", to="Work:Peer")
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Carver7"
+    try:
+        mcp.chat_begin(channel=r)
+        chat.send_chat(c, r, "Work:Peer", "over", "first question", to="Home:Carver7")
+        check(wait(r)["your_turn"], "its own turn arrives")
+        # Meanwhile an older version of the peer asks the old name something.
+        chat.send_chat(c, r, "Work:Peer", "over", "question for the old name", to="Carver7")
+        mcp.chat_say(text="answer to the first", channel=r, to="Work:Peer", wait=False)
+        got = wait(r, 0.3)
+        check("'Carver7' (read it with read_messages" in (got.get("handle_note") or ""),
+              f"a reply written before it was seen isn't its answer: "
+              f"{(got.get('handle_note') or '')[:50]}")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+
+
+def test_relay_position_label_unset() -> None:
+    print("the relay read position carries over a label being unset too:")
+    from discordinator import config
+    _fresh()
+    r, c = "relay-unset", LocalClient()
+    label = os.environ.pop("DISCORDINATOR_LABEL")
+    try:
+        config.save({**config.load_file(), "machine_label": "Home"})
+        c.send_message(r, "[Work:B] one")
+        check(len(mcp.get_new_messages(channel=r)) == 1, "it reads what's new")
+        config.save({**config.load_file(), "machine_label": None})
+        got = mcp.get_new_messages(channel=r)
+        check(got == [], f"unset, it isn't handed it again: {[m['content'] for m in got]}")
+    finally:
+        config.save({**config.load_file(), "machine_label": None})
+        os.environ["DISCORDINATOR_LABEL"] = label
+        handles.last_label = None
+
+
+def test_an_old_name_from_a_stranger() -> None:
+    print("a turn to an old name from someone it never talked to is only pointed out:")
+    _fresh()
+    r, c = "old-name-stranger", LocalClient()
+    try:
+        mcp.chat_begin(chatter="Rs", channel=r)
+        mcp.chat_say(text="hi B", chatter="Rs", channel=r, to="Work:B", wait=False)
+        os.environ["DISCORDINATOR_LABEL"] = "Harbinger"
+        mcp.chat_status(chatter="Rs", channel=r)
+        chat.send_chat(c, r, "Lab:C", "over", "for Home's Rs", to="Home:Rs")
+        got = wait(r, 0.3, chatter="Rs")
+        check(not got.get("your_turn") and "'Home:Rs'" in (got.get("handle_note") or ""),
+              f"pointed out, not taken: {(got.get('handle_note') or '')[:50]}")
+        chat.send_chat(c, r, "Work:B", "over", "answer", to="Home:Rs")
+        got = wait(r, 0.5, chatter="Rs")
+        check(got.get("your_turn") and got.get("from") == "Work:B", "its own peer's reply is its own")
+    finally:
+        os.environ["DISCORDINATOR_LABEL"] = "Home"
 
 
 def main() -> int:
@@ -745,6 +848,11 @@ def main() -> int:
     test_set_label_keeps_running_names()
     test_an_unnamed_machines_name_isnt_retired()
     test_relay_position_after_a_rename()
+    test_an_old_name_someone_else_now_has()
+    test_deleting_counts_other_machines_readers()
+    test_an_unrelated_turn_isnt_an_answer()
+    test_relay_position_label_unset()
+    test_an_old_name_from_a_stranger()
     print(f"\nALL {_passed} CHECKS PASSED")
     return 0
 

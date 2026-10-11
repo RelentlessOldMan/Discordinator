@@ -597,31 +597,40 @@ def _reader_keys(reader: str) -> list[str]:
 
 
 def get_cursor(channel_id: str, reader: Optional[str] = None) -> Optional[str]:
-    state = load_state()
+    return _cursor_in(load_state(), str(channel_id), reader)
+
+
+def _cursor_in(state: dict[str, Any], channel_id: str, reader: Optional[str]) -> Optional[str]:
     if reader:
-        mine = (state.get("relay_cursors") or {}).get(str(channel_id)) or {}
+        mine = (state.get("relay_cursors") or {}).get(channel_id)
+        mine = mine if isinstance(mine, dict) else {}
         for key in _reader_keys(reader):
             if key in mine:
                 return mine[key] or None  # None: reset, read from scratch
-    return (state.get("cursors") or {}).get(str(channel_id))
+    shared = state.get("cursors")
+    return shared.get(channel_id) if isinstance(shared, dict) else None
 
 
-def carry_cursors(old: str, new: str) -> None:
+def carry_cursors(old: Optional[str], new: Optional[str]) -> None:
     """A session whose read position changes key (it took a role, or another
-    name) has read what it read under the old one: the new one starts no
-    earlier, so nothing comes back to it twice."""
+    name, or its machine's label changed) has read what it read under the old
+    one: the new one starts no earlier, so nothing comes back to it twice.
+    (None is the shared position of a session with no label or name.)"""
     with update_state() as state:
-        for mine in (state.get("relay_cursors") or {}).values():
-            if not isinstance(mine, dict):
-                continue
-            have = next((mine[k] for k in _reader_keys(old) if k in mine), None)
-            now = next((mine[k] for k in _reader_keys(new) if k in mine), None)
+        rc, shared = state.get("relay_cursors"), state.get("cursors")
+        channels = set(rc if isinstance(rc, dict) else ()) | set(
+            shared if isinstance(shared, dict) else ())
+        for ch in channels:
+            have, now = _cursor_in(state, ch, old), _cursor_in(state, ch, new)
             try:
                 if not have or (now is not None and int(now) >= int(have)):
                     continue
             except (TypeError, ValueError):
                 continue
-            mine[new] = str(have)
+            if new:
+                state.setdefault("relay_cursors", {}).setdefault(ch, {})[new] = str(have)
+            else:
+                state.setdefault("cursors", {})[ch] = str(have)
 
 
 # What an unnamed machine or project goes by: never nothing, and never a name
