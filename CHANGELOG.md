@@ -8,6 +8,13 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.50] - 2026-10-11
+Old names only from known peers; owed turns stay owed until answered
+- After a machine rename, a turn to the old name reaches the session only from someone it was talking to under that name, and only until another session posts under it - otherwise it's pointed out
+- A turn pointed out under an older name counts as answered only after the session was told about it and replied to its sender
+- delete_messages names older-version and unnamed-machine readers again; the relay read position carries over a label being unset
+- Correction to v1.0.49: naming a machine that had no name doesn't carry its chats (every unnamed machine is DefaultMachineName) - name machines between chats
+
 ## [1.0.49] - 2026-10-11
 Renames keep turns, names and read positions
 - A turn sent to a session's name before its machine was renamed reaches it; after config set-label a running session keeps its name and relay read position
