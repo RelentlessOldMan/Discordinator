@@ -31,6 +31,8 @@ for _k in ("DISCORD_BOT_TOKEN", "DISCORDINATOR_CHAT_HANDLE", "DISCORDINATOR_CHAT
            "DISCORDINATOR_RELAY_CHANNEL", "DISCORDINATOR_LABEL", "DISCORDINATOR_ALLOW_SEND"):
     os.environ.pop(_k, None)
 
+os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full name
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
@@ -57,9 +59,9 @@ def two_pairs(room: str) -> LocalClient:
     c = LocalClient()
     for h in ("A", "B", "C", "D"):
         mcp.chat_begin(chatter=h, channel=room)
-    chat.send_chat(c, room, "C", "over", "D, status?", to="D")
-    chat.send_chat(c, room, "D", "over", "all good", to="C")
-    chat.send_chat(c, room, "A", "over", "B, can you review my diff?", to="B")
+    chat.send_chat(c, room, "M:C", "over", "D, status?", to="M:D")
+    chat.send_chat(c, room, "M:D", "over", "all good", to="M:C")
+    chat.send_chat(c, room, "M:A", "over", "B, can you review my diff?", to="M:B")
     return c
 
 
@@ -67,14 +69,14 @@ def test_other_chats_end_isnt_mine() -> None:
     print("another conversation ending doesn't end mine:")
     r = "end-room"
     c = two_pairs(r)
-    check(wait("B", r)["from"] == "A", "B gets A's question")
+    check(wait("B", r)["from"] == "M:A", "B gets A's question")
     mcp.chat_say(text="looks fine, one question", chatter="B", channel=r, wait=False)
-    chat.send_chat(c, r, "D", "wrap", "wrap?", to="C")
-    chat.send_chat(c, r, "C", "end", "bye", to="D")
+    chat.send_chat(c, r, "M:D", "wrap", "wrap?", to="M:C")
+    chat.send_chat(c, r, "M:C", "end", "bye", to="M:D")
     b = wait("B", r, 0.3)
     check(b["timed_out"] and not b["ended"], "B keeps waiting for A when C and D end theirs")
     a = wait("A", r)
-    check(a["from"] == "B" and a["your_turn"] and not a["ended"], "A gets B's reply")
+    check(a["from"] == "M:B" and a["your_turn"] and not a["ended"], "A gets B's reply")
     st = mcp.chat_status(chatter="A", channel=r)
     check(not st["ended"] and st["session_active"], "A's chat is still going")
     d = mcp.chat_status(chatter="D", channel=r)
@@ -83,9 +85,9 @@ def test_other_chats_end_isnt_mine() -> None:
     wait("B", r)
     mcp.chat_say(text="done here", chatter="B", channel=r, status="end", wait=False)
     a = wait("A", r)
-    check(a["ended"] and a["from"] == "B", "B's own `end` (addressed for it) ends A's chat")
+    check(a["ended"] and a["from"] == "M:B", "B's own `end` (addressed for it) ends A's chat")
     last = LocalClient().read_messages(r, limit=1)[0]["content"]
-    check(last.startswith("[B>A|end]"), f"an unaddressed end goes to the peer: {last[:12]}")
+    check(last.startswith("[M:B>M:A|end]"), f"an unaddressed end goes to the peer: {last[:12]}")
 
 
 def test_two_pairs_not_multiparty() -> None:
@@ -96,7 +98,7 @@ def test_two_pairs_not_multiparty() -> None:
     check(not b.get("multiparty") and "suggest_next" not in b,
           "B's turn from A isn't multiparty, and suggests nobody from the other chat")
     st = mcp.chat_status(chatter="B", channel=r)
-    check(set(st["participants"]) == {"A", "B"} and st["floor"] == "B",
+    check(set(st["participants"]) == {"M:A", "M:B"} and st["floor"] == "M:B",
           f"B's chat is A and B: {st['participants']}")
     out = mcp.chat_say(text="sure", chatter="B", channel=r, wait=False)
     check("suggest_next" not in out and "waiting" not in out, "B's reply isn't told to rotate")
@@ -108,14 +110,14 @@ def test_opener_survives_other_traffic() -> None:
     c = LocalClient()
     mcp.chat_begin(chatter="A", channel=r)
     mcp.chat_say(text="Hi! Let's plan the migration.", chatter="A", channel=r, wait=False)
-    chat.send_chat(c, r, "D", "over", "C: here are the logs", to="C")
-    chat.send_chat(c, r, "C", "over", "thanks D", to="D")
+    chat.send_chat(c, r, "M:D", "over", "C: here are the logs", to="M:C")
+    chat.send_chat(c, r, "M:C", "over", "thanks D", to="M:D")
     b = mcp.chat_begin(chatter="B", channel=r)
     check(b["recovered_pending_turn"], "B's chat_begin finds A's opener")
     got = wait("B", r)
-    check(got["from"] == "A" and "migration" in got["text"], "and B receives it")
+    check(got["from"] == "M:A" and "migration" in got["text"], "and B receives it")
     d = wait("D", r, 0.3)
-    check(d["from"] == "C", f"D, talking with C, gets C's turn - not A's opener ({d['from']})")
+    check(d["from"] == "M:C", f"D, talking with C, gets C's turn - not A's opener ({d['from']})")
     d = wait("D", r, 0.3)
     check(d["timed_out"] or d.get("already_received"), "and is never handed A's opener")
 
@@ -126,19 +128,19 @@ def test_other_chats_broadcast_and_plain() -> None:
     c = LocalClient()
     for h in ("A", "B", "C", "D", "E"):
         mcp.chat_begin(chatter=h, channel=r)
-    chat.send_chat(c, r, "A", "over", "B?", to="B")
+    chat.send_chat(c, r, "M:A", "over", "B?", to="M:B")
     wait("B", r)
     mcp.chat_say(text="yes A", chatter="B", channel=r, wait=False)
     wait("A", r)  # A now holds the floor in A<->B
-    chat.send_chat(c, r, "C", "over", "D, E: thoughts?", to="D")
-    chat.send_chat(c, r, "D", "over", "E?", to="E")
-    chat.send_chat(c, r, "E", "over", "anyone - here's mine", to="all")
+    chat.send_chat(c, r, "M:C", "over", "D, E: thoughts?", to="M:D")
+    chat.send_chat(c, r, "M:D", "over", "E?", to="M:E")
+    chat.send_chat(c, r, "M:E", "over", "anyone - here's mine", to="all")
     b = wait("B", r, 0.3)
     check(b["timed_out"], "a group's to='all' turn doesn't wake B, who's in another chat")
     c2 = wait("C", r)
-    check(c2["from"] == "E", "...but does wake the group's own members")
+    check(c2["from"] == "M:E", "...but does wake the group's own members")
     st = mcp.chat_status(chatter="A", channel=r)
-    check(st["your_turn"] and st["floor"] == "A", "A is still owed B's reply")
+    check(st["your_turn"] and st["floor"] == "M:A", "A is still owed B's reply")
 
 
 def test_owed_turn_past_one_page() -> None:
@@ -147,16 +149,16 @@ def test_owed_turn_past_one_page() -> None:
     c = LocalClient()
     for h in ("A", "B"):
         mcp.chat_begin(chatter=h, channel=r)
-    chat.send_chat(c, r, "A", "over", "B: question about the schema", to="B")
+    chat.send_chat(c, r, "M:A", "over", "B: question about the schema", to="M:B")
     for i in range(70):
-        chat.send_chat(c, r, "C", "over", f"c{i}", to="D")
-        chat.send_chat(c, r, "D", "over", f"d{i}", to="C")
+        chat.send_chat(c, r, "M:C", "over", f"c{i}", to="M:D")
+        chat.send_chat(c, r, "M:D", "over", f"d{i}", to="M:C")
     st = mcp.chat_status(chatter="B", channel=r)
     check(st["your_turn"], "chat_status still sees the turn 140 messages back")
     begin = mcp.chat_begin(chatter="B", channel=r)
     check(begin["recovered_pending_turn"], "chat_begin recovers it")
     got = wait("B", r)
-    check(got["from"] == "A" and "schema" in got["text"], "and chat_await delivers it")
+    check(got["from"] == "M:A" and "schema" in got["text"], "and chat_await delivers it")
 
 
 def test_status_for_second_session() -> None:
@@ -173,11 +175,11 @@ def test_status_for_second_session() -> None:
         reg.write_text(json.dumps({"codecarver": {
             "handle": "CodeCarver", "pid": other, "ts": time.time(),
             "started": handles.process_started(other)}}), encoding="utf-8")
-        chat.send_chat(LocalClient(), r, "Peer", "over", "CodeCarver: your turn", to="CodeCarver")
+        chat.send_chat(LocalClient(), r, "Peer", "over", "CodeCarver: your turn", to="M:CodeCarver")
         st = mcp.chat_status(channel=r)
         check(not st["your_turn"], "the sibling's turn isn't reported as mine")
         b = mcp.chat_begin(channel=r)
-        check(b["chatter"] == "CodeCarver-2", f"and chat_begin names me as status did: {b['chatter']}")
+        check(b["chatter"] == "M:CodeCarver-2", f"and chat_begin names me as status did: {b['chatter']}")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
         handles._resolved.clear()
@@ -229,15 +231,15 @@ def test_relay_between_two_sessions() -> None:
         check(mcp.get_new_messages(channel="relay-room") == [], "A sees nothing new (its own post)")
         as_session("sessB")
         got = mcp.get_new_messages(channel="relay-room")
-        check([m["content"] for m in got] == ["[sessA/DefaultChatName] handoff: please review PR 42"],
+        check([m["content"] for m in got] == ["[sessA:DefaultChatName] handoff: please review PR 42"],
               "B still gets A's message after A checked its inbox")
         mcp.send_message("done", channel="relay-room")
         as_session("sessA")
         got = mcp.get_new_messages(channel="relay-room")
-        check([m["content"] for m in got] == ["[sessB/DefaultChatName] done"], "and A gets B's answer")
+        check([m["content"] for m in got] == ["[sessB:DefaultChatName] done"], "and A gets B's answer")
         check(mcp.get_new_messages(channel="relay-room") == [], "each read moves only its own position")
     finally:
-        os.environ.pop("DISCORDINATOR_LABEL", None)
+        os.environ["DISCORDINATOR_LABEL"] = "M"
         mcp._sent_ids.clear()
         handles._SESSION_KEY = None
 
@@ -319,7 +321,7 @@ def test_relay_after_restart_and_transport_switch() -> None:
         got = mcp.get_new_messages(channel="restart-room")
         check([m["content"] for m in got] == ["[peer] and again"], "and reads go on from there")
     finally:
-        os.environ.pop("DISCORDINATOR_LABEL")
+        os.environ["DISCORDINATOR_LABEL"] = "M"
         mcp._sent_ids.clear()
 
 
@@ -344,17 +346,17 @@ def test_same_label_sessions_relay() -> None:
         check(mcp.get_new_messages(channel="label-room") == [], "A doesn't see its own message")
         as_session("ProjB", set())
         got = mcp.get_new_messages(channel="label-room")
-        check([m["content"] for m in got] == ["[laptop/ProjA] A: please review"],
+        check([m["content"] for m in got] == ["[laptop:ProjA] A: please review"],
               "B sees A's message though they share a label")
         mcp.send_message("B: done", channel="label-room")
         b_sent = set(mcp._sent_ids)
         as_session("ProjA", a_sent)
         got = mcp.get_new_messages(channel="label-room")
-        check([m["content"] for m in got] == ["[laptop/ProjB] B: done"], "and A sees B's answer")
+        check([m["content"] for m in got] == ["[laptop:ProjB] B: done"], "and A sees B's answer")
         as_session("ProjB", b_sent)
         check(mcp.get_new_messages(channel="label-room") == [], "neither re-reads or loses anything")
     finally:
-        os.environ.pop("DISCORDINATOR_LABEL")
+        os.environ["DISCORDINATOR_LABEL"] = "M"
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
         mcp._sent_ids.clear()
         handles._SESSION_KEY = None
@@ -366,16 +368,16 @@ def test_plain_reply_reaches_its_peer() -> None:
     c = LocalClient()
     for h in ("A", "B", "C", "D"):
         mcp.chat_begin(chatter=h, channel=r)
-    chat.send_chat(c, r, "A", "over", "B, can you review my diff?", to="B")
+    chat.send_chat(c, r, "M:A", "over", "B, can you review my diff?", to="M:B")
     wait("B", r)  # B now owes A a reply
-    chat.send_chat(c, r, "C", "over", "D, status?", to="D")  # another pair goes on
+    chat.send_chat(c, r, "M:C", "over", "D, status?", to="M:D")  # another pair goes on
     out = mcp.send_message("looks good to me", channel=r)  # B answers with the wrong tool
-    check("chat turn to A" in out, f"it goes out as B's chat turn to A: {out[:60]}")
+    check("chat turn to M:A" in out, f"it goes out as B's chat turn to A: {out[:60]}")
     a = wait("A", r)
-    check(a["from"] == "B" and a["text"] == "looks good to me" and a["your_turn"],
+    check(a["from"] == "M:B" and a["text"] == "looks good to me" and a["your_turn"],
           "A gets it as B's reply")
     d = wait("D", r)
-    check(d["from"] == "C", "D still gets C's turn, not B's message")
+    check(d["from"] == "M:C", "D still gets C's turn, not B's message")
     plain = mcp.send_message("an unrelated note", channel="not-a-chat-room")
     check(plain.startswith("Sent 1 message"), "elsewhere, send_message is a plain relay post")
 
@@ -396,15 +398,15 @@ def test_long_work_reply_goes_to_its_asker() -> None:
     r = "long-work"
     c = LocalClient()
     mcp.chat_begin(chatter="B", channel=r)
-    chat.send_chat(c, r, "A", "over", "please run the full suite and report", to="B")
-    check(wait("B", r)["from"] == "A", "B gets A's request")
+    chat.send_chat(c, r, "M:A", "over", "please run the full suite and report", to="M:B")
+    check(wait("B", r)["from"] == "M:A", "B gets A's request")
     _backdate(r, 40)  # B works for 40 minutes without posting
-    chat.send_chat(c, r, "C", "over", "anyone around to look at my PR?")  # unaddressed
+    chat.send_chat(c, r, "M:C", "over", "anyone around to look at my PR?")  # unaddressed
     out = mcp.chat_say(text="all tests pass", chatter="B", channel=r, wait=False)
     check(out.get("posted", True) and "error" not in out, "B's results aren't refused")
     last = c.read_messages(r, limit=1)[0]["content"]
-    check(last.startswith("[B>A|over]"), f"they go to A: {last[:14]}")
-    st = chat.compute_state(c, r, "A")
+    check(last.startswith("[M:B>M:A|over]"), f"they go to A: {last[:14]}")
+    st = chat.compute_state(c, r, "M:A")
     check(st["your_turn"], "and it's A's turn")
 
 
@@ -414,21 +416,21 @@ def test_opener_after_a_dropped_chat() -> None:
     c = LocalClient()
     for h in ("A", "B", "C"):
         mcp.chat_begin(chatter=h, channel=r)
-    chat.send_chat(c, r, "A", "over", "hi B", to="B")
-    chat.send_chat(c, r, "B", "over", "thanks, bye", to="A")
+    chat.send_chat(c, r, "M:A", "over", "hi B", to="M:B")
+    chat.send_chat(c, r, "M:B", "over", "thanks, bye", to="M:A")
     _backdate(r, 60)  # nobody said `end`; an hour passes
     mcp.chat_begin(chatter="C", channel=r)
-    chat.send_chat(c, r, "B", "over", "new topic, anyone?")
+    chat.send_chat(c, r, "M:B", "over", "new topic, anyone?")
     got = wait("C", r)
-    check(got["your_turn"] and got["from"] == "B", "C, in no conversation, gets B's opener")
+    check(got["your_turn"] and got["from"] == "M:B", "C, in no conversation, gets B's opener")
     r = "not-dropped"
     for h in ("A", "B", "C"):
         mcp.chat_begin(chatter=h, channel=r)
-    chat.send_chat(c, r, "A", "over", "hi B", to="B")
-    chat.send_chat(c, r, "B", "over", "one more thing", to="A")
+    chat.send_chat(c, r, "M:A", "over", "hi B", to="M:B")
+    chat.send_chat(c, r, "M:B", "over", "one more thing", to="M:A")
     _backdate(r, 10)  # still a live conversation
     mcp.chat_begin(chatter="C", channel=r)
-    chat.send_chat(c, r, "B", "over", "and for everyone in this chat")
+    chat.send_chat(c, r, "M:B", "over", "and for everyone in this chat")
     check(wait("C", r, 0.3)["timed_out"], "10 minutes later it's still A and B's chat")
 
 
@@ -436,11 +438,11 @@ def test_dead_role_not_taken_back() -> None:
     print("a new session takes back a role waiting on its turn - not one from a dead chat:")
     r = "role-back"
     c = LocalClient()
-    chat.send_chat(c, r, "ProjectB/convex", "over", "question for X", to="X")
-    check(mcp._left_waiting(c, r, "ProjectB") == ["ProjectB/convex"],
+    chat.send_chat(c, r, "M:ProjectB/convex", "over", "question for X", to="X")
+    check(mcp._left_waiting(c, r, "ProjectB", config.load()) == ["M:ProjectB/convex"],
           "a role waiting on its own recent turn is found")
     _backdate(r, 3 * 24 * 60)
-    check(mcp._left_waiting(c, r, "ProjectB") == [], "three days later it isn't")
+    check(mcp._left_waiting(c, r, "ProjectB", config.load()) == [], "three days later it isn't")
 
 
 def test_disconnect_lets_a_post_finish() -> None:

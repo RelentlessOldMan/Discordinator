@@ -161,7 +161,7 @@ def send_message(
         channel: A configured channel name or a raw channel id. Defaults to the
             configured default channel if omitted.
         label: Optional tag prefixed to the message (e.g. the machine/session
-            name). Defaults to machine/project, e.g. "Home/CodeCarver".
+            name). Defaults to the session's full name, e.g. "Home:CodeCarver".
 
     Sent to a chat room where this session owes a chat reply, it goes out as
     that reply (a chat turn back to whoever handed you the turn), so a reply
@@ -270,8 +270,12 @@ def _owed_chat_reply(cfg: dict[str, Any], channel_id: str) -> Optional[tuple[str
     if not handles._resolved:
         return None  # this session hasn't chatted
     try:
-        me = handles.current(None, cfg)
-        if not me or not chat.get_cursor(channel_id, me):
+        mine = handles.current(None, cfg)
+        if not mine:
+            return None
+        me = config.full_name(cfg, mine)
+        _carry_on(me)
+        if not chat.get_cursor(channel_id, me):
             return None
         with _client("chat") as client:
             st = chat.compute_state(client, channel_id, me)
@@ -280,7 +284,7 @@ def _owed_chat_reply(cfg: dict[str, Any], channel_id: str) -> Optional[tuple[str
     owed = st.get("_owed_turn")
     if not st.get("your_turn") or not owed or owed["from"] in ("human", "participant"):
         return None
-    return me, owed["from"]
+    return mine, owed["from"]
 
 
 @_tool()
@@ -346,7 +350,7 @@ def send_file(
         paths: a file path, or a list of file paths, to upload.
         text: optional message body (rides the first message).
         channel: configured channel name or raw id; defaults to the default channel.
-        label: tag prefixed to the message; defaults to machine/project (e.g. "Home/CodeCarver").
+        label: tag prefixed to the message; defaults to the session's full name (e.g. "Home:CodeCarver").
     """
     cfg = config.load()
     config.require_send_attachments(cfg)  # raises if this machine hasn't opted in
@@ -529,7 +533,7 @@ def delete_messages(message_ids: Optional[Union[str, list[str]]] = None,
             if mode == "chat":
                 since = [chat.parse_msg(simplify_message(m)) for m in
                          client.read_messages(channel_id, limit=100, after=max(ids, key=int))]
-                me = poster[(mode, channel_id)] or handles._current
+                me = poster[(mode, channel_id)] or config.full_name(cfg, handles._current or "")
                 others = sorted({p["participant"] for p in since if p is not None
                                  and not chat.same_handle(p["participant"], me)})
                 notes.append(
@@ -614,12 +618,38 @@ def whoami() -> dict[str, Any]:
 # ==========================================================================
 
 
+def _own_chatter(chatter: Optional[str], cfg: dict[str, Any]) -> Optional[str]:
+    """``chatter`` without this machine's name, if it was given as a full name
+    ("Harbinger:ui" -> "ui"). Another machine's name can't be this session's."""
+    machine, local = chat.split_name(chatter)
+    if machine is None:
+        return chatter
+    handles.restore()  # a restarted server: the names the session went by
+    if any(chat.same_handle(chatter, h) for h in handles.full_names_used()):
+        return local  # a name it went by (e.g. before its machine was renamed)
+    if not chat.same_handle(machine, config.machine_name(cfg)):
+        raise ValueError(f"'{chatter}' is a name on machine '{machine}'; this session runs on "
+                         f"'{config.machine_name(cfg)}'. Pass just your role as chatter "
+                         "(e.g. chatter=\"ui\"), or leave it out.")
+    return local
+
+
+def _here(cfg: dict[str, Any], handle: Optional[str]) -> Optional[str]:
+    """The name part of ``handle`` (as a key) if it's a name on this machine -
+    or one that doesn't say its machine - else None."""
+    machine, local = chat.split_name(chat.handle_key(handle))
+    if machine is not None and machine != chat.handle_key(config.machine_name(cfg)):
+        return None
+    return local
+
+
 def _chatter(chatter: Optional[str], cfg: dict[str, Any],
              channel: Optional[str] = None, fresh: bool = False) -> tuple[str, Optional[str]]:
-    """This session's handle (see handles.resolve): the project's fixed handle,
-    optionally with a role (`CodeCarver/ui`), made unique among live sessions on
-    this machine. Plus a note when it isn't the name the session asked for -
-    returned on every chat result so a rename can't go unnoticed.
+    """This session's full name (see handles.resolve): this machine, then the
+    project's fixed handle, optionally with a role (`Harbinger:CodeCarver/ui`),
+    made unique among live sessions on this machine. Plus a note when it isn't
+    the name the session asked for - returned on every chat result so a rename
+    can't go unnoticed.
 
     A restarted server normally picks its session's name back up (see
     handles.restore). A brand-new session (quit and resumed) can't, so if it
@@ -630,15 +660,17 @@ def _chatter(chatter: Optional[str], cfg: dict[str, Any],
 
     A new name means a new relay read position too: it starts where the old
     one got to, so the session isn't handed again what it has read."""
+    chatter = _own_chatter(chatter, cfg)
     before = _reader(cfg)
     role = _lost_role(chatter, cfg, channel)
     if role is None:
         me, note = handles.resolve(chatter, cfg, fresh=fresh and chatter not in (None, ""))
     else:
         me, note = handles.resolve(role, cfg)
-        back = (f"'{me}' has a chat going in this room that no running session holds, "
-                "so this session has taken that name back (its role was forgotten when "
-                f"it restarted). Pass chatter=\"{role}\" on your chat calls.")
+        back = (f"'{config.full_name(cfg, me)}' has a chat going in this room that no "
+                "running session holds, so this session has taken that name back (its "
+                f"role was forgotten when it restarted). Pass chatter=\"{role}\" on your "
+                "chat calls.")
         note = f"{note} {back}" if note else back
     after = _reader(cfg)
     if before and after and before != after:
@@ -646,25 +678,64 @@ def _chatter(chatter: Optional[str], cfg: dict[str, Any],
             config.carry_cursors(before, after)
         except OSError:
             pass  # at worst it reads a few messages twice
-    return me, note
+    full = config.full_name(cfg, me)
+    _carry_on(full)
+    return full, note
+
+
+def _carry_on(full: str) -> None:
+    """``full`` is this session's name now: note it, carry its chat state over
+    from the same name before (under the machine's old name, or an older
+    version's name without a machine) and see its posts under those as its own."""
+    _carry_slots(full)
+    handles.note_full(full)
+    _own_earlier(full)
+
+
+def _carry_slots(full: str) -> None:
+    """chat.carry_slots from the names this session went by before with the
+    same name as ``full`` (newest first), then the older version's name."""
+    earlier = [h for h in reversed(handles.full_names_used())
+               if chat.same_handle(chat.local_name(h), chat.local_name(full))]
+    try:
+        chat.carry_slots(earlier + [chat.local_name(full)], full)
+    except (OSError, config.LockTimeout):
+        pass  # at worst it starts that room afresh
+
+
+def _own_earlier(full: str) -> None:
+    """Tell chat which of this session's posts carry an earlier name of it -
+    this name under the machine's old name - so it still sees them as its own."""
+    local = chat.handle_key(chat.local_name(full))
+    chat.set_own_earlier(full, (
+        e.get("id") for e in _all_my_posts()
+        if e.get("mode") == "chat" and e.get("handle") and not chat.same_handle(e["handle"], full)
+        and chat.handle_key(chat.local_name(e["handle"])) == local))
 
 
 def _unnamed(note: Optional[str], me: Optional[str]) -> Optional[str]:
-    """``note``, plus a warning on every chat result while this session goes by
-    the placeholder name."""
-    if not config.is_default_chat_name(me):
+    """``note``, plus a warning on every chat result while this session's name
+    has a placeholder in it."""
+    machine, local = chat.split_name(me)
+    warn = []
+    if config.is_default_chat_name(local):
+        warn.append("This project has no chat name, so it goes by the placeholder "
+                    f"'{config.DEFAULT_CHAT_NAME}' - so does any other unnamed session on "
+                    "this machine. Set DISCORDINATOR_CHAT_HANDLE in this project's "
+                    ".mcp.json and reconnect (/mcp), or pass chatter=\"<name>\".")
+    if machine is not None and chat.same_handle(machine, config.DEFAULT_MACHINE_NAME):
+        warn.append(f"This machine has no name, so it shows as '{machine}' - as does any "
+                    "other unnamed machine, and a chat can't tell their sessions apart. "
+                    "Name it with: discordinator config set-label <name>.")
+    if not warn:
         return note
-    warn = (f"This project has no chat name, so you are '{me}', the name every unnamed "
-            "session gets - a chat can't tell two of them apart (on two machines, say), "
-            "so turns can reach the wrong one. Set DISCORDINATOR_CHAT_HANDLE in this "
-            "project's .mcp.json and reconnect (/mcp), or pass chatter=\"<name>\".")
-    return f"{note} {warn}" if note else warn
+    return " ".join(([note] if note else []) + warn)
 
 
 def _lost_role(chatter: Optional[str], cfg: dict[str, Any],
                channel: Optional[str]) -> Optional[str]:
     """The role to rejoin as (see _chatter), or None."""
-    base = cfg.get("chat_handle")
+    base = config.project_name(cfg)
     if chatter not in (None, ""):
         return None  # it named itself
     handles.restore()
@@ -674,29 +745,36 @@ def _lost_role(chatter: Optional[str], cfg: dict[str, Any],
     try:
         channel_id = config.resolve_chat_channel(cfg, channel)
         with _client("chat") as client:
-            lost = _lost_turns(client, channel_id, chat.sanitize_handle(base), cfg)
-            mine = {chat.handle_key(h): h for h in lost
-                    if chat.handle_key(h).startswith(prefix)}
-            mine.update({chat.handle_key(h): h for h in _left_waiting(client, channel_id, base)})
+            lost = _lost_turns(client, channel_id, config.full_name(cfg, base), cfg)
+            lost += _left_waiting(client, channel_id, base, cfg)
     except Exception:
         return None
-    return next(iter(mine.values()))[len(prefix):] if len(mine) == 1 else None
+    lost = [h for h in lost if chat.machine_of(h) is not None]  # (an older version's: its own)
+    names = {local for local in (_here(cfg, h) for h in lost)
+             if local is not None and local.startswith(prefix)}
+    if len(names) != 1:
+        return None
+    local = next(iter(names))
+    return next(chat.local_name(h) for h in lost
+                if _here(cfg, h) == local)[len(prefix):]
 
 
-def _left_waiting(client: Any, channel_id: str, base: str) -> list[str]:
-    """`<base>/<role>` handles no running session holds whose own turn in the
-    room is still waiting for its answer - a session that restarted while
-    waiting for a reply."""
+def _left_waiting(client: Any, channel_id: str, base: str, cfg: dict[str, Any]) -> list[str]:
+    """`<base>/<role>` names on this machine that no running session holds,
+    whose own turn in the room is still waiting for its answer - a session
+    that restarted while waiting for a reply."""
     prefix = chat.handle_key(base) + "/"
-    held = {chat.handle_key(h) for h in handles.live_handles()}
+    held = {chat.handle_key(h) for h, _ in handles.live_full_claims()}
     seen: dict[str, str] = {}
     for m in client.read_messages(channel_id, limit=100):
         p = chat.parse_msg(simplify_message(m))
-        if p and chat.handle_key(p["participant"]).startswith(prefix):
-            seen.setdefault(chat.handle_key(p["participant"]), p["participant"])
+        local = (_here(cfg, p["participant"])
+                 if p and chat.machine_of(p["participant"]) is not None else None)
+        if local is not None and local.startswith(prefix):
+            seen.setdefault(local, p["participant"])
     out = []
-    for k, h in seen.items():
-        if k in held:
+    for local, h in seen.items():
+        if chat.handle_key(h) in held:
             continue
         st = chat.compute_state(client, channel_id, h)
         pending = st.get("pending_turn")
@@ -711,31 +789,62 @@ def _left_waiting(client: Any, channel_id: str, base: str) -> list[str]:
 
 
 def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any]) -> list[str]:
-    """Handles that look like this session's own earlier name - another role of
-    its project, the bare project handle, its role used as a whole handle
-    (the name before the project got a fixed handle), or a name it went by
-    itself (DefaultChatName, before the project got one) - that a turn in the
-    room is owed to and no running session on this machine holds."""
-    base = cfg.get("chat_handle")
-    me_key = chat.handle_key(me)
+    """Names on this machine that look like this session's own earlier name -
+    another role of its project, the bare project handle, its role used as a
+    whole handle (the name before the project got a fixed handle), or a name
+    it went by itself (DefaultChatName, before the project got one) - that a
+    turn in the room is owed to and no running session here holds."""
+    base = config.project_name(cfg)
+    me_key = chat.handle_key(chat.local_name(me))
     looks: set[str] = {chat.handle_key(h) for h in handles._resolved.values()} - {me_key}
     if base:
         b = chat.handle_key(base)
         looks.add(b)
         if me_key.startswith(b + "/"):
             looks.add(me_key[len(b) + 1:])  # "convex" for "ProjectB/convex"
-    held = {chat.handle_key(h) for h in handles.live_handles()}
+    held = {chat.handle_key(h) for h, _ in handles.live_full_claims()}
+    held_here = {chat.handle_key(h) for h in handles.live_handles()}  # (older names)
+    earlier = _earlier_names(channel_id, me)
     found: dict[str, str] = {}
     for p in chat._room(client, channel_id, me)[1]:
         if not p or p["status"] not in chat.YIELD_STATUSES or chat._is_broadcast(p["to"]):
             continue
-        k = chat.handle_key(p["to"])
-        if k == me_key or k in held or k in found:
+        if chat.same_handle(p["to"], me) or chat.handle_key(p["to"]) in found:
+            continue
+        if (any(chat.same_handle(p["to"], h) for h in earlier)
+                and chat.handle_key(p["to"]) not in held):
+            # A name it went by itself here, e.g. before its machine was renamed.
+            found[chat.handle_key(p["to"])] = p["to"]
+            continue
+        k = _here(cfg, p["to"])
+        if k is None:
+            continue
+        if chat.machine_of(p["to"]) is None:
+            if k == me_key:
+                # Its own name as an older version had it (before names said
+                # their machine): maybe this session's, maybe another machine's.
+                found[chat.handle_key(p["to"])] = p["to"]
+                continue
+            if k in held_here:
+                continue
+        elif chat.handle_key(p["to"]) in held or k == me_key:
             continue
         if k in looks or (base and k.startswith(chat.handle_key(base) + "/")):
-            found[k] = p["to"]
+            found[chat.handle_key(p["to"])] = p["to"]
     return [h for h in found.values()
             if chat.compute_state(client, channel_id, h).get("your_turn")]
+
+
+def _earlier_names(channel_id: str, me: str) -> list[str]:
+    """Full names this session went by before and posted under in this room -
+    not one on an unnamed machine (every unnamed machine is DefaultMachineName,
+    so that name may well be another machine's session now)."""
+    posted = {chat.handle_key(e.get("handle")) for e in _all_my_posts()
+              if e.get("mode") == "chat" and str(e.get("channel")) == str(channel_id)
+              and e.get("handle")}
+    return [h for h in handles.full_names_used()
+            if not chat.same_handle(h, me) and chat.handle_key(h) in posted
+            and not chat.same_handle(chat.machine_of(h), config.DEFAULT_MACHINE_NAME)]
 
 
 def _lost_next(lost: list[str], cfg: dict[str, Any]) -> str:
@@ -747,12 +856,16 @@ def _lost_next(lost: list[str], cfg: dict[str, Any]) -> str:
 
 
 def _lost_note(lost: list[str], cfg: dict[str, Any]) -> str:
-    base = cfg.get("chat_handle")
+    base = config.project_name(cfg)
     how = []
     for h in lost:
-        k = chat.handle_key(h)
-        if base and k.startswith(chat.handle_key(base) + "/"):
-            how.append(f"'{h}' (chat_begin(chatter=\"{h[len(base) + 1:]}\") takes it back)")
+        local = chat.local_name(h)
+        k = chat.handle_key(local)
+        if chat.machine_of(h) is None or _here(cfg, h) is None:  # an older or renamed name
+            how.append(f"'{h}' (read it with read_messages and answer its sender with "
+                       "chat_say(to=...))")
+        elif base and k.startswith(chat.handle_key(base) + "/"):
+            how.append(f"'{h}' (chat_begin(chatter=\"{local[len(base) + 1:]}\") takes it back)")
         elif base and k == chat.handle_key(base):
             how.append(f"'{h}' (chat_begin(chatter=\"{base}\") takes it back)")
         else:
@@ -765,7 +878,8 @@ def _lost_note(lost: list[str], cfg: dict[str, Any]) -> str:
 
 @_tool()
 def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, turn_cap: int = 20) -> dict[str, Any]:
-    """Start or join a turn-based chat as participant `chatter`.
+    """Start or join a turn-based chat as participant `chatter` (your full name,
+    machine first, comes back as the result's `chatter`).
 
     Seeds your read position to *now* (prior history is ignored) and resets your
     turn counter. BOTH participants call this first (two sessions of the same
@@ -869,15 +983,18 @@ def chat_say(
                   not other chats in the same room.
       - "impasse" we're stuck — stop and get the human. Terminal.
 
-    `to`: address this turn to ONE participant by handle (e.g. to="C"). Required
+    `to`: address this turn to ONE participant by name (e.g. to="Work:C", or
+    to="C" when only one C has posted in the room or runs on this machine - the
+    machine is filled in; when it could be two, or nobody by that name is
+    known, it's refused and nothing is posted: give the full name). Required
     discipline in a 3+ party room — an addressed `over`/`wrap` passes the floor to
     exactly that peer, so only they wake. Omitted, the turn is addressed to
     whoever handed you the turn (so a reply goes back to its asker, even with
     other chats in the room); with nobody to reply to (an opener) it's open to
     anyone - so address an opener when you know your peer. Special targets
-    all/everyone/* broadcast explicitly. If `to` names nobody known (nobody by
-    that name has posted, and no live session here has it), it returns at once
-    with a `note` ("did you mean ...?") instead of waiting.
+    all/everyone/* broadcast explicitly. If a full-name `to` names nobody known
+    (nobody by that name has posted, and no live session here has it), it
+    returns at once with a `note` ("did you mean ...?") instead of waiting.
 
     Long text is split across messages, each re-tagged (and re-addressed), so
     multi-part turns stay intact. Returns your turn count and, in a multiparty
@@ -940,13 +1057,15 @@ def chat_say(
                 f"{e}\n\nAnother session in this room is busy posting. Nothing was "
                 "posted - send it again in a moment.") from e
         try:
+            typed = target
             try:
                 target, auto_note = _check_turn(client, channel_id, me, status, target)
             except Exception as e:
                 raise ChatSendError(
                     f"{e}\n\nNothing was posted, so nobody saw this message.") from e
             chat.note_room(channel_id, config.is_local(cfg, "chat"))
-            target = _expand_bare(client, channel_id, me, target)
+            if target == typed:  # (filled in: the asker's own name, exactly as it posted)
+                target = _expand_bare(client, channel_id, me, target)
             to_note = _unknown_to_note(client, channel_id, me, target)
             try:
                 sent = chat.send_chat(client, channel_id, me, status, text, to=target,
@@ -1031,7 +1150,7 @@ def _check_turn(client: Client, channel_id: str, me: str, status: str,
             "Call chat_await to read it first, then reply.")
     if target is None and not st.get("your_turn") and status in chat.YIELD_STATUSES:
         # Two roles of my project both took a turn sent to our bare project
-        # handle (one on another machine): it was for whichever answered first.
+        # handle: it was for whichever answered first.
         sender = chat.get_reply_to(channel_id, me)
         taken = chat.bare_taken(client, channel_id, me, sender) if sender else None
         if taken:
@@ -1115,16 +1234,74 @@ def _after_post(client: Client, channel_id: str, me: str, status: str,
 
 def _expand_bare(client: Client, channel_id: str, me: str,
                  target: Optional[str]) -> Optional[str]:
-    """`to` with a bare project handle ("ProjectB") spelled out as the one
-    session of that project in the room or running here ("ProjectB/convex"),
-    so the turn names who it's for (see chat.bare_aliases)."""
-    if not target or chat._is_broadcast(target) or "/" in target:
+    """`to` spelled out in full, so every session reads the same address: a
+    name without its machine ("Peer") as the one session by that name that has
+    posted in the room or runs on this machine ("Work:Peer"), and a bare
+    project handle ("ProjectB") as the one session of that project
+    ("Work:ProjectB/convex" - see chat.bare_aliases). Raises - nothing posted -
+    when it could be two sessions, or nobody is known by it (then the full
+    name is needed: who it is can't be guessed)."""
+    if (not target or chat._is_broadcast(target)
+            or chat.handle_key(target) in chat.RESERVED_HANDLES):  # e.g. to="human"
         return target
     msgs = [simplify_message(m) for m in reversed(client.read_messages(channel_id, limit=100))]
-    full = chat.bare_target([chat.parse_msg(m) for m in msgs],
-                            [m.get("timestamp") for m in msgs], me, target,
-                            handles.live_claims)
-    return full if full and not chat.same_handle(full, me) else target
+    parsed = [chat.parse_msg(m) for m in msgs]
+    if chat.machine_of(target) is None:
+        # (newest first)
+        history = chat.posters(client, channel_id) if len(msgs) >= 100 else parsed[::-1]
+        found = chat.names_for(history, target, me, chat._live_here)
+        older = [h for h in found if chat.machine_of(h) is None]
+        if older and len(found) > len(older):
+            # A name without a machine is an older version's. Most likely
+            # that session has updated since and goes by its full name - it
+            # is that name only while it's still the one posting.
+            newest = next((n for p in history if p for n in chat.names_for([p], target, me)), None)
+            live = chat.names_for([], target, me, chat._live_here)
+            found = older if chat.machine_of(newest) is None and not live else [
+                h for h in found if chat.machine_of(h) is not None]
+        if len(found) > 1:
+            # A running session's own earlier name (before its machine was
+            # renamed) is that session, not another one.
+            retired = {chat.handle_key(h) for h in handles.retired_full_names()}
+            found = [h for h in found if chat.handle_key(h) not in retired] or found
+        if len(found) > 1:
+            raise ChatSendError(
+                f"'{target}' could be {' or '.join(found)} - say which, e.g. "
+                f"to=\"{found[0]}\". Nothing was posted.")
+        if not found:
+            known = sorted({chat.handle_key(h): h for h in
+                            [p["participant"] for p in parsed if p]
+                            + [h for h, _ in chat._live_here()]
+                            if not chat.same_handle(h, me)}.values())
+            close = difflib.get_close_matches(
+                target.casefold(), [chat.local_name(h).casefold() for h in known],
+                n=1, cutoff=0.6)
+            hint = next((h for h in known if close
+                         and chat.local_name(h).casefold() == close[0]), None)
+            raise ChatSendError(
+                f"Nobody called '{target}' has posted in this room or runs on this "
+                "machine, so which machine it's on isn't known"
+                + (f" - did you mean '{hint}'?" if hint else ".")
+                + " Address it by its full name, machine first (e.g. "
+                f"to=\"Work:{target}\")"
+                + (f"; known here: {', '.join(known)}." if known else ".")
+                + " Nothing was posted.")
+        target = found[0]
+    if "/" in chat.local_name(target):
+        return target
+    full = chat.bare_target(parsed, [m.get("timestamp") for m in msgs], me, target,
+                            chat._live_here)
+    if full and not chat.same_handle(full, me):
+        return full
+    if any(chat.same_handle(p["participant"], target) for p in parsed if p):
+        return target  # a session goes by the project's plain name
+    roles = chat.roles_of(parsed, target, me, chat._live_here)
+    if len(roles) > 1:
+        raise ChatSendError(
+            f"'{target}' is {' and '.join(roles)} - say which, e.g. to=\"{roles[0]}\". "
+            "Nothing was posted.")
+    # The one other role of it (e.g. a sibling of the sender's own project).
+    return roles[0] if roles else target
 
 
 def _unknown_to_note(client: Client, channel_id: str, me: str,
@@ -1132,10 +1309,11 @@ def _unknown_to_note(client: Client, channel_id: str, me: str,
     """A warning when `to` names nobody known: not anyone who has posted in this
     chat, nor a live session on this machine. (Could still be right - a peer on
     another machine that hasn't spoken yet - so warn, don't refuse.)"""
-    if not target or chat._is_broadcast(target):
+    if (not target or chat._is_broadcast(target)
+            or chat.handle_key(target) in chat.RESERVED_HANDLES):  # e.g. to="human"
         return None
     st = chat.compute_state(client, channel_id, me)
-    known = [h for h in st.get("_room_posters", []) + handles.live_handles()
+    known = [h for h in st.get("_room_posters", []) + [h for h, _ in chat._live_here()]
              if not chat.same_handle(h, me)]
     if any(chat.same_handle(target, h) for h in known):
         return None
@@ -1282,8 +1460,13 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
     """
     cfg = config.load()
     channel_id = config.resolve_chat_channel(cfg, channel)
+    chatter = _own_chatter(chatter, cfg)
     role = _lost_role(chatter, cfg, channel)
-    me = handles.current(role or chatter, cfg)  # read-only: never claims a name
+    mine = handles.current(role or chatter, cfg)  # read-only: never claims a name
+    me = config.full_name(cfg, mine) if mine else None
+    if me:
+        _carry_slots(me)
+        _own_earlier(me)
     with _client("chat") as client:
         st = chat.compute_state(client, channel_id, me)
         lost = (_lost_turns(client, channel_id, me, cfg)

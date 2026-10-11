@@ -41,6 +41,8 @@ for _k in ("DISCORD_BOT_TOKEN", "DISCORDINATOR_CHAT_HANDLE", "DISCORDINATOR_CHAT
            "DISCORDINATOR_LABEL", "DISCORDINATOR_RELAY_CHANNEL", "DISCORDINATOR_SESSION_ID"):
     os.environ.pop(_k, None)
 os.environ["PYTHONPATH"] = SRC + os.pathsep + os.environ.get("PYTHONPATH", "")
+os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full name
+
 sys.path.insert(0, SRC)
 
 from discordinator import chat, events  # noqa: E402
@@ -121,7 +123,7 @@ def test_reconnect_while_waiting_keeps_the_name() -> None:
 
     async def go():
         a1 = await Session("sess-a", handle="ProjA").start()
-        check((await a1.call("chat_begin", chatter="ui", channel="r1"))["chatter"] == "ProjA/ui",
+        check((await a1.call("chat_begin", chatter="ui", channel="r1"))["chatter"] == "M:ProjA/ui",
               "before: ProjA/ui")
         await a1.call("chat_say", text="please review X", chatter="ui", channel="r1",
                       to="ProjB", wait=False)
@@ -129,7 +131,7 @@ def test_reconnect_while_waiting_keeps_the_name() -> None:
         a2 = await Session("sess-a", handle="ProjA").start()
         first = await a2.call("chat_await", channel="r1", timeout=0.5, poll=0.1)  # no chatter
         check(first.get("timed_out"), "nothing yet - still waiting")
-        chat.send_chat(LocalClient(), "r1", "ProjB", "over", "reviewed: fine", to="ProjA/ui")
+        chat.send_chat(LocalClient(), "r1", "ProjB", "over", "reviewed: fine", to="M:ProjA/ui")
         r = await a2.call("chat_await", channel="r1", timeout=5, poll=0.2)
         check(r.get("from") == "ProjB" and r.get("text") == "reviewed: fine",
               f"the reply that comes later reaches it: {str(r)[:80]}")
@@ -142,17 +144,17 @@ def test_old_server_left_running_doesnt_take_the_name() -> None:
 
     async def go():
         old = await Session("sess-z", handle="ProjZ").start()
-        check((await old.call("chat_begin", channel="r2"))["chatter"] == "ProjZ", "old: ProjZ")
+        check((await old.call("chat_begin", channel="r2"))["chatter"] == "M:ProjZ", "old: ProjZ")
         new = await Session("sess-z", handle="ProjZ").start()  # reconnect; old still alive
         b = await new.call("chat_begin", channel="r2")
-        check(b["chatter"] == "ProjZ" and "note" not in b,
+        check(b["chatter"] == "M:ProjZ" and "note" not in b,
               f"the new server is ProjZ, not ProjZ-2: {b.get('chatter')}")
-        chat.send_chat(LocalClient(), "r2", "Peer", "over", "hello ProjZ", to="ProjZ")
+        chat.send_chat(LocalClient(), "r2", "Peer", "over", "hello ProjZ", to="M:ProjZ")
         r = await new.call("chat_await", channel="r2", timeout=5, poll=0.2)
         check(r.get("text") == "hello ProjZ", "and it gets the turns sent to that name")
         other = await Session("sess-other", handle="ProjZ").start()
         o = await other.call("chat_begin", channel="r2")
-        check(o["chatter"] == "ProjZ-2" and "note" in o,
+        check(o["chatter"] == "M:ProjZ-2" and "note" in o,
               "a genuinely different session of the project still gets ProjZ-2")
         for s in (other, new, old):  # the client library closes newest first
             await s.stop()
@@ -194,7 +196,7 @@ def test_disconnect_ends_a_wait_promptly() -> None:
     check(took < 10, f"exited {took:.1f}s after the client hung up (its wait had 60s left)")
 
     async def go():
-        chat.send_chat(LocalClient(), "r3", "Peer", "over", "for ProjW", to="ProjW")
+        chat.send_chat(LocalClient(), "r3", "Peer", "over", "for ProjW", to="M:ProjW")
         s2 = await Session("sess-w", handle="ProjW").start()
         r = await s2.call("chat_await", channel="r3", timeout=5, poll=0.2)
         check(r.get("text") == "for ProjW", "the session's next server gets the reply")
@@ -208,13 +210,13 @@ def test_two_sessions_of_a_project_keep_their_own_names() -> None:
     async def go():
         x = await Session("sess-x", handle="ProjQ").start()
         y = await Session("sess-y", handle="ProjQ").start()
-        check((await x.call("chat_begin", channel="r4"))["chatter"] == "ProjQ", "X: ProjQ")
-        check((await y.call("chat_begin", channel="r4"))["chatter"] == "ProjQ-2", "Y: ProjQ-2")
+        check((await x.call("chat_begin", channel="r4"))["chatter"] == "M:ProjQ", "X: ProjQ")
+        check((await y.call("chat_begin", channel="r4"))["chatter"] == "M:ProjQ-2", "Y: ProjQ-2")
         await y.stop()
         await x.stop()
         c = LocalClient()
-        chat.send_chat(c, "r4", "PeerB", "over", "answer for X", to="ProjQ")
-        chat.send_chat(c, "r4", "PeerC", "over", "answer for Y", to="ProjQ-2")
+        chat.send_chat(c, "r4", "PeerB", "over", "answer for X", to="M:ProjQ")
+        chat.send_chat(c, "r4", "PeerC", "over", "answer for Y", to="M:ProjQ-2")
         y2 = await Session("sess-y", handle="ProjQ").start()  # Y comes back first
         ry = await y2.call("chat_await", channel="r4", timeout=5, poll=0.2)
         x2 = await Session("sess-x", handle="ProjQ").start()
@@ -262,7 +264,7 @@ def test_old_turns_expire() -> None:
     print("a long-dead conversation's turn isn't handed to a new session:")
 
     async def go():
-        chat.send_chat(LocalClient(), "r7", "ProjB", "wrap", "done?", to="ProjF")
+        chat.send_chat(LocalClient(), "r7", "ProjB", "wrap", "done?", to="M:ProjF")
         backdate("r7", 72)
         s = await Session("sess-f", handle="ProjF").start()
         b = await s.call("chat_begin", channel="r7")
@@ -276,9 +278,9 @@ def test_abandoned_conversation_hears_a_new_opener() -> None:
 
     async def go():
         c = LocalClient()
-        chat.send_chat(c, "r8", "ProjG", "over", "q", to="ProjH")
-        chat.send_chat(c, "r8", "ProjH", "over", "a", to="ProjG")
-        chat.send_chat(c, "r8", "ProjG", "over", "thanks, one more?", to="ProjH")  # dropped
+        chat.send_chat(c, "r8", "M:ProjG", "over", "q", to="M:ProjH")
+        chat.send_chat(c, "r8", "M:ProjH", "over", "a", to="M:ProjG")
+        chat.send_chat(c, "r8", "M:ProjG", "over", "thanks, one more?", to="M:ProjH")  # dropped
         backdate("r8", 1)
         g = await Session("sess-g", handle="ProjG").start()
         await g.call("chat_begin", channel="r8")
@@ -299,12 +301,12 @@ def test_launcher_restart_keeps_the_name() -> None:
         # No DISCORDINATOR_SESSION_ID: the session is found from the real
         # process tree, past the launcher (a new one on every reconnect).
         l1 = await Session(None, handle="ProjL", launcher=True).start()
-        check((await l1.call("chat_begin", chatter="ui", channel="r10"))["chatter"] == "ProjL/ui",
+        check((await l1.call("chat_begin", chatter="ui", channel="r10"))["chatter"] == "M:ProjL/ui",
               "before: ProjL/ui")
         await l1.stop()
         l2 = await Session(None, handle="ProjL", launcher=True).start()
         b = await l2.call("chat_begin", channel="r10")  # chatter omitted, as models do
-        check(b.get("chatter") == "ProjL/ui",
+        check(b.get("chatter") == "M:ProjL/ui",
               f"after the restart it's still ProjL/ui, not the bare name: {b.get('chatter')}")
         await l2.stop()
     run(go())
@@ -318,14 +320,14 @@ def test_restart_gap_doesnt_hand_the_name_to_a_newcomer() -> None:
         kw = {"chatter": f"{P}/ui" if explicit else "ui"}
         x1 = await Session("sess-x" + room, handle=P).start()
         await x1.call("chat_begin", channel=room, **kw)
-        await x1.call("chat_say", text="please review", channel=room, to="Peer", wait=False, **kw)
+        await x1.call("chat_say", text="please review", channel=room, to="Work:Peer", wait=False, **kw)
         await x1.stop()  # reconnect: the old server is gone, the new one not yet started
         await asyncio.sleep(1.5)
         y = await Session("sess-y" + room, handle=P).start()  # another session of ProjQ
         yb = await y.call("chat_begin", channel=room)
-        check(yb.get("chatter") != f"{P}/ui", f"the newcomer isn't {P}/ui: {yb.get('chatter')}")
+        check(yb.get("chatter") != f"M:{P}/ui", f"the newcomer isn't {P}/ui: {yb.get('chatter')}")
         x2 = await Session("sess-x" + room, handle=P).start()
-        chat.send_chat(LocalClient(), room, "Peer", "over", "reviewed: fine", to=f"{P}/ui")
+        chat.send_chat(LocalClient(), room, "Work:Peer", "over", "reviewed: fine", to=f"M:{P}/ui")
         a = await x2.call("chat_await", channel=room, timeout=5, poll=0.2,
                           **({"chatter": f"{P}/ui"} if explicit else {}))
         check(a.get("text") == "reviewed: fine" and not a.get("handle_note"),

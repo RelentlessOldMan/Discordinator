@@ -172,7 +172,9 @@ def _relay_poll(
     return the ones worth showing (others' messages, unless include_self)."""
     messages = read_new(client, channel_id, own_label, backfill_limit)
     if not include_self and own_label:
-        mine = (f"[{own_label}]", f"[{own_label}/")  # older tags, and machine/project ones
+        machine = config.machine_name({"machine_label": own_label})
+        # This machine's full names, and the older [label] and [label/project] tags.
+        mine = (f"[{machine}:", f"[{own_label}]", f"[{own_label}/")
         messages = [m for m in messages if not m["content"].startswith(mine)]
     return messages
 
@@ -202,7 +204,7 @@ def cmd_relay(args: argparse.Namespace) -> int:
 
         print(
             f"relay watching '{label_name}' every {args.interval}s "
-            f"(filtering out [{own_label}] — Ctrl+C to stop)"
+            f"(filtering out this machine's own [{own_label}:...] posts — Ctrl+C to stop)"
             if own_label and not args.include_self
             else f"relay watching '{label_name}' every {args.interval}s (Ctrl+C to stop)"
         )

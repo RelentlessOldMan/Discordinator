@@ -26,6 +26,8 @@ os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
 for _k in ("DISCORDINATOR_ALLOW_SEND", "DISCORDINATOR_ALLOW_RECEIVE"):
     os.environ.pop(_k, None)
 
+os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full name
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
@@ -104,12 +106,12 @@ def test_local_chat_shares_paths() -> None:
     _allow("send", False)
     img = _TMP / "pic.png"
     img.write_bytes(b"\x89PNG\r\n")
-    res = mcp.chat_say(text="diagram", chatter="A", status="over", channel="mcpchat", to="B", files=str(img), wait=False)
+    res = mcp.chat_say(text="diagram", chatter="A", status="over", channel="mcpchat", to="M:B", files=str(img), wait=False)
     check(res["sent_messages"] == 1 and res["status"] == "over", "the turn is sent with the opt-in off")
     check(res["files_shared"] == [str(img.resolve())], "files_shared lists the absolute path")
-    chat.reset("mcpchat", "B", "0", 20)
-    got = chat.await_turn(LocalClient("B"), "mcpchat", "B", timeout=2, poll=0.02, nudge_after=0)
-    check(got["from"] == "A" and got["attachments"] == [], "nothing was copied as an attachment")
+    chat.reset("mcpchat", "M:B", "0", 20)
+    got = chat.await_turn(LocalClient("B"), "mcpchat", "M:B", timeout=2, poll=0.02, nudge_after=0)
+    check(got["from"] == "M:A" and got["attachments"] == [], "nothing was copied as an attachment")
     check(got["text"].startswith("diagram") and str(img.resolve()) in got["text"],
           "the peer gets the path in the message text")
 
@@ -121,7 +123,7 @@ def test_failed_send_keeps_turn_3way() -> None:
         mcp.chat_begin(chatter=h, channel=room)
     mcp.chat_say(text="A, your call", chatter="B", status="over", channel=room, to="A", wait=False)
     got = mcp.chat_await(chatter="A", channel=room, timeout=2, poll=0.02, nudge_after=0)
-    check(got["from"] == "B" and got["your_turn"], "A holds the floor")
+    check(got["from"] == "M:B" and got["your_turn"], "A holds the floor")
     before = len(LocalClient("probe").read_messages(room, limit=50))
     try:
         mcp.chat_say(text="see file", chatter="A", channel=room, to="C", files=[str(_TMP / "nope.txt")])
@@ -131,7 +133,7 @@ def test_failed_send_keeps_turn_3way() -> None:
               "missing file -> ChatSendError saying nothing was posted")
     check(len(LocalClient("probe").read_messages(room, limit=50)) == before, "the room is unchanged")
     back = mcp.chat_await(chatter="A", channel=room, timeout=2, poll=0.02, nudge_after=0)
-    check(back.get("already_received") and back["your_turn"] and back["from"] == "B",
+    check(back.get("already_received") and back["your_turn"] and back["from"] == "M:B",
           "A's chat_await hands the still-owed turn straight back")
     other = mcp.chat_await(chatter="C", channel=room, timeout=0.3, poll=0.02, nudge_after=0)
     check(other["timed_out"] and not other["your_turn"], "C (not addressed) keeps waiting")

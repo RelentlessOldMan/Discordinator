@@ -31,6 +31,8 @@ os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
 for _k in ("DISCORD_BOT_TOKEN", "DISCORDINATOR_CHAT_HANDLE"):
     os.environ.pop(_k, None)
 
+os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full name
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
@@ -132,7 +134,7 @@ def test_dead_or_expired_claims_reclaimed() -> None:
     _plant("Proj", os.getppid(), age=handles.CLAIM_TTL + 60)
     check(handles.resolve(None, {"chat_handle": "Proj"})[0] == "Proj", "expired lease -> name reclaimed")
     reg = json.loads(handles.registry_path().read_text(encoding="utf-8"))
-    check(reg["proj"]["pid"] == os.getpid(), "registry now records this process")
+    check(reg[handles._key("Proj")]["pid"] == os.getpid(), "registry now records this process")
 
 
 def test_live_session_keeps_name_however_idle() -> None:
@@ -160,7 +162,7 @@ def test_live_session_keeps_name_however_idle() -> None:
     finally:
         other.kill()
         other.wait()
-    me = json.loads(handles.registry_path().read_text(encoding="utf-8"))["reused"]
+    me = json.loads(handles.registry_path().read_text(encoding="utf-8"))[handles._key("Reused")]
     check(me.get("started") == handles.process_started(os.getpid()),
           "own claims record this process's start time")
     check(handles.process_started(-1) is None and handles.process_started(_dead_pid()) is None,
@@ -197,10 +199,10 @@ def test_renamed_handle_passed_back() -> None:
     try:
         _plant("CodeCarver", other.pid)
         b = mcp.chat_begin(channel="cc2")
-        check(b["chatter"] == "CodeCarver-2", "renamed to CodeCarver-2")
+        check(b["chatter"] == "M:CodeCarver-2", "renamed to CodeCarver-2")
         from discordinator import chat as _chat
         from discordinator.local_client import LocalClient
-        _chat.send_chat(LocalClient("peer"), "cc2", "Peer", "over", "for you", to="CodeCarver-2")
+        _chat.send_chat(LocalClient("peer"), "cc2", "Peer", "over", "for you", to="M:CodeCarver-2")
         got = mcp.chat_await(chatter="CodeCarver-2", channel="cc2", timeout=1, poll=0.02,
                              nudge_after=0)
         check(got["from"] == "Peer" and got["your_turn"],
@@ -209,7 +211,7 @@ def test_renamed_handle_passed_back() -> None:
         check("codecarver/codecarver-2" not in slots, f"no stray role handle: {sorted(slots)}")
         cfg = config.load()
         check(handles.current(None, cfg) == "CodeCarver-2"
-              and mcp._tag(cfg).endswith("/CodeCarver-2")
+              and mcp._tag(cfg) == "M:CodeCarver-2"
               and mcp._reader(cfg).endswith("|CodeCarver-2"),
               f"its relay tag and inbox stay CodeCarver-2's: {mcp._tag(cfg)}, {mcp._reader(cfg)}")
         st = mcp.chat_status(chatter="CodeCarver-2", channel="cc2")
@@ -228,11 +230,12 @@ def test_status_uses_session_name_without_claiming() -> None:
         mcp.chat_begin(chatter="ui", channel="cc-room")
         from discordinator import chat as _chat
         from discordinator.local_client import LocalClient
-        _chat.send_chat(LocalClient("peer"), "cc-room", "B", "over", "for ui", to="CC/ui")
+        _chat.send_chat(LocalClient("peer"), "cc-room", "B", "over", "for ui", to="M:CC/ui")
         st = mcp.chat_status(channel="cc-room")
         check(st["your_turn"] is True, "answered for CC/ui (the turn is owed to it)")
         reg = json.loads(handles.registry_path().read_text(encoding="utf-8"))
-        check("cc" not in reg and "cc/ui" in reg, f"bare 'CC' not claimed: {sorted(reg)}")
+        check(handles._key("CC") not in reg and handles._key("CC/ui") in reg,
+              f"bare 'CC' not claimed: {sorted(reg)}")
         check(handles.current(None, {}) == "ui",
               "with no project handle in the config, current() gives the bare role (no raise)")
     finally:
@@ -271,11 +274,11 @@ def test_mcp_begin_reports_rename() -> None:
     try:
         _plant("Twin", other.pid)
         out = mcp.chat_begin(channel="twins")
-        check(out["chatter"] == "Twin-2" and "note" in out, "chatter Twin-2 with a note")
+        check(out["chatter"] == "M:Twin-2" and "note" in out, "chatter Twin-2 with a note")
         mcp.chat_say(text="hi", channel="twins", wait=False)
         from discordinator.local_client import LocalClient
         last = LocalClient().read_messages("twins", limit=1)[0]["content"]
-        check(last.startswith("[Twin-2|over]"), "chat_say posts under the same resolved name")
+        check(last.startswith("[M:Twin-2|over]"), "chat_say posts under the same resolved name")
         st = mcp.chat_status(channel="twins")
         check(st["your_turn"] is False, "chat_status uses the resolved name (own turn not owed)")
     finally:
@@ -300,14 +303,14 @@ def test_restart_takes_its_role_back() -> None:
     c, room = LocalClient(), "restart"
     os.environ["DISCORDINATOR_CHAT_HANDLE"] = "ProjectB"
     try:
-        check(mcp.chat_begin(chatter="convex", channel=room)["chatter"] == "ProjectB/convex",
+        check(mcp.chat_begin(chatter="convex", channel=room)["chatter"] == "M:ProjectB/convex",
               "before: ProjectB/convex")
-        chat.send_chat(c, room, "ProjectB/convex", "over", "I'm ProjectB/convex now")
+        chat.send_chat(c, room, "M:ProjectB/convex", "over", "I'm ProjectB/convex now")
         chat.send_chat(c, room, "CodeCarver", "over", "noting your new handle. Q1? Q2?",
-                       to="ProjectB/convex")
+                       to="M:ProjectB/convex")
         _restart()
         st = mcp.chat_status(channel=room)
-        check(st["your_turn"] is True and st["chatter"] == "ProjectB/convex"
+        check(st["your_turn"] is True and st["chatter"] == "M:ProjectB/convex"
               and "restart" in st["note"], "chat_status sees the turn under the old name")
         check(handles._resolved == {}, "chat_status still claims nothing")
         try:
@@ -317,21 +320,21 @@ def test_restart_takes_its_role_back() -> None:
             check("chat_await" in str(e), f"chat_say refuses until the question is read: {str(e)[:50]}")
         _restart()
         b = mcp.chat_begin(channel=room)
-        check(b["chatter"] == "ProjectB/convex" and b["recovered_pending_turn"]
+        check(b["chatter"] == "M:ProjectB/convex" and b["recovered_pending_turn"]
               and 'chatter="convex"' in b["note"], "chat_begin rejoins as ProjectB/convex")
         r = mcp.chat_await(channel=room, timeout=2, poll=0.2)
         check(r["your_turn"] and "Q1?" in r["text"], "chat_await delivers the question")
         mcp.chat_say(text="A1, A2", channel=room, wait=False)
-        check(c.read_messages(room, limit=1)[0]["content"].startswith("[ProjectB/convex>CodeCarver|over]"),
+        check(c.read_messages(room, limit=1)[0]["content"].startswith("[M:ProjectB/convex>CodeCarver|over]"),
               "the answer goes out under the same name")
         _restart()
         b = mcp.chat_begin(channel=room)  # its own answer is out, waiting for CodeCarver
-        check(b["chatter"] == "ProjectB/convex" and "taken that name back" in b["note"],
+        check(b["chatter"] == "M:ProjectB/convex" and "taken that name back" in b["note"],
               "restarted while waiting for a reply: it rejoins under its name too")
-        chat.send_chat(c, room, "CodeCarver", "end", "thanks", to="ProjectB/convex")
+        chat.send_chat(c, room, "CodeCarver", "end", "thanks", to="M:ProjectB/convex")
         _restart()
         b = mcp.chat_begin(channel=room)  # nothing owed or waiting now
-        check(b["chatter"] == "ProjectB",
+        check(b["chatter"] == "M:ProjectB",
               "with nothing owed, a fresh session is just the project handle")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
@@ -346,17 +349,17 @@ def test_lost_role_not_stolen_or_guessed() -> None:
     os.environ["DISCORDINATOR_CHAT_HANDLE"] = "ProjectB"
     other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
-        chat.send_chat(c, "held", "CodeCarver", "over", "Q?", to="ProjectB/ui")
+        chat.send_chat(c, "held", "CodeCarver", "over", "Q?", to="M:ProjectB/ui")
         _plant("ProjectB/ui", other.pid)
         b = mcp.chat_begin(channel="held")
-        check(b["chatter"] == "ProjectB" and "ProjectB/ui" not in (b.get("note") or ""),
+        check(b["chatter"] == "M:ProjectB" and "ProjectB/ui" not in (b.get("note") or ""),
               "a live sibling keeps its name and its turn")
         _fresh()
-        chat.send_chat(c, "two", "CodeCarver", "over", "Q?", to="ProjectB/ui")
-        chat.send_chat(c, "two", "Other", "over", "Q?", to="ProjectB/api")
+        chat.send_chat(c, "two", "CodeCarver", "over", "Q?", to="M:ProjectB/ui")
+        chat.send_chat(c, "two", "Other", "over", "Q?", to="M:ProjectB/api")
         b = mcp.chat_begin(channel="two")
-        check(b["chatter"] == "ProjectB", "two candidates: no guess")
-        check("'ProjectB/ui'" in b["note"] and "'ProjectB/api'" in b["note"]
+        check(b["chatter"] == "M:ProjectB", "two candidates: no guess")
+        check("'M:ProjectB/ui'" in b["note"] and "'M:ProjectB/api'" in b["note"]
               and 'chatter="ui"' in b["note"], "both lost turns named, with the fix")
         r = mcp.chat_await(channel="two", timeout=0.3, poll=0.1)
         check(r["timed_out"] and "ProjectB/ui" in r["handle_note"],
@@ -377,7 +380,7 @@ def test_turn_owed_to_the_name_before_a_project_handle() -> None:
     os.environ["DISCORDINATOR_CHAT_HANDLE"] = "TDTS_Convex"
     try:
         b = mcp.chat_begin(chatter="convex", channel=room)
-        check(b["chatter"] == "TDTS_Convex/convex", "the session keeps its new name")
+        check(b["chatter"] == "M:TDTS_Convex/convex", "the session keeps its new name")
         check("'convex'" in b["note"] and "read_messages" in b["note"],
               "chat_begin says a turn is owed to its old name and how to answer it")
         st = mcp.chat_status(channel=room)
@@ -596,11 +599,11 @@ def test_unnamed_session_isnt_handed_anothers_turn() -> None:
     from discordinator.local_client import LocalClient
     _fresh()
     c, room = LocalClient(), "unnamed"
-    chat.send_chat(c, room, "DefaultChatName", "over", "Peer: should Foo drop v1?", to="Peer")
-    chat.send_chat(c, room, "Peer", "over", "yes - delete Foo's v1 endpoints", to="DefaultChatName")
+    chat.send_chat(c, room, "M:DefaultChatName", "over", "Peer: should Foo drop v1?", to="Peer")
+    chat.send_chat(c, room, "Peer", "over", "yes - delete Foo's v1 endpoints", to="M:DefaultChatName")
     time.sleep(0.05)  # another project's session starts afterwards
     b = mcp.chat_begin(channel=room)
-    check(b["chatter"] == "DefaultChatName", "it goes by the placeholder")
+    check(b["chatter"] == "M:DefaultChatName", "it goes by the placeholder")
     check(not b["recovered_pending_turn"] and "no chat name" in b.get("note", ""),
           "isn't handed the earlier session's turn, and is told it has no name")
     got = mcp.chat_await(channel=room, timeout=0.3, poll=0.02, nudge_after=0)
@@ -609,7 +612,7 @@ def test_unnamed_session_isnt_handed_anothers_turn() -> None:
     check("no chat name" in got.get("handle_note", ""), "the warning is on every chat result")
     st = mcp.chat_status(channel=room)
     check(not st["your_turn"] and "no chat name" in st.get("note", ""), "chat_status agrees")
-    chat.send_chat(c, room, "Peer", "over", "now one for you", to="DefaultChatName")
+    chat.send_chat(c, room, "Peer", "over", "now one for you", to="M:DefaultChatName")
     got = mcp.chat_await(channel=room, timeout=1, poll=0.02, nudge_after=0)
     check(got["your_turn"] and got["text"] == "now one for you",
           "a turn sent to the name once it has it is its own")
@@ -625,15 +628,15 @@ def test_turn_owed_to_the_placeholder_before_a_name() -> None:
     handles._SESSION_KEY = "id:named-later"
     try:
         b = mcp.chat_begin(channel=room)
-        check(b["chatter"] == "DefaultChatName", f"first unnamed: {b['chatter']}")
-        mcp.chat_say(text="Peer, what's the plan?", channel=room, to="Peer", wait=False)
-        chat.send_chat(c, room, "Peer", "over", "here's the plan", to="DefaultChatName")
+        check(b["chatter"] == "M:DefaultChatName", f"first unnamed: {b['chatter']}")
+        mcp.chat_say(text="Peer, what's the plan?", channel=room, to="Work:Peer", wait=False)
+        chat.send_chat(c, room, "Work:Peer", "over", "here's the plan", to="M:DefaultChatName")
         _restart()  # the project gets a name; the server is reconnected
         handles._restored = False  # (the new server looks up the session's names)
         os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CodeCarver"
         b = mcp.chat_begin(channel=room)
-        check(b["chatter"] == "CodeCarver", "now it has the project's name")
-        check("'DefaultChatName'" in b.get("note", "") and "read_messages" in b["note"],
+        check(b["chatter"] == "M:CodeCarver", "now it has the project's name")
+        check("'M:DefaultChatName'" in b.get("note", "") and "read_messages" in b["note"],
               f"and is told a turn is owed to its old name, and how to answer: {b.get('note')}")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE", None)

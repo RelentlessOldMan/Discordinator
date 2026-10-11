@@ -32,6 +32,8 @@ for _k in ("DISCORD_BOT_TOKEN", "DISCORDINATOR_LABEL", "DISCORDINATOR_CHAT_HANDL
            "DISCORDINATOR_CHAT_CHANNEL", "DISCORDINATOR_RELAY_CHANNEL"):
     os.environ.pop(_k, None)
 
+os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full name
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
@@ -184,22 +186,22 @@ def test_configured_handle() -> None:
     room = "handled"
     try:
         out = mcp.chat_begin(channel=room)
-        check(out["chatter"] == "DefaultChatName", "no handle anywhere -> the obvious placeholder name")
+        check(out["chatter"] == "M:DefaultChatName", "no handle anywhere -> the obvious placeholder name")
     except ConfigError:
         raise AssertionError("no handle anywhere should still give a name, not an error")
     os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CodeCarver"
     try:
         out = mcp.chat_begin(channel=room)
-        check(out["chatter"] == "CodeCarver", "chat_begin uses the configured handle")
+        check(out["chatter"] == "M:CodeCarver", "chat_begin uses the configured handle")
         mcp.chat_say(text="hello", status="over", channel=room, wait=False)
         last = LocalClient().read_messages(room, limit=1)[0]["content"]
-        check(last.startswith("[CodeCarver|over]"), f"chat_say tagged with it: {last[:30]}")
+        check(last.startswith("[M:CodeCarver|over]"), f"chat_say tagged with it: {last[:30]}")
         out = mcp.chat_begin(chatter="ui", channel=room)
-        check(out["chatter"] == "CodeCarver/ui", "an explicit chatter becomes a role suffix")
+        check(out["chatter"] == "M:CodeCarver/ui", "an explicit chatter becomes a role suffix")
         st = mcp.chat_status(channel=room)
         check("your_turn" in st, "chat_status computes your_turn from the configured handle")
         res = mcp.chat_await(channel=room, timeout=0.2, poll=0.05, nudge_after=0)
-        check(res["from"] == "CodeCarver" and res["your_turn"] is True,
+        check(res["from"] == "M:CodeCarver" and res["your_turn"] is True,
               "omitting chatter keeps the role this session chose (ui gets CodeCarver's turn)")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")

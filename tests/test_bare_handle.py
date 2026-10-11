@@ -29,6 +29,8 @@ for _k in ("DISCORD_BOT_TOKEN", "DISCORDINATOR_CHAT_HANDLE", "DISCORDINATOR_CHAT
            "DISCORDINATOR_RELAY_CHANNEL", "DISCORDINATOR_LABEL", "DISCORDINATOR_SESSION_ID"):
     os.environ.pop(_k, None)
 
+os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full name
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
@@ -84,8 +86,8 @@ def test_bare_opener_wakes_the_role() -> None:
     r = "bare-open"
     c = LocalClient()
     mcp.chat_begin(chatter="ProjectB/convex", channel=r)
-    # Sent as an older version would: the wire says "ProjectB", not the role.
-    chat.send_chat(c, r, "CodeCarver", "over", "two questions for you", to="ProjectB")
+    # Sent by a peer that only knows the project: the wire says "M:ProjectB", not the role.
+    chat.send_chat(c, r, "M:CodeCarver", "over", "two questions for you", to="M:ProjectB")
     st = mcp.chat_status(chatter="ProjectB/convex", channel=r)
     check(st["your_turn"], f"chat_status says it's B's turn: {st.get('pending_turn')}")
     try:
@@ -94,7 +96,7 @@ def test_bare_opener_wakes_the_role() -> None:
     except Exception as e:
         check("haven't read" in str(e), "chat_say refuses until B reads it (it's B's unread turn)")
     b = wait("ProjectB/convex", r)
-    check(b["your_turn"] and b["from"] == "CodeCarver" and b["text"] == "two questions for you",
+    check(b["your_turn"] and b["from"] == "M:CodeCarver" and b["text"] == "two questions for you",
           f"chat_await delivers it: {b.get('from')} {b.get('timed_out')}")
     hn = b.get("handle_note") or ""
     check("take" not in hn.lower(), f"no 'take your old name back' note: {hn[:60]}")
@@ -107,12 +109,12 @@ def test_consistent_bare_addressing() -> None:
     c = LocalClient()
     mcp.chat_begin(chatter="ProjectB/convex", channel=r)
     for n in range(3):
-        chat.send_chat(c, r, "CodeCarver", "over", f"question {n}", to="ProjectB")
+        chat.send_chat(c, r, "M:CodeCarver", "over", f"question {n}", to="M:ProjectB")
         b = wait("ProjectB/convex", r)
         check(b["your_turn"] and b["text"] == f"question {n}", f"round {n}: B wakes")
         mcp.chat_say(text=f"answer {n}", chatter="ProjectB/convex", channel=r, wait=False)
         last = c.read_messages(r, limit=1)[0]["content"]
-        check(last.startswith("[ProjectB/convex>CodeCarver|over]"),
+        check(last.startswith("[M:ProjectB/convex>M:CodeCarver|over]"),
               f"round {n}: B's reply goes back to CodeCarver: {last[:36]}")
         st = mcp.chat_status(chatter="CodeCarver", channel=r)
         check(st["your_turn"], f"round {n}: then it's CodeCarver's turn")
@@ -127,7 +129,7 @@ def test_sender_spells_out_the_role() -> None:
     mcp.chat_begin(chatter="CodeCarver", channel=r)
     out = mcp.chat_say(text="hello", chatter="CodeCarver", channel=r, to="ProjectB", wait=False)
     last = LocalClient().read_messages(r, limit=1)[0]["content"]
-    check(last.startswith("[CodeCarver>ProjectB/convex|over]"), f"wire: {last[:40]}")
+    check(last.startswith("[M:CodeCarver>M:ProjectB/convex|over]"), f"wire: {last[:40]}")
     check("Nobody called" not in str(out.get("note", "")), "no 'unknown handle' warning")
     check(wait("ProjectB/convex", r)["your_turn"], "B wakes")
 
@@ -139,9 +141,9 @@ def test_two_roles_stay_ambiguous() -> None:
     c = LocalClient()
     for h in ("ProjectB/ui", "ProjectB/api"):
         mcp.chat_begin(chatter=h, channel=r)
-    chat.send_chat(c, r, "ProjectB/ui", "ask", "here", to="X")
-    chat.send_chat(c, r, "ProjectB/api", "ask", "here too", to="X")
-    chat.send_chat(c, r, "CodeCarver", "over", "which of you?", to="ProjectB")
+    chat.send_chat(c, r, "M:ProjectB/ui", "ask", "here", to="X")
+    chat.send_chat(c, r, "M:ProjectB/api", "ask", "here too", to="X")
+    chat.send_chat(c, r, "M:CodeCarver", "over", "which of you?", to="M:ProjectB")
     for h in ("ProjectB/ui", "ProjectB/api"):
         check(wait(h, r, 0.3)["timed_out"], f"{h} doesn't wake")
         check(not mcp.chat_status(chatter=h, channel=r)["your_turn"], f"{h} isn't told it's its turn")
@@ -154,8 +156,8 @@ def test_real_bare_session_keeps_its_turns() -> None:
     c = LocalClient()
     mcp.chat_begin(chatter="ProjectB", channel=r)
     mcp.chat_begin(chatter="ProjectB/convex", channel=r)
-    chat.send_chat(c, r, "ProjectB", "ask", "I'm here", to="CodeCarver")
-    chat.send_chat(c, r, "CodeCarver", "over", "for the bare one", to="ProjectB")
+    chat.send_chat(c, r, "M:ProjectB", "ask", "I'm here", to="M:CodeCarver")
+    chat.send_chat(c, r, "M:CodeCarver", "over", "for the bare one", to="M:ProjectB")
     check(wait("ProjectB/convex", r, 0.3)["timed_out"], "the role session doesn't take it")
     check(wait("ProjectB", r)["your_turn"], "the bare session gets it")
 
@@ -167,8 +169,8 @@ def test_project_handle_no_false_lost_turn() -> None:
     os.environ["DISCORDINATOR_CHAT_HANDLE"] = "ProjectB"
     try:
         b0 = mcp.chat_begin(chatter="convex", channel=r)
-        check(b0["chatter"] == "ProjectB/convex", f"handle is the role: {b0['chatter']}")
-        chat.send_chat(LocalClient(), r, "CodeCarver", "over", "ping", to="ProjectB")
+        check(b0["chatter"] == "M:ProjectB/convex", f"handle is the role: {b0['chatter']}")
+        chat.send_chat(LocalClient(), r, "M:CodeCarver", "over", "ping", to="M:ProjectB")
         st = mcp.chat_status(chatter="convex", channel=r)
         check(st["your_turn"], "chat_status: B's turn")
         check("ProjectB'" not in str(st.get("handle_note") or st.get("note") or ""),
@@ -184,12 +186,12 @@ def test_old_role_from_an_ended_chat_doesnt_block() -> None:
     _fresh()
     r = "bare-old"
     c = LocalClient()
-    chat.send_chat(c, r, "ProjB/api", "over", "earlier question", to="Peer")
-    chat.send_chat(c, r, "Peer", "wrap", "done?", to="ProjB/api")
-    chat.send_chat(c, r, "ProjB/api", "end", "done", to="Peer")
+    chat.send_chat(c, r, "M:ProjB/api", "over", "earlier question", to="Peer")
+    chat.send_chat(c, r, "Peer", "wrap", "done?", to="M:ProjB/api")
+    chat.send_chat(c, r, "M:ProjB/api", "end", "done", to="Peer")
     mcp.chat_begin(chatter="ProjB/convex", channel=r)
     mcp.chat_say(text="new question", chatter="ProjB/convex", channel=r, to="Peer", wait=False)
-    chat.send_chat(c, r, "Peer", "over", "answer", to="ProjB")  # Peer only knows "ProjB"
+    chat.send_chat(c, r, "Peer", "over", "answer", to="M:ProjB")  # Peer only knows "M:ProjB"
     b = wait("ProjB/convex", r)
     check(b["your_turn"] and b["text"] == "answer", f"convex wakes: {b.get('timed_out')}")
     two = [{"participant": "ProjB/api", "to": "Peer", "status": "over"},
@@ -202,13 +204,13 @@ def test_two_running_roles_stay_ambiguous_after_their_chats_end() -> None:
     _fresh()
     r = "bare-ended-both"
     c = LocalClient()
-    chat.send_chat(c, r, "ProjectB/ui", "over", "q1", to="X")
-    chat.send_chat(c, r, "X", "end", "bye", to="ProjectB/ui")
-    chat.send_chat(c, r, "ProjectB/api", "over", "q2", to="Y")
-    chat.send_chat(c, r, "Y", "end", "bye", to="ProjectB/api")
+    chat.send_chat(c, r, "M:ProjectB/ui", "over", "q1", to="X")
+    chat.send_chat(c, r, "X", "end", "bye", to="M:ProjectB/ui")
+    chat.send_chat(c, r, "M:ProjectB/api", "over", "q2", to="Y")
+    chat.send_chat(c, r, "Y", "end", "bye", to="M:ProjectB/api")
     for h in ("ProjectB/ui", "ProjectB/api"):  # both start new chats
         mcp.chat_begin(chatter=h, channel=r)
-    chat.send_chat(c, r, "Z", "over", "which of you?", to="ProjectB")
+    chat.send_chat(c, r, "Z", "over", "which of you?", to="M:ProjectB")
     for h in ("ProjectB/ui", "ProjectB/api"):
         check(wait(h, r, 0.3)["timed_out"], f"{h} doesn't wake")
         check(not mcp.chat_status(chatter=h, channel=r)["your_turn"],
@@ -225,11 +227,11 @@ def test_end_to_the_bare_name_ends_the_roles_chat() -> None:
     _fresh()
     r = "bare-end-bare"
     c = LocalClient()
-    chat.send_chat(c, r, "ProjB/api", "over", "earlier question", to="Peer")
-    chat.send_chat(c, r, "Peer", "end", "done", to="ProjB")
+    chat.send_chat(c, r, "M:ProjB/api", "over", "earlier question", to="Peer")
+    chat.send_chat(c, r, "Peer", "end", "done", to="M:ProjB")
     mcp.chat_begin(chatter="ProjB/convex", channel=r)
     mcp.chat_say(text="new question", chatter="ProjB/convex", channel=r, to="Peer", wait=False)
-    chat.send_chat(c, r, "Peer", "over", "answer", to="ProjB")
+    chat.send_chat(c, r, "Peer", "over", "answer", to="M:ProjB")
     b = wait("ProjB/convex", r)
     check(b["your_turn"] and b["text"] == "answer", f"convex wakes: {b.get('timed_out')}")
 
@@ -239,17 +241,17 @@ def test_old_bare_turns_arent_handed_to_a_newcomer() -> None:
     _fresh()
     r = "bare-newcomer"
     c = LocalClient()
-    chat.send_chat(c, r, "X", "over", "for convex", to="ProjectB")
-    chat.send_chat(c, r, "ProjectB/convex", "over", "reply", to="X")
-    chat.send_chat(c, r, "X", "over", "again", to="ProjectB")
-    chat.send_chat(c, r, "ProjectB/convex", "impasse", "stuck", to="X")
+    chat.send_chat(c, r, "X", "over", "for convex", to="M:ProjectB")
+    chat.send_chat(c, r, "M:ProjectB/convex", "over", "reply", to="X")
+    chat.send_chat(c, r, "X", "over", "again", to="M:ProjectB")
+    chat.send_chat(c, r, "M:ProjectB/convex", "impasse", "stuck", to="X")
     out = chat.resolve_bare([chat.parse(m["content"]) for m in reversed(c.read_messages(r))],
-                            me="ProjectB/newrole")
-    check([p["to"] for p in out if p["participant"] == "X"] == ["ProjectB/convex"] * 2,
+                            me="M:ProjectB/newrole")
+    check([p["to"] for p in out if p["participant"] == "X"] == ["M:ProjectB/convex"] * 2,
           "they stay convex's")
     mcp.chat_begin(chatter="ProjectB/newrole", channel=r)
     st = mcp.chat_status(chatter="ProjectB/newrole", channel=r)
-    check(not st["your_turn"] and "ProjectB/convex" not in st["participants"],
+    check(not st["your_turn"] and "M:ProjectB/convex" not in st["participants"],
           f"not newrole's chat: {st['participants']}")
 
 
@@ -284,14 +286,14 @@ def test_role_that_walked_away_doesnt_block() -> None:
     _fresh()
     r = "bare-dropped"
     c = LocalClient()
-    chat.send_chat(c, r, "ProjB/api", "over", "yesterday's question", to="Y")
-    chat.send_chat(c, r, "Y", "over", "yesterday's answer", to="ProjB/api")
+    chat.send_chat(c, r, "M:ProjB/api", "over", "yesterday's question", to="Y")
+    chat.send_chat(c, r, "Y", "over", "yesterday's answer", to="M:ProjB/api")
     _backdate(r, 20 * 60)  # api just stopped - no end - and isn't running any more
     mcp.chat_begin(chatter="ProjB/convex", channel=r)
-    mcp.chat_say(text="new question", chatter="ProjB/convex", channel=r, to="Peer", wait=False)
-    check(mcp._expand_bare(c, r, "Peer", "ProjB") == "ProjB/convex",
+    mcp.chat_say(text="new question", chatter="ProjB/convex", channel=r, to="Work:Peer", wait=False)
+    check(mcp._expand_bare(c, r, "Work:Peer", "ProjB") == "M:ProjB/convex",
           "a sender here spells it out as convex")
-    chat.send_chat(c, r, "Peer", "over", "answer", to="ProjB")  # an older/remote Peer
+    chat.send_chat(c, r, "Work:Peer", "over", "answer", to="M:ProjB")  # a peer elsewhere
     st = mcp.chat_status(chatter="ProjB/convex", channel=r)
     check(st["your_turn"], f"chat_status: convex's turn ({st.get('pending_turn')})")
     check("ProjB" not in st["participants"] and not st["multiparty"],
@@ -307,8 +309,8 @@ def test_await_and_status_agree() -> None:
     c = LocalClient()
     mcp.chat_begin(chatter="ProjectB/api", channel="bare-agree-elsewhere")  # running here
     mcp.chat_begin(chatter="ProjectB/ui", channel=r)
-    mcp.chat_say(text="question", chatter="ProjectB/ui", channel=r, to="X", wait=False)
-    chat.send_chat(c, r, "X", "over", "reply", to="ProjectB")
+    mcp.chat_say(text="question", chatter="ProjectB/ui", channel=r, to="Work:X", wait=False)
+    chat.send_chat(c, r, "Work:X", "over", "reply", to="M:ProjectB")
     st = mcp.chat_status(chatter="ProjectB/ui", channel=r)
     b = wait("ProjectB/ui", r, 0.3)
     check(not st["your_turn"] and b["timed_out"],
@@ -317,9 +319,9 @@ def test_await_and_status_agree() -> None:
     _fresh()
     r = "bare-agree-2"
     mcp.chat_begin(chatter="ProjectB/ui", channel=r)
-    mcp.chat_say(text="question", chatter="ProjectB/ui", channel=r, to="X", wait=False)
-    chat.send_chat(c, r, "X", "over", "reply", to="ProjectB")
-    chat.send_chat(c, r, "ProjectB/api", "over", "unrelated", to="Y")  # arrives after
+    mcp.chat_say(text="question", chatter="ProjectB/ui", channel=r, to="Work:X", wait=False)
+    chat.send_chat(c, r, "Work:X", "over", "reply", to="M:ProjectB")
+    chat.send_chat(c, r, "M:ProjectB/api", "over", "unrelated", to="Y")  # arrives after
     st = mcp.chat_status(chatter="ProjectB/ui", channel=r)
     b = wait("ProjectB/ui", r)
     check(st["your_turn"] and b["your_turn"] and b["text"] == "reply",
@@ -328,10 +330,10 @@ def test_await_and_status_agree() -> None:
     _fresh()
     r = "bare-agree-3"
     mcp.chat_begin(chatter="ProjectB/ui", channel=r)
-    chat.send_chat(c, r, "ProjectB/ui", "ask", "here", to="X")
-    chat.send_chat(c, r, "ProjectB/api", "ask", "here too", to="Y")
-    chat.send_chat(c, r, "X", "over", "which of you?", to="ProjectB")
-    chat.send_chat(c, r, "ProjectB/api", "end", "bye", to="Y")  # api leaves afterwards
+    chat.send_chat(c, r, "M:ProjectB/ui", "ask", "here", to="Work:X")
+    chat.send_chat(c, r, "M:ProjectB/api", "ask", "here too", to="Y")
+    chat.send_chat(c, r, "Work:X", "over", "which of you?", to="M:ProjectB")
+    chat.send_chat(c, r, "M:ProjectB/api", "end", "bye", to="Y")  # api leaves afterwards
     st = mcp.chat_status(chatter="ProjectB/ui", channel=r)
     b = wait("ProjectB/ui", r, 0.3)
     check(not st["your_turn"] and b["timed_out"],
@@ -359,21 +361,21 @@ def test_running_roles_count_from_when_they_started() -> None:
 
 
 def test_second_role_to_answer_is_told() -> None:
-    print("two roles (one elsewhere) both take a bare opener: the second is told:")
+    print("two roles (one not running here) both take a bare opener: the second is told:")
     _fresh()
     r = "bare-race"
     c = LocalClient()
     mcp.chat_begin(chatter="ProjectB/ui", channel=r)
-    chat.send_chat(c, r, "X", "over", "anyone from ProjectB?", to="ProjectB")
+    chat.send_chat(c, r, "X", "over", "anyone from ProjectB?", to="M:ProjectB")
     check(wait("ProjectB/ui", r)["your_turn"], "ui (the only one it knows of) wakes")
-    chat.send_chat(c, r, "ProjectB/api", "over", "api here", to="X")  # another machine's
+    chat.send_chat(c, r, "M:ProjectB/api", "over", "api here", to="X")  # one not running here
     try:
         mcp.chat_say(text="ui here", chatter="ProjectB/ui", channel=r, wait=False)
         raise AssertionError("ui's reply must not go out")
     except Exception as e:
         check("ProjectB/api" in str(e) and "answered it first" in str(e), f"told: {str(e)[:90]}")
     last = c.read_messages(r, limit=1)[0]["content"]
-    check(last.startswith("[ProjectB/api>X|over]"), "nothing posted")
+    check(last.startswith("[M:ProjectB/api>X|over]"), "nothing posted")
     out = mcp.chat_say(text="ui here too", chatter="ProjectB/ui", channel=r, to="X", wait=False)
     check(out.get("sent_messages") == 1, "addressing X on purpose still works")
 
