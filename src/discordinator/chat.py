@@ -214,26 +214,39 @@ def parse(content: str) -> Optional[dict[str, Optional[str]]]:
 
 
 # Ids of this session's own chat posts made under an earlier name of it - the
-# same name on this machine before the machine was renamed - and the name it
-# goes by now. They're still its own (the MCP server sets this on each chat
-# call; see mcp_server._chatter) - read as anyone else's, they're as posted.
+# same name on this machine before the machine was renamed - those earlier
+# names (keys), and the name it goes by now. They're still its own, and turns
+# to those names are still for it (the MCP server sets this on each chat call;
+# see mcp_server._chatter) - read as anyone else's, they're as posted.
 _own_earlier: set[str] = set()
+_own_names: set[str] = set()
 _own_earlier_by: list[Optional[str]] = [None]
 
 
-def set_own_earlier(owner: str, ids: Any) -> None:
+def set_own_earlier(owner: str, ids: Any, names: Any = ()) -> None:
     _own_earlier.clear()
     _own_earlier.update(str(i) for i in ids)
+    _own_names.clear()
+    _own_names.update(handle_key(h) for h in names)
     _own_earlier_by[0] = owner
 
 
+def _is_own_name(to: Optional[str], me: Optional[str]) -> bool:
+    """Is ``to`` an earlier name of ``me``, when ``me`` is this session?"""
+    return (to is not None and handle_key(to) in _own_names
+            and same_handle(me, _own_earlier_by[0]))
+
+
 def _parse_own(m: dict[str, Any], me: Optional[str]) -> Optional[dict[str, Optional[str]]]:
-    """parse_msg, with this session's own earlier-named posts as ``me``'s when
-    ``me`` is this session."""
+    """parse_msg, with this session's own earlier-named posts as ``me``'s, and
+    turns to its earlier names as to ``me``, when ``me`` is this session."""
     p = parse_msg(m)
-    if (p is not None and str(m.get("id")) in _own_earlier
-            and same_handle(me, _own_earlier_by[0])):
+    if p is None or not same_handle(me, _own_earlier_by[0]):
+        return p
+    if str(m.get("id")) in _own_earlier:
         p = {**p, "participant": me}
+    if _is_own_name(p["to"], me):
+        p = {**p, "to": me}
     return p
 
 
@@ -527,7 +540,7 @@ def _means_me(client: DiscordClient, channel_id: str, to: Optional[str], me: str
     """Does a turn addressed ``to`` (not a broadcast) name me, counting my
     project's bare handle when it meant me - worked out exactly as
     compute_state does, so chat_await and chat_status agree?"""
-    if same_handle(to, me):
+    if same_handle(to, me) or _is_own_name(to, me):
         return True
     if not _could_mean(to, me):
         return False
@@ -1117,7 +1130,7 @@ def _held_still_open(client: DiscordClient, channel_id: str, me: str,
         m = simplify_message(raw)
         if not m.get("bot") and is_human_stop(m.get("content") or ""):
             return False
-        p = parse_msg(m)
+        p = _parse_own(m, me)
         if p is not None and p["status"] in TERMINAL_STATUSES and (
                 same_handle(p["participant"], sender) or same_handle(p["to"], me)):
             return False
@@ -1744,7 +1757,7 @@ def _wakes(client: DiscordClient, channel_id: str, m: dict[str, Any], me: str,
     unaddressed turn only counts if it's from my conversation."""
     if not _would_wake(m, me, from_whom):
         return False
-    p = parse_msg(m)
+    p = _parse_own(m, me)
     if p is None:
         return not m.get("bot")  # a human; relay traffic never wakes anyone
     if p["status"] in TERMINAL_STATUSES:

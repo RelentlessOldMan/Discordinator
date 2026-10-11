@@ -53,6 +53,10 @@ _resolved: dict[str, str] = {}
 _last_chatter: Optional[str] = None
 _restored = False  # this process has looked up its session's earlier identity
 _current: Optional[str] = None  # the handle this session's last chat call used
+# This machine's label (config set-label) as this session last saw it ("" for
+# none; None until it has), so after a rename its relay read position starts
+# where the one under the old label got to.
+last_label: Optional[str] = None
 # When this session first took each of its names (handle key -> unix time), so
 # a turn sent before it was running isn't counted as possibly meant for it.
 _since: dict[str, float] = {}
@@ -280,6 +284,9 @@ def restore() -> None:
     full = entry.get("full")
     if isinstance(full, list):
         _full_used.extend(h for h in full if isinstance(h, str) and h not in _full_used)
+    global last_label
+    if last_label is None and isinstance(entry.get("label"), str):
+        last_label = entry["label"]
 
 
 def note_full(name: str) -> None:
@@ -306,16 +313,19 @@ def retired_full_names() -> list[str]:
         if not isinstance(entry, dict) or not _session_alive(key, now, entry):
             continue
         full = entry.get("full") if key != mine else _full_used
-        handle, machine = entry.get("handle"), entry.get("machine")
+        handle, machine = entry.get("handle"), _machine_in(entry)
         current = f"{machine}:{handle}" if isinstance(handle, str) and machine else None
         if key == mine and _current is not None:
             current = f"{_machine()}:{_current}"
-        if current is None:
-            continue
+        if current is None or (key != mine and chat.handle_key(current) not in held):
+            continue  # (a session that isn't running now goes by no name)
         for h in full if isinstance(full, list) else []:
             if (isinstance(h, str) and not chat.same_handle(h, current)
                     and chat.same_handle(chat.local_name(h), chat.local_name(current))
-                    and chat.handle_key(h) not in held):
+                    and chat.handle_key(h) not in held
+                    # every unnamed machine is DefaultMachineName: that name may
+                    # well be another machine's session now
+                    and not chat.same_handle(chat.machine_of(h), config.DEFAULT_MACHINE_NAME)):
                 out.append(h)
     return out
 
@@ -333,8 +343,9 @@ def _remember() -> None:
             data = {k: v for k, v in data.items() if _session_alive(k, now, v)}
             data[key] = {"chatter": _last_chatter, "resolved": dict(_resolved),
                          "handle": _current, "since": dict(_since), "ts": now,
-                         "full": list(_full_used),
-                         "pid": os.getpid(), "started": _my_start(), "machine": _machine()}
+                         "full": list(_full_used), "label": last_label,
+                         "pid": os.getpid(), "started": _my_start(), "machine": _machine(),
+                         "own_label": _own_label()}
             config._atomic_write(path, json.dumps(data, indent=2, sort_keys=True))
     except OSError:
         pass  # only a convenience for the next restart
@@ -391,7 +402,9 @@ def compose(chatter: Optional[str], base: Optional[str]) -> str:
     explicit chatter as-is when there's no base. A chatter that already is (or
     starts with) the base isn't doubled up."""
     chatter = None if chatter in (None, "") else str(chatter).strip()
-    base = None if base in (None, "") else str(base).strip()
+    # the project name as chats show it (config.project_name), so a role is
+    # checked against the same name everywhere
+    base = config.project_name({"chat_handle": base})
     if not chatter and not base:
         base = config.DEFAULT_CHAT_NAME  # no name set anywhere: an obvious placeholder
     if not base:
@@ -468,20 +481,44 @@ def _key(handle: str, machine: Optional[str] = None) -> str:
 
 
 def _claims_of(reg: dict[str, Any], handle: str) -> list[Any]:
-    """The claims on ``handle`` here: its own, then an older version's (kept
-    by the name alone, with no machine - a session on this machine too)."""
-    old = reg.get(chat.handle_key(handle))
-    return [reg.get(_key(handle))] + ([old] if isinstance(old, dict) and not old.get("machine")
-                                      else [])
+    """The claims on ``handle`` under this session's machine name: its own
+    (under the machine's name before a rename too, see _machine_in), and an
+    older version's (kept with no machine - a session on this machine too)."""
+    here = chat.handle_key(_machine())
+    own = reg.get(_key(handle))
+    return [own] + [e for e in reg.values() if e is not own and isinstance(e, dict)
+                    and chat.same_handle(e.get("handle"), handle)
+                    and chat.handle_key(_machine_in(e) or here) == here]
 
 
 def _taken(reg: dict[str, Any], handle: str, me: int, now: float) -> bool:
     return any(_held_by_other(e, me, now) for e in _claims_of(reg, handle))
 
 
-def _machine_in(entry: Any) -> Optional[str]:
+def _recorded_machine(entry: Any) -> Optional[str]:
     m = entry.get("machine") if isinstance(entry, dict) else None
     return m if isinstance(m, str) and m else None
+
+
+def _machine_in(entry: Any) -> Optional[str]:
+    """The machine name a claim's (or session record's) session goes by: the
+    one it recorded if a project set its own (DISCORDINATOR_LABEL), else this
+    machine's name now - so a running session keeps its name through
+    `config set-label` before its next call records the new one. None for a
+    record from before v1.0.48."""
+    if isinstance(entry, dict) and entry.get("own_label") is False:
+        return _config_machine()
+    return _recorded_machine(entry)
+
+
+def _own_label() -> bool:
+    """Does this session run under a machine name of its own (a project's
+    DISCORDINATOR_LABEL), not this machine's?"""
+    return bool(os.environ.get("DISCORDINATOR_LABEL"))
+
+
+def _config_machine() -> str:
+    return config.machine_name(config.load_file())
 
 
 def _machine() -> str:
@@ -562,11 +599,12 @@ def claim(desired: str) -> str:
         here = chat.handle_key(_machine())
         reg = {k: v for k, v in reg.items()
                if isinstance(v, dict) and (
-                   k != dropped and chat.handle_key(_machine_in(v) or here) == here
+                   k != dropped and chat.handle_key(_recorded_machine(v) or here) == here
                    if v.get("pid") == me else _held_by_other(v, me, now))}
         reg[key] = {"handle": handle, "pid": me, "ts": now,
                     "since": _since[chat.handle_key(handle)],
-                    "started": _my_start(), "session": session_key(), "machine": _machine()}
+                    "started": _my_start(), "session": session_key(), "machine": _machine(),
+                    "own_label": _own_label()}
         config._atomic_write(path, json.dumps(reg, indent=2, sort_keys=True))
     return handle
 
@@ -619,9 +657,11 @@ def _rename_note(desired: str, handle: str, cfg: dict[str, Any]) -> str:
                              for r in ("ui", "api", "docs", "tests", "review", "work"))
          if chat.handle_key(e) not in taken),
         ("role2", compose("role2", cfg.get("chat_handle"))))
-    return (f"'{desired}' is already in use by another live session on this "
-            f"machine, so you are '{handle}'. Pass chatter=\"<role>\" to pick a "
-            f"clearer name (e.g. chatter=\"{role}\" -> '{example}').")
+    def full(h: str) -> str:
+        return config.full_name(cfg, h)
+    return (f"'{full(desired)}' is already in use by another live session on this "
+            f"machine, so you are '{full(handle)}'. Pass chatter=\"<role>\" to pick a "
+            f"clearer name (e.g. chatter=\"{role}\" -> '{full(example)}').")
 
 
 def held_since(handle: Optional[str]) -> Optional[float]:

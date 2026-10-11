@@ -211,7 +211,7 @@ def _as_other_process(full: str) -> None:
 
 
 def test_machine_renamed_mid_chat() -> None:
-    print("a turn sent to a session's name before its machine was renamed is pointed out:")
+    print("a turn sent to a session's name before its machine was renamed is still its own:")
     _fresh()
     r, c = "renamed-machine", LocalClient()
     mcp.chat_begin(chatter="A", channel=r)
@@ -220,9 +220,12 @@ def test_machine_renamed_mid_chat() -> None:
     os.environ["DISCORDINATOR_LABEL"] = "Harbinger"  # config set-label Harbinger
     try:
         got = wait(r, 0.3, chatter="A")
-        check(got["timed_out"] and "'Home:A' (read it with read_messages" in got.get("handle_note", ""),
-              f"waiting as Harbinger:A, it's told about the turn to Home:A: "
-              f"{got.get('handle_note', '')[:60]}")
+        check(got["your_turn"] and got["from"] == "Work:B" and not got.get("handle_note"),
+              f"waiting as Harbinger:A, it gets the turn to Home:A: {got.get('from')}")
+        mcp.chat_say(text="hello B", chatter="A", channel=r, wait=False)
+        check(last(r).startswith("[Harbinger:A>Work:B|over]"), f"and answers it: {last(r)[:28]}")
+        other = chat.await_turn(c, r, "Work:Z", timeout=0.2, poll=0.02, nudge_after=0)
+        check(not other.get("your_turn"), "nobody else is handed it")
         st = mcp.chat_status(chatter="Home:A", channel=r)  # raises if it's refused
         check(st["channel"] == r, "and its old full name is still accepted as chatter")
     finally:
@@ -481,6 +484,11 @@ def test_an_older_versions_turn_to_my_name() -> None:
         got = wait(r, 0.3)
         check("'Carver9' (read it with read_messages" in (got.get("handle_note") or ""),
               f"chat_await points it out: {(got.get('handle_note') or '')[:50]}")
+        mcp.chat_say(text="hi again", channel=r, to="OldPeer9", wait=False)
+        got = wait(r, 0.3)
+        check(got["timed_out"] and "Carver9'" not in (got.get("handle_note") or "")
+              and "handle_note" not in got.get("next", ""),
+              f"once answered, it isn't pointed out again: {(got.get('handle_note') or '')[:50]}")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
 
@@ -571,6 +579,140 @@ def test_unnamed_machine_is_told() -> None:
         os.environ["DISCORDINATOR_LABEL"] = saved
 
 
+def test_deleting_after_a_rename() -> None:
+    print("deleting a turn after a machine rename doesn't count the session as a reader:")
+    _fresh()
+    handles._SESSION_KEY = "id:dl"
+    r, c = "delete-renamed", LocalClient()
+    try:
+        mcp.chat_begin(chatter="Dl", channel=r)
+        first = mcp.chat_say(text="hi B", chatter="Dl", channel=r, to="Work:B", wait=False)
+        chat.send_chat(c, r, "Work:B", "over", "hello", to="Home:Dl")
+        os.environ["DISCORDINATOR_LABEL"] = "Harbinger"
+        wait(r, chatter="Dl")
+        mcp.chat_say(text="answer", chatter="Dl", channel=r, wait=False)
+        check(last(r).startswith("[Harbinger:Dl>"), f"posted as Harbinger:Dl: {last(r)[:20]}")
+        out = mcp.delete_messages(message_ids=first["message_ids"], channel=r)
+        note = out.get("note", "")
+        check("Work:B" in note and "Dl" not in note, f"only Work:B posted since: {note[:60]}")
+    finally:
+        os.environ["DISCORDINATOR_LABEL"] = "Home"
+        handles._SESSION_KEY = None
+        handles._full_used.clear()
+
+
+def test_events_name_the_full_name() -> None:
+    print("the event log names a session by its full name in every event:")
+    from discordinator import events
+    _fresh()
+    mcp.chat_begin(chatter="Ev", channel="events-names")
+    mcp._log_error("chat_say", RuntimeError("boom"), {"channel": "events-names"})
+    evs, _ = events.read()
+    err = [e for e in evs if e.get("kind") == "error"][-1]
+    joined = [e for e in evs if e.get("kind") == "joined"][-1]
+    check(err.get("handle") == joined.get("handle") == "Home:Ev",
+          f"error and joined alike: {err.get('handle')}, {joined.get('handle')}")
+
+
+def test_waiting_for_a_short_name() -> None:
+    print("chat_await(from_whom=) without a machine means whom to= would:")
+    _fresh()
+    r, c = "from-short", LocalClient()
+    mcp.chat_begin(chatter="Fw", channel=r)
+    chat.send_chat(c, r, "Work:Peer", "over", "from Work", to="Home:Fw")
+    got = wait(r, from_whom="Peer")
+    check(got["your_turn"] and got["from"] == "Work:Peer", f"the one Peer's turn: {got.get('from')}")
+    chat.send_chat(c, r, "Lab:Peer", "over", "from Lab", to="Home:Fw")
+    try:
+        wait(r, from_whom="Peer")
+        check(False, "a from_whom two machines share should be refused")
+    except mcp.ChatSendError as e:
+        check("from_whom=" in str(e) and "Lab:Peer" in str(e) and "Nothing was read" in str(e),
+              f"refused, naming both: {str(e)[:70]}")
+    got = wait(r, from_whom="Lab:Peer")
+    check(got["your_turn"] and got["from"] == "Lab:Peer", "nothing was read: the turn is still there")
+    got = wait(r, 0.2, from_whom="Ghost")
+    check(got["timed_out"], "nobody known by it yet: it waits for them")
+
+
+def test_odd_project_names_compose() -> None:
+    print("a project name with odd characters makes the same name everywhere:")
+    check(handles.compose("ui", "Code:Carver") == "CodeCarver/ui",
+          f"role under the cleaned name: {handles.compose('ui', 'Code:Carver')}")
+    check(handles.compose(None, "[Code]") == "Code", f"plain: {handles.compose(None, '[Code]')}")
+    got = handles.compose("CodeCarver/ui", "Code:Carver")
+    check(got == "CodeCarver/ui", f"its own role name passed back isn't doubled: {got}")
+
+
+def _drop_claim(full: str) -> None:
+    path = handles.registry_path()
+    reg = json.loads(path.read_text(encoding="utf-8"))
+    reg.pop(chat.handle_key(full), None)
+    path.write_text(json.dumps(reg), encoding="utf-8")
+
+
+def test_set_label_keeps_running_names() -> None:
+    print("after config set-label, a running session keeps its name from a newcomer:")
+    from discordinator import config
+    _fresh()
+    label = os.environ.pop("DISCORDINATOR_LABEL")
+    try:
+        config.save({**config.load_file(), "machine_label": "Old"})
+        handles.claim("Keeper")  # a running session, named by this machine's label
+        _as_other_process("Old:Keeper")
+        config.save({**config.load_file(), "machine_label": "New"})  # config set-label New
+        got = handles.claim("Keeper")
+        check(got == "Keeper-2", f"the newcomer doesn't take it: {got}")
+    finally:
+        config.save({**config.load_file(), "machine_label": None})
+        os.environ["DISCORDINATOR_LABEL"] = label
+        _drop_claim("Old:Keeper")
+        _fresh()
+
+
+def test_an_unnamed_machines_name_isnt_retired() -> None:
+    print("a session here that was once unnamed doesn't hide an unnamed machine's session:")
+    _fresh()
+    r, c = "unnamed-retired", LocalClient()
+    try:
+        handles.claim("Carver8")
+        _as_other_process("Home:Carver8")
+        _other_session("id:x8", "Carver8", ["DefaultMachineName:Carver8", "Home:Carver8"])
+        mcp.chat_begin(chatter="Asker8", channel=r)
+        chat.send_chat(c, r, "DefaultMachineName:Carver8", "over", "hi", to="Somebody")
+        try:
+            mcp.chat_say(text="which?", chatter="Asker8", channel=r, to="Carver8", wait=False)
+            check(False, "an address that could be two sessions should be refused")
+        except mcp.ChatSendError as e:
+            check("DefaultMachineName:Carver8" in str(e) and "Home:Carver8" in str(e),
+                  f"refused, naming both: {str(e)[:70]}")
+    finally:
+        _drop_other_sessions()
+        _drop_claim("Home:Carver8")
+
+
+def test_relay_position_after_a_rename() -> None:
+    print("after its machine is renamed, a session's relay read position carries on:")
+    from discordinator import config
+    _fresh()
+    r, c = "relay-renamed", LocalClient()
+    label = os.environ.pop("DISCORDINATOR_LABEL")
+    try:
+        config.save({**config.load_file(), "machine_label": "Home"})
+        c.send_message(r, "[Work:B] one")
+        got = mcp.get_new_messages(channel=r)
+        check([m["content"] for m in got] == ["[Work:B] one"], "it reads what's new")
+        config.save({**config.load_file(), "machine_label": "Harbinger"})  # config set-label
+        got = mcp.get_new_messages(channel=r)
+        check(got == [], f"renamed, it isn't handed it again: {[m['content'] for m in got]}")
+        c.send_message(r, "[Work:B] two")
+        got = mcp.get_new_messages(channel=r)
+        check([m["content"] for m in got] == ["[Work:B] two"], "and gets what's new since")
+    finally:
+        config.save({**config.load_file(), "machine_label": None})
+        os.environ["DISCORDINATOR_LABEL"] = label
+
+
 def main() -> int:
     test_one_name_everywhere()
     test_same_project_on_two_machines()
@@ -596,6 +738,13 @@ def main() -> int:
     test_machine_names_are_cleaned()
     test_names_and_chatter()
     test_unnamed_machine_is_told()
+    test_deleting_after_a_rename()
+    test_events_name_the_full_name()
+    test_waiting_for_a_short_name()
+    test_odd_project_names_compose()
+    test_set_label_keeps_running_names()
+    test_an_unnamed_machines_name_isnt_retired()
+    test_relay_position_after_a_rename()
     print(f"\nALL {_passed} CHECKS PASSED")
     return 0
 
