@@ -53,6 +53,7 @@ def _fresh() -> None:
     handles._since.clear()
     handles._last_chatter = None
     handles._current = None
+    mcp._told.clear()
 
 
 def wait(room: str, t: float = 1.0, **kw) -> dict:
@@ -260,7 +261,7 @@ def test_old_names_are_pointed_out_not_taken() -> None:
         chat.send_chat(c, r, "Work:Peer", "over", "answer", to="Carver3/ui")
         b = mcp.chat_begin(channel=r)
         check(b["chatter"] == "Home:Carver3", f"it doesn't take the old name over: {b['chatter']}")
-        check("'Carver3/ui' (read it with read_messages" in b.get("note", ""),
+        check("'Carver3/ui' (from Work:Peer: \"answer\" - answer it with chat_say(to=\"Work:Peer\"))" in b.get("note", ""),
               "it's told the turn is there and how to answer it")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
@@ -482,7 +483,7 @@ def test_an_older_versions_turn_to_my_name() -> None:
     try:
         mcp.chat_begin(channel=r)
         got = wait(r, 0.3)
-        check("'Carver9' (read it with read_messages" in (got.get("handle_note") or ""),
+        check("'Carver9' (from OldPeer9: \"hi Carver9\"" in (got.get("handle_note") or ""),
               f"chat_await points it out: {(got.get('handle_note') or '')[:50]}")
         mcp.chat_say(text="hi again", channel=r, to="OldPeer9", wait=False)
         got = wait(r, 0.3)
@@ -770,9 +771,12 @@ def test_an_unrelated_turn_isnt_an_answer() -> None:
         chat.send_chat(c, r, "Work:Peer", "over", "question for the old name", to="Carver7")
         mcp.chat_say(text="answer to the first", channel=r, to="Work:Peer", wait=False)
         got = wait(r, 0.3)
-        check("'Carver7' (read it with read_messages" in (got.get("handle_note") or ""),
+        check("'Carver7' (from Work:Peer: \"question for the old name\"" in (got.get("handle_note") or ""),
               f"a reply written before it was seen isn't its answer: "
               f"{(got.get('handle_note') or '')[:50]}")
+        got = wait(r, 0.3)
+        check("'Carver7' (from Work:Peer: \"question for the old name\"" in (got.get("handle_note") or ""),
+              "nor once it has been pointed out: it stays pointed out until answered")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
 
@@ -816,6 +820,147 @@ def test_an_old_name_from_a_stranger() -> None:
         os.environ["DISCORDINATOR_LABEL"] = "Home"
 
 
+def test_old_name_reads_the_same_every_time() -> None:
+    print("a turn to an old name reads the same however often the room is read:")
+    _fresh()
+    r, c = "old-name-stable", LocalClient()
+    try:
+        mcp.chat_begin(chatter="Rf", channel=r)
+        mcp.chat_say(text="hi B", chatter="Rf", channel=r, to="Work:B", wait=False)
+        os.environ["DISCORDINATOR_LABEL"] = "Harbinger"
+        mcp.chat_status(chatter="Rf", channel=r)
+        chat.send_chat(c, r, "Work:B", "over", "question for Rf", to="Home:Rf")
+        check(wait(r, chatter="Rf").get("your_turn"), "its peer's turn reaches it")
+        # another machine, now called Home, runs Rf too and talks to someone else
+        chat.send_chat(c, r, "Home:Rf", "over", "the other Rf", to="Lab:C")
+        seen = [mcp.chat_status(chatter="Rf", channel=r).get("your_turn") for _ in range(3)]
+        check(seen == [True, True, True], f"still its turn, every time: {seen}")
+    finally:
+        os.environ["DISCORDINATOR_LABEL"] = "Home"
+
+
+def test_old_name_before_another_took_it() -> None:
+    print("a peer's turn sent before another session took the old name is still its own:")
+    _fresh()
+    handles._SESSION_KEY = "id:rg"
+    r, c = "old-name-before", LocalClient()
+    try:
+        mcp.chat_begin(chatter="Rg", channel=r)
+        mcp.chat_say(text="hi B", chatter="Rg", channel=r, to="Work:B", wait=False)
+        os.environ["DISCORDINATOR_LABEL"] = "Harbinger"
+        chat.send_chat(c, r, "Work:B", "over", "question for Rg", to="Home:Rg")
+        chat.send_chat(c, r, "Home:Rg", "over", "the other Rg", to="Lab:C")
+        mcp._my_posts.clear()  # a new server: it reads the room afresh
+        handles._resolved.clear()
+        handles._current = None
+        handles._last_chatter = None
+        got = wait(r, chatter="Rg")
+        check(got.get("your_turn") and got.get("text") == "question for Rg",
+              f"handed to it: {got.get('text')!r}")
+    finally:
+        os.environ["DISCORDINATOR_LABEL"] = "Home"
+        handles._SESSION_KEY = None
+
+
+def test_answered_stays_answered_after_a_restart() -> None:
+    print("a turn to an old name once answered isn't pointed out again after a restart:")
+    _fresh()
+    handles._SESSION_KEY = "id:rt"
+    r, c = "old-name-restart", LocalClient()
+    try:
+        mcp.chat_begin(chatter="Rt", channel=r)
+        mcp.chat_say(text="hi B", chatter="Rt", channel=r, to="Work:B", wait=False)
+        os.environ["DISCORDINATOR_LABEL"] = "Harbinger"
+        mcp.chat_status(chatter="Rt", channel=r)
+        chat.send_chat(c, r, "Lab:C", "over", "for Home's Rt", to="Home:Rt")
+        check("'Home:Rt'" in (wait(r, 0.3, chatter="Rt").get("handle_note") or ""),
+              "pointed out")
+        mcp.chat_say(text="answered", chatter="Rt", channel=r, to="Lab:C", wait=False)
+        mcp._my_posts.clear()  # the server restarts
+        mcp._told.clear()
+        handles._resolved.clear()
+        handles._current = None
+        handles._last_chatter = None
+        got = wait(r, 0.3, chatter="Rt")
+        check("'Home:Rt'" not in (got.get("handle_note") or ""),
+              f"not pointed out again: {(got.get('handle_note') or '')[:50]}")
+    finally:
+        os.environ["DISCORDINATOR_LABEL"] = "Home"
+        handles._SESSION_KEY = None
+
+
+def test_deleting_counts_whoever_has_the_old_name() -> None:
+    print("a deleted turn's note names another machine that now goes by its old name:")
+    _fresh()
+    handles._SESSION_KEY = "id:dd"
+    r, c = "delete-old-name", LocalClient()
+    try:
+        mcp.chat_begin(chatter="Dd", channel=r)
+        mcp.chat_say(text="hi B", chatter="Dd", channel=r, to="Work:B", wait=False)
+        os.environ["DISCORDINATOR_LABEL"] = "Harbinger"
+        mcp.chat_status(chatter="Dd", channel=r)
+        first = mcp.chat_say(text="oops", chatter="Dd", channel=r, to="all", wait=False)
+        chat.send_chat(c, r, "Home:Dd", "over", "I read it", to="Harbinger:Dd")
+        note = mcp.delete_messages(message_ids=first["message_ids"], channel=r).get("note", "")
+        check("Home:Dd posted since" in note, f"named: {note[:50]}")
+    finally:
+        os.environ["DISCORDINATOR_LABEL"] = "Home"
+        handles._SESSION_KEY = None
+
+
+def test_set_label_carries_every_read_position() -> None:
+    print("`config set-label` carries every read position under the old label:")
+    from discordinator import cli, config
+    _fresh()
+    r, c = "relay-set-label", LocalClient()
+    label = os.environ.pop("DISCORDINATOR_LABEL")
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Proj"
+    try:
+        config.save({**config.load_file(), "machine_label": "Home"})
+        c.send_message(r, "[Work:B] one")
+        check(len(mcp.get_new_messages(channel=r)) == 1, "it reads what's new")
+        cli.main(["relay", "--channel", r])  # the CLI's own position
+        cli.main(["config", "set-label", "Lab"])
+        handles.last_label = None  # a new session of the project
+        got = mcp.get_new_messages(channel=r)
+        check(got == [], f"a new session isn't handed it again: {[m['content'] for m in got]}")
+        ch = config.resolve_channel(config.load(), r)
+        check(config.get_cursor(ch, "Lab") is not None
+              and config.get_cursor(ch, "Lab") == config.get_cursor(ch, "Home"), "nor the CLI")
+    finally:
+        config.save({**config.load_file(), "machine_label": None})
+        os.environ["DISCORDINATOR_LABEL"] = label
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        handles.last_label = None
+
+
+def test_a_stale_claim_doesnt_block_its_old_name() -> None:
+    print("a claim kept under the machine's old name doesn't block a session with that name:")
+    import subprocess
+    from discordinator import config
+    _fresh()
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    label = os.environ.pop("DISCORDINATOR_LABEL")
+    try:
+        time.sleep(0.3)
+        config.save({**config.load_file(), "machine_label": "Work"})  # was Home
+        now = time.time()
+        reg = {"home:stale": {"handle": "Stale", "pid": other.pid,
+                              "started": handles.process_started(other.pid), "ts": now,
+                              "since": now, "session": "id:S", "machine": "Home",
+                              "own_label": False}}
+        handles.registry_path().write_text(json.dumps(reg))
+        os.environ["DISCORDINATOR_LABEL"] = "Home"  # a project's own label
+        check(handles.claim("Stale") == "Stale", "it gets the name")
+        held = sorted(h for h, _ in handles.live_full_claims() if "Stale" in h)
+        check(held == ["Home:Stale", "Work:Stale"], f"and the other keeps its own: {held}")
+    finally:
+        other.kill()
+        handles.release_all()
+        config.save({**config.load_file(), "machine_label": None})
+        os.environ["DISCORDINATOR_LABEL"] = label
+
+
 def main() -> int:
     test_one_name_everywhere()
     test_same_project_on_two_machines()
@@ -853,6 +998,12 @@ def main() -> int:
     test_an_unrelated_turn_isnt_an_answer()
     test_relay_position_label_unset()
     test_an_old_name_from_a_stranger()
+    test_old_name_reads_the_same_every_time()
+    test_old_name_before_another_took_it()
+    test_answered_stays_answered_after_a_restart()
+    test_deleting_counts_whoever_has_the_old_name()
+    test_set_label_carries_every_read_position()
+    test_a_stale_claim_doesnt_block_its_old_name()
     print(f"\nALL {_passed} CHECKS PASSED")
     return 0
 

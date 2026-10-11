@@ -131,8 +131,9 @@ unnamed *machines* are both `DefaultMachineName`, and a chat can't tell their
 sessions apart - name your machines, and do it between chats: a reply to a
 session's `DefaultMachineName` name could be any unnamed machine's, so once
 its machine is named the session isn't handed it, or told about it.) Once the project has a name and its
-server is reconnected, a turn still owed to the old name is pointed out on the
-next chat call, so the session can answer it.
+server is reconnected, a turn still owed to the old name is pointed out - by
+`chat_begin`, `chat_status` and a `chat_await` that times out, with whom it's
+from and what it says - so the session can answer it.
 
 For a mode on `local`, skip steps 2–3 for it (no bot/token/channels): relay
 defaults to room `relay`, chat to room `chat`; pass any `channel="..."` for
@@ -655,10 +656,11 @@ per-channel rate limit (~5 messages / 5s; the client auto-retries on 429).
    its machine, which the newer one never takes for its own (a turn like that
    sent to its name is pointed out to it, to answer with `chat_say(to=...)`).
    A session carries on where it was once its server restarts on v1.0.48. When
-   its machine is renamed (`config set-label`), it keeps its name and its
-   relay read position, and a turn to its old name from someone it was talking
-   to under that name reaches it (from anyone else, or once another session
-   posts under the old name, it's only pointed out).
+   its machine is renamed (`config set-label`), it keeps its name, every
+   session's relay read position under the old name carries over (the CLI's
+   too), and a turn to its old name from someone it was talking to under that
+   name reaches it (from anyone else, or sent after another session has
+   posted under the old name, it's only pointed out, until it's answered).
 3. Confirm: `discordinator version` should match the repo's latest tag
    (`git -C C:\Playground\Discordinator describe --tags`).
 
