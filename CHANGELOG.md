@@ -8,6 +8,14 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.51] - 2026-10-11
+Sessions renamed together keep talking; old-name turns read the same every time
+- Two sessions on a machine renamed mid-chat keep talking: posts and turns under their old names count as the sessions they are now, an unaddressed reply goes to the peer's current name, and chat state no longer lists a renamed session twice
+- Whether a turn to an old name is the session's is decided from message order, so it reads the same however often the room is read
+- An owed turn counts as answered only by a reply sent after the session was told about it, and that survives a restart; its note now gives the sender, the text and the chat_say to answer with
+- config set-label carries every read position under the old label (new sessions and the CLI too); a claim kept under the machine's old name no longer blocks that name
+- delete_messages recognises its own posts by id; a deleted post under an old name still says whom the session talked to; renames are logged for watch whenever they happen
+
 ## [1.0.50] - 2026-10-11
 Old names only from known peers; owed turns stay owed until answered
 - After a machine rename, a turn to the old name reaches the session only from someone it was talking to under that name, and only until another session posts under it - otherwise it's pointed out
