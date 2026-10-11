@@ -220,6 +220,14 @@ def parse(content: str) -> Optional[dict[str, Optional[str]]]:
 # see mcp_server._chatter) - read as anyone else's, they're as posted.
 _own_earlier: set[str] = set()
 _own_names: set[str] = set()
+# Earlier names someone else has posted under since (e.g. a session on
+# another machine that was given the same machine name): turns to them are
+# that session's, not this one's.
+_others_names: set[str] = set()
+# Whom this session's earlier-named posts were to ("*" for a broadcast): a
+# turn to an earlier name is this session's only from someone that name was
+# talking to - anyone else may mean another session by that name.
+_own_peers: set[str] = set()
 _own_earlier_by: list[Optional[str]] = [None]
 
 
@@ -231,21 +239,27 @@ def set_own_earlier(owner: str, ids: Any, names: Any = ()) -> None:
     _own_earlier_by[0] = owner
 
 
-def _is_own_name(to: Optional[str], me: Optional[str]) -> bool:
-    """Is ``to`` an earlier name of ``me``, when ``me`` is this session?"""
+def _is_own_name(to: Optional[str], me: Optional[str], sender: Optional[str]) -> bool:
+    """Is a turn from ``sender`` to ``to`` one to an earlier name of ``me``,
+    when ``me`` is this session?"""
     return (to is not None and handle_key(to) in _own_names
-            and same_handle(me, _own_earlier_by[0]))
+            and handle_key(to) not in _others_names and same_handle(me, _own_earlier_by[0])
+            and ("*" in _own_peers or handle_key(sender) in _own_peers))
 
 
 def _parse_own(m: dict[str, Any], me: Optional[str]) -> Optional[dict[str, Optional[str]]]:
     """parse_msg, with this session's own earlier-named posts as ``me``'s, and
     turns to its earlier names as to ``me``, when ``me`` is this session."""
     p = parse_msg(m)
+    if p is not None and str(m.get("id")) in _own_earlier:
+        _own_peers.add("*" if _is_broadcast(p["to"]) else handle_key(p["to"]))
+    elif p is not None and handle_key(p["participant"]) in _own_names:
+        _others_names.add(handle_key(p["participant"]))
     if p is None or not same_handle(me, _own_earlier_by[0]):
         return p
     if str(m.get("id")) in _own_earlier:
         p = {**p, "participant": me}
-    if _is_own_name(p["to"], me):
+    if _is_own_name(p["to"], me, p["participant"]):
         p = {**p, "to": me}
     return p
 
@@ -540,14 +554,18 @@ def _means_me(client: DiscordClient, channel_id: str, to: Optional[str], me: str
     """Does a turn addressed ``to`` (not a broadcast) name me, counting my
     project's bare handle when it meant me - worked out exactly as
     compute_state does, so chat_await and chat_status agree?"""
-    if same_handle(to, me) or _is_own_name(to, me):
+    if same_handle(to, me):
         return True
-    if not _could_mean(to, me):
+    # (a turn to an earlier name of mine is mine depending on who sent it)
+    own = to is not None and handle_key(to) in _own_names
+    if not own and not _could_mean(to, me):
         return False
     msgs, parsed = _room(client, channel_id, me)
     i = next((i for i, m in enumerate(msgs) if str(m["id"]) == str(message_id)), None)
     if i is not None and parsed[i] is not None:
         return same_handle(parsed[i]["to"], me)
+    if own:
+        return False
     aliases = bare_aliases([parse_msg(m) for m in msgs], me, _live_here,
                            [m["timestamp"] for m in msgs])
     return any(same_handle(full, me) for bare, full in aliases.items() if same_handle(bare, to))

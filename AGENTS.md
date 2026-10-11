@@ -128,7 +128,9 @@ Every unnamed session on a machine gets the same chat name. A second one
 running at the same time is `DefaultChatName-2`, and a session is never handed
 a turn sent to the name before it took it - that was another session's. (Two
 unnamed *machines* are both `DefaultMachineName`, and a chat can't tell their
-sessions apart - name your machines.) Once the project has a name and its
+sessions apart - name your machines, and do it between chats: a reply to a
+session's `DefaultMachineName` name could be any unnamed machine's, so once
+its machine is named the session isn't handed it, or told about it.) Once the project has a name and its
 server is reconnected, a turn still owed to the old name is pointed out on the
 next chat call, so the session can answer it.
 
@@ -652,8 +654,11 @@ per-channel rate limit (~5 messages / 5s; the client auto-retries on 429).
    chat turn to them) - and an older session addresses a newer one without
    its machine, which the newer one never takes for its own (a turn like that
    sent to its name is pointed out to it, to answer with `chat_say(to=...)`).
-   A session carries on where it was once its server restarts on v1.0.48 (or
-   after its machine is renamed).
+   A session carries on where it was once its server restarts on v1.0.48. When
+   its machine is renamed (`config set-label`), it keeps its name and its
+   relay read position, and a turn to its old name from someone it was talking
+   to under that name reaches it (from anyone else, or once another session
+   posts under the old name, it's only pointed out).
 3. Confirm: `discordinator version` should match the repo's latest tag
    (`git -C C:\Playground\Discordinator describe --tags`).
 

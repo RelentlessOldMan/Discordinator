@@ -212,17 +212,13 @@ def _reader(cfg: dict[str, Any]) -> Optional[str]:
     session = handles.current(None, cfg) if handles._resolved else None
     reader = config.relay_reader(cfg, session)
     if not os.environ.get("DISCORDINATOR_LABEL"):  # (a project's own label stays)
-        try:
-            label = str(config.load_file().get("machine_label") or "")
-        except Exception:  # noqa: BLE001 - only a convenience
-            return reader
+        label = str(cfg.get("machine_label") or "")  # (the label `reader` was made with)
         if label != handles.last_label:
             old = handles.last_label
             handles.last_label = label
             handles._remember()
-            old_reader = (config.relay_reader({**cfg, "machine_label": old or None}, session)
-                          if old is not None else None)
-            if old_reader and reader and old_reader != reader:
+            old_reader = config.relay_reader({**cfg, "machine_label": old or None}, session)
+            if old is not None and old_reader != reader:
                 try:
                     config.carry_cursors(old_reader, reader)
                 except (OSError, config.LockTimeout):
@@ -558,13 +554,15 @@ def delete_messages(message_ids: Optional[Union[str, list[str]]] = None,
             if mode == "chat":
                 since = [chat.parse_msg(simplify_message(m)) for m in
                          client.read_messages(channel_id, limit=100, after=max(ids, key=int))]
-                # this name under the machine's earlier name, or an older
-                # version's (no machine), is still this session, not a reader
+                # this name under the machine's earlier name is still this
+                # session, not a reader (not one on an unnamed machine, which
+                # may be another machine's session now - as in _earlier_names)
                 me = poster[(mode, channel_id)] or config.full_name(cfg, handles._current or "")
                 local = chat.local_name(me)
-                mine = [me, local, config.full_name(cfg, local)] + [
+                mine = [me, config.full_name(cfg, local)] + [
                     h for h in handles.full_names_used()
-                    if chat.same_handle(chat.local_name(h), local)]
+                    if chat.same_handle(chat.local_name(h), local)
+                    and not chat.same_handle(chat.machine_of(h), config.DEFAULT_MACHINE_NAME)]
                 others = sorted({p["participant"] for p in since if p is not None
                                  and not any(chat.same_handle(p["participant"], h)
                                              for h in mine)})
@@ -786,7 +784,7 @@ def _lost_role(chatter: Optional[str], cfg: dict[str, Any],
     try:
         channel_id = config.resolve_chat_channel(cfg, channel)
         with _client("chat") as client:
-            lost = _lost_turns(client, channel_id, config.full_name(cfg, base), cfg)
+            lost = _lost_turns(client, channel_id, config.full_name(cfg, base), cfg, tell=False)
             lost += _left_waiting(client, channel_id, base, cfg)
     except Exception:
         return None
@@ -829,7 +827,8 @@ def _left_waiting(client: Any, channel_id: str, base: str, cfg: dict[str, Any]) 
     return out
 
 
-def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any]) -> list[str]:
+def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any],
+                tell: bool = True) -> list[str]:
     """Names on this machine that look like this session's own earlier name -
     another role of its project, the bare project handle, its role used as a
     whole handle (the name before the project got a fixed handle), or a name
@@ -847,17 +846,22 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any]) -> l
     held_here = {chat.handle_key(h) for h in handles.live_handles()}  # (older names)
     earlier = _earlier_names(channel_id, me)
     found: dict[str, str] = {}
-    # The newest turn to each name (its index), and whether this session has
-    # answered its sender since (it was told, and answered under its name now).
-    sent: dict[str, tuple[int, str]] = {}
-    parsed = chat._room(client, channel_id, me)[1]
+    # Names whose turn this session has answered since: it was told about
+    # that very turn (see _told), and then replied to its sender while that
+    # was the sender's latest turn.
+    last_to: dict[str, tuple[str, str]] = {}  # sender -> (whom its latest turn was to, its id)
+    newest: dict[str, str] = {}  # name -> id of the newest turn to it
+    msgs, parsed = chat._room(client, channel_id, me)
     answered: set[str] = set()
-    for i, p in enumerate(parsed):
+    for m, p in zip(msgs, parsed):
         if not p or p["status"] not in chat.YIELD_STATUSES or chat._is_broadcast(p["to"]):
             continue
-        if chat.same_handle(p["participant"], me):
-            answered |= {k for k, (_, frm) in sent.items() if chat.same_handle(p["to"], frm)}
-        sent[chat.handle_key(p["to"])] = (i, p["participant"])
+        if chat.same_handle(p["participant"], me) and p["to"]:
+            owed = last_to.get(chat.handle_key(p["to"]))
+            if owed is not None and _told.get(owed[0]) == owed[1]:
+                answered.add(owed[0])
+        last_to[chat.handle_key(p["participant"])] = (chat.handle_key(p["to"]), str(m["id"]))
+        newest[chat.handle_key(p["to"])] = str(m["id"])
         answered.discard(chat.handle_key(p["to"]))
         if chat.same_handle(p["to"], me) or chat.handle_key(p["to"]) in found:
             continue
@@ -881,8 +885,20 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any]) -> l
             continue
         if k in looks or (base and k.startswith(chat.handle_key(base) + "/")):
             found[chat.handle_key(p["to"])] = p["to"]
-    return [h for h in found.values() if chat.handle_key(h) not in answered
-            and chat.compute_state(client, channel_id, h).get("your_turn")]
+    out = [h for h in found.values()
+           # (answering is the way only for an older or renamed name - see _lost_note)
+           if not (chat.handle_key(h) in answered
+                   and (chat.machine_of(h) is None or _here(cfg, h) is None))
+           and chat.compute_state(client, channel_id, h).get("your_turn")]
+    for h in out if tell else ():  # (the caller shows them: see _told)
+        _told[chat.handle_key(h)] = newest.get(chat.handle_key(h), "")
+    return out
+
+
+# The turn (its id) this session was last told about under each name that
+# looks like its own (_lost_turns) - so its next reply to that turn's sender
+# is taken as its answer.
+_told: dict[str, str] = {}
 
 
 def _earlier_names(channel_id: str, me: str) -> list[str]:
