@@ -8,6 +8,13 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.49] - 2026-10-11
+Renames keep turns, names and read positions
+- A turn sent to a session's name before its machine was renamed reaches it; after config set-label a running session keeps its name and relay read position
+- A turn pointed out under an older version's name stops being pointed out once answered
+- to= is refused again when an unnamed machine's session could be meant; chat_await(from_whom=) without a machine resolves like to=
+- delete_messages, the event log, rename notes and the relay banner name sessions correctly
+
 ## [1.0.48] - 2026-10-11
 Full names everywhere: every session is machine:chat name in relay tags and chat turns alike
 - One name per session, machine first (Harbinger:CodeCarver/ui), the same in relay tags and chat turns - sessions on different machines are never confused, even with the same project name
