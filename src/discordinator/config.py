@@ -633,6 +633,48 @@ def carry_cursors(old: Optional[str], new: Optional[str]) -> None:
                 state.setdefault("cursors", {})[ch] = str(have)
 
 
+def carry_label(old: Optional[str], new: Optional[str]) -> None:
+    """The machine's label changed (``config set-label``): every read
+    position kept under the old one (``Old``, ``Old|<project>``) - the
+    sessions that run under it, and the CLI's - carries over to the new one,
+    so nothing comes back to them twice. (A project with its own
+    DISCORDINATOR_LABEL keeps its own.)"""
+    old, new = old or None, new or None
+    if old == new:
+        return
+    with update_state() as state:
+        rc = state.get("relay_cursors")
+        shared = state.get("cursors")
+        channels = set(rc if isinstance(rc, dict) else ()) | set(
+            shared if isinstance(shared, dict) else ())
+        for ch in channels:
+            mine = rc.get(ch) if isinstance(rc, dict) else None
+            mine = mine if isinstance(mine, dict) else {}
+            carried: dict[Optional[str], str] = {}  # new key (None: shared) -> position
+            for k, v in mine.items():
+                if not v:
+                    continue
+                if old is None and k.startswith("|"):
+                    carried[new + k if new else k] = v
+                elif old is not None and k == old:
+                    carried[new] = v
+                elif old is not None and k.startswith(old + "|"):
+                    carried[(new or "") + k[len(old):]] = v
+            if old is None and new and isinstance(shared, dict) and shared.get(ch):
+                carried.setdefault(new, shared[ch])
+            for k, v in carried.items():
+                have = mine.get(k) if k else (shared if isinstance(shared, dict) else {}).get(ch)
+                try:
+                    if have and int(have) >= int(v):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                if k:
+                    state.setdefault("relay_cursors", {}).setdefault(ch, {})[k] = str(v)
+                else:
+                    state.setdefault("cursors", {})[ch] = str(v)
+
+
 # What an unnamed machine or project goes by: never nothing, and never a name
 # that could pass for a real one.
 DEFAULT_MACHINE_NAME = "DefaultMachineName"
@@ -741,10 +783,26 @@ def my_posts(session: str) -> list[dict[str, Any]]:
 
 
 def forget_posts(session: str, ids: set[str]) -> None:
+    """Mark a session's posts deleted (kept: whom a chat turn went to under an
+    earlier name of the session still counts - see mcp_server._own_earlier)."""
     with update_state() as state:
         posts = state.setdefault("posts", {})
-        posts[session] = [e for e in posts.get(session) or []
-                          if isinstance(e, dict) and str(e.get("id")) not in ids]
+        posts[session] = [{**e, "deleted": True} if str(e.get("id")) in ids else e
+                          for e in posts.get(session) or [] if isinstance(e, dict)]
+
+
+def note_told(session: str, entries: dict[str, dict[str, str]]) -> None:
+    """Record which turn to an earlier name of a session it was told about
+    (see mcp_server._told), so a restart doesn't tell it again once answered."""
+    with update_state() as state:
+        told = state.setdefault("told", {})
+        mine = told.get(session) if isinstance(told.get(session), dict) else {}
+        told[session] = {**mine, **entries}
+
+
+def told(session: str) -> dict[str, Any]:
+    t = (load_state().get("told") or {}).get(session)
+    return t if isinstance(t, dict) else {}
 
 
 def sent_ids(session: str) -> set[str]:

@@ -215,52 +215,102 @@ def parse(content: str) -> Optional[dict[str, Optional[str]]]:
 
 # Ids of this session's own chat posts made under an earlier name of it - the
 # same name on this machine before the machine was renamed - those earlier
-# names (keys), and the name it goes by now. They're still its own, and turns
-# to those names are still for it (the MCP server sets this on each chat call;
-# see mcp_server._chatter) - read as anyone else's, they're as posted.
+# names (keys), whom it addressed under them (keys, "*" for a broadcast - kept
+# with its posts, so a deleted one still counts), and the name it goes by now.
+# They're still its own, and turns to those names are still for it (the MCP
+# server sets this on each chat call; see mcp_server._chatter) - read as
+# anyone else's, they're as posted.
 _own_earlier: set[str] = set()
 _own_names: set[str] = set()
-# Earlier names someone else has posted under since (e.g. a session on
-# another machine that was given the same machine name): turns to them are
-# that session's, not this one's.
-_others_names: set[str] = set()
-# Whom this session's earlier-named posts were to ("*" for a broadcast): a
-# turn to an earlier name is this session's only from someone that name was
-# talking to - anyone else may mean another session by that name.
 _own_peers: set[str] = set()
 _own_earlier_by: list[Optional[str]] = [None]
+# The same for the other sessions running on this machine, which were
+# renamed with it: (the name each goes by now, ids of its posts under an
+# earlier name, those names) - so its earlier posts read as the session it
+# is, and turns to its earlier names as to it. And the names the sessions
+# here go by now: a turn from one of them to an earlier name of another is
+# for that one (they were renamed together).
+_locals: list[tuple[str, set[str], set[str]]] = []
+_here_now: set[str] = set()
 
 
-def set_own_earlier(owner: str, ids: Any, names: Any = ()) -> None:
+def set_own_earlier(owner: str, ids: Any, names: Any = (), peers: Any = ()) -> None:
     _own_earlier.clear()
     _own_earlier.update(str(i) for i in ids)
     _own_names.clear()
     _own_names.update(handle_key(h) for h in names)
+    _own_peers.clear()
+    _own_peers.update("*" if _is_broadcast(h) else handle_key(h) for h in peers)
     _own_earlier_by[0] = owner
 
 
-def _is_own_name(to: Optional[str], me: Optional[str], sender: Optional[str]) -> bool:
-    """Is a turn from ``sender`` to ``to`` one to an earlier name of ``me``,
-    when ``me`` is this session?"""
-    return (to is not None and handle_key(to) in _own_names
-            and handle_key(to) not in _others_names and same_handle(me, _own_earlier_by[0])
-            and ("*" in _own_peers or handle_key(sender) in _own_peers))
+def set_local_earlier(sessions: Any, here_now: Any = ()) -> None:
+    _locals[:] = [(cur, {str(i) for i in ids}, {handle_key(h) for h in names})
+                  for cur, ids, names in sessions]
+    _here_now.clear()
+    _here_now.update(handle_key(h) for h in here_now)
 
 
-def _parse_own(m: dict[str, Any], me: Optional[str]) -> Optional[dict[str, Optional[str]]]:
-    """parse_msg, with this session's own earlier-named posts as ``me``'s, and
-    turns to its earlier names as to ``me``, when ``me`` is this session."""
+def _earlier_name_of(name: Optional[str]) -> bool:
+    """Is ``name`` an earlier name of this session or another one here?"""
+    k = handle_key(name)
+    return k in _own_names or any(k in names for _, _, names in _locals)
+
+
+def _own_reader() -> dict[str, Any]:
+    """What one read of the room, oldest first, has seen so far for
+    _parse_own: whom each session's earlier-named posts were to ("peers", by
+    the name it goes by now; "*" for a broadcast), and the earlier names
+    someone else has posted under ("others" - e.g. a session on another
+    machine given the same machine name). Decided afresh on every read, so a
+    turn reads the same however often the room is read."""
+    return {"peers": {}, "others": set()}
+
+
+def _parse_own(m: dict[str, Any], me: Optional[str],
+               seen: Optional[dict[str, Any]] = None) -> Optional[dict[str, Optional[str]]]:
+    """parse_msg, with each session's posts under an earlier name of it as the
+    session it is now: ``me``'s own when ``me`` is this session, and those of
+    the other sessions here. Reading the room in order (``seen``, from
+    _own_reader), a turn to one of those earlier names is to that session too
+    when it's from someone that name was talking to (or a session here), and
+    nobody else had posted under that name before it - anyone else may mean
+    another session by it. (Without ``seen`` that can't be told, and the turn
+    is to the name as posted.)"""
     p = parse_msg(m)
-    if p is not None and str(m.get("id")) in _own_earlier:
-        _own_peers.add("*" if _is_broadcast(p["to"]) else handle_key(p["to"]))
-    elif p is not None and handle_key(p["participant"]) in _own_names:
-        _others_names.add(handle_key(p["participant"]))
-    if p is None or not same_handle(me, _own_earlier_by[0]):
+    if p is None:
         return p
-    if str(m.get("id")) in _own_earlier:
-        p = {**p, "participant": me}
-    if _is_own_name(p["to"], me, p["participant"]):
-        p = {**p, "to": me}
+    mid, raw = str(m.get("id")), handle_key(p["participant"])
+    mine = same_handle(me, _own_earlier_by[0])
+    owner: Optional[str] = None  # the session that posted it under an earlier name
+    if mid in _own_earlier:
+        owner = _own_earlier_by[0]
+    else:
+        owner = next((cur for cur, ids, _ in _locals if mid in ids), None)
+    if seen is not None:
+        if owner is not None:
+            seen["peers"].setdefault(handle_key(owner), set()).add(
+                "*" if _is_broadcast(p["to"]) else handle_key(p["to"]))
+        elif _earlier_name_of(raw):
+            seen["others"].add(raw)
+    if owner is not None and (mine or not same_handle(owner, _own_earlier_by[0])):
+        p = {**p, "participant": me if same_handle(owner, _own_earlier_by[0]) else owner}
+    to = handle_key(p["to"]) if p["to"] is not None else None
+    if seen is None or to is None or to in seen["others"]:
+        return p
+    if to in _own_names:
+        whose, saved = _own_earlier_by[0], _own_peers
+        if not mine:
+            return p
+    else:
+        whose = next((cur for cur, _, names in _locals if to in names), None)
+        saved = set()
+        if whose is None:
+            return p
+    peers = saved | seen["peers"].get(handle_key(whose), set())
+    sender = handle_key(p["participant"])
+    if "*" in peers or sender in peers or sender in _here_now:
+        p = {**p, "to": me if mine and to in _own_names else whose}
     return p
 
 
@@ -544,7 +594,8 @@ def _room(client: DiscordClient, channel_id: str, me: Optional[str], scan: int =
     bare project handles readdressed to the role each meant (resolve_bare)."""
     raw = _history(client, channel_id, me, scan, upto)
     msgs = list(reversed([simplify_message(m) for m in raw]))  # chronological
-    parsed = resolve_bare([_parse_own(m, me) for m in msgs], me, _live_here,
+    seen = _own_reader()
+    parsed = resolve_bare([_parse_own(m, me, seen) for m in msgs], me, _live_here,
                           [m["timestamp"] for m in msgs])
     return msgs, parsed
 
@@ -1150,7 +1201,9 @@ def _held_still_open(client: DiscordClient, channel_id: str, me: str,
             return False
         p = _parse_own(m, me)
         if p is not None and p["status"] in TERMINAL_STATUSES and (
-                same_handle(p["participant"], sender) or same_handle(p["to"], me)):
+                same_handle(p["participant"], sender) or same_handle(p["to"], me)
+                or (handle_key(p["to"]) in _own_names  # (an earlier name of mine)
+                    and _means_me(client, channel_id, p["to"], me, m["id"]))):
             return False
     return True
 
@@ -1861,7 +1914,8 @@ def _would_wake(m: dict[str, Any], me: str, from_whom: Optional[str] = None) -> 
         return True
     if from_whom is not None and not name_matches(from_whom, p["participant"]):
         return False
-    return _targets(p["to"], me) or _could_mean(p["to"], me)  # _wakes checks the room
+    return (_targets(p["to"], me) or _could_mean(p["to"], me)  # _wakes checks the room
+            or (handle_key(p["to"]) in _own_names and same_handle(me, _own_earlier_by[0])))
 
 
 def _working_note(st: dict[str, Any], me: str) -> Optional[str]:

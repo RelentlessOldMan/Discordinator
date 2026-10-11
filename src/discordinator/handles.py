@@ -304,8 +304,14 @@ def retired_full_names() -> list[str]:
     """Full names sessions running on this machine went by before their
     machine was renamed - the name they go by now under the old machine name -
     that no running session goes by now."""
+    return [h for _, _, names in renamed_sessions() for h in names]
+
+
+def renamed_sessions() -> list[tuple[str, str, list[str]]]:
+    """(session key, the full name it goes by now, its retired full names -
+    see retired_full_names) for each session running on this machine."""
     now = time.time()
-    out: list[str] = []
+    out: list[tuple[str, str, list[str]]] = []
     data = _load(sessions_path())
     mine = session_key()
     held = {chat.handle_key(h) for h, _ in live_full_claims()}
@@ -319,14 +325,14 @@ def retired_full_names() -> list[str]:
             current = f"{_machine()}:{_current}"
         if current is None or (key != mine and chat.handle_key(current) not in held):
             continue  # (a session that isn't running now goes by no name)
-        for h in full if isinstance(full, list) else []:
+        out.append((key, current, [
+            h for h in (full if isinstance(full, list) else [])
             if (isinstance(h, str) and not chat.same_handle(h, current)
-                    and chat.same_handle(chat.local_name(h), chat.local_name(current))
-                    and chat.handle_key(h) not in held
-                    # every unnamed machine is DefaultMachineName: that name may
-                    # well be another machine's session now
-                    and not chat.same_handle(chat.machine_of(h), config.DEFAULT_MACHINE_NAME)):
-                out.append(h)
+                and chat.same_handle(chat.local_name(h), chat.local_name(current))
+                and chat.handle_key(h) not in held
+                # every unnamed machine is DefaultMachineName: that name may
+                # well be another machine's session now
+                and not chat.same_handle(chat.machine_of(h), config.DEFAULT_MACHINE_NAME))]))
     return out
 
 
@@ -489,9 +495,29 @@ def _claims_of(reg: dict[str, Any], handle: str) -> list[Any]:
     older version's (kept with no machine - a session on this machine too)."""
     here = chat.handle_key(_machine())
     own = reg.get(_key(handle))
+    if isinstance(own, dict) and chat.handle_key(_machine_in(own) or here) != here:
+        own = None  # (a claim kept under the machine's old name: it goes by the new one)
     return [own] + [e for e in reg.values() if e is not own and isinstance(e, dict)
                     and chat.same_handle(e.get("handle"), handle)
                     and chat.handle_key(_machine_in(e) or here) == here]
+
+
+def _rekeyed(reg: dict[str, Any]) -> dict[str, Any]:
+    """The registry with each claim under the full name its session goes by
+    now (see _machine_in) - one kept under the machine's name from before a
+    `config set-label` moves to the new one, so it never sits on a key another
+    session here (with that name as its own label) is about to claim."""
+    out: dict[str, Any] = {}
+    moved = []
+    for k, v in reg.items():
+        h = v.get("handle") if isinstance(v, dict) else None
+        if isinstance(h, str) and _machine_in(v) is not None and k != _key(h, _machine_in(v)):
+            moved.append((_key(h, _machine_in(v)), v))
+        else:
+            out[k] = v
+    for k, v in moved:
+        out.setdefault(k, v)
+    return out
 
 
 def _taken(reg: dict[str, Any], handle: str, me: int, now: float) -> bool:
@@ -520,7 +546,7 @@ def _own_label() -> bool:
     return bool(os.environ.get("DISCORDINATOR_LABEL"))
 
 
-_config_machine_cache: list[Any] = [None, None]  # (config file mtime, name)
+_config_machine_cache: list[Any] = [None, None]  # (config file mtime and size, name)
 
 
 def _config_machine() -> Optional[str]:
@@ -528,7 +554,8 @@ def _config_machine() -> Optional[str]:
     when the file changes); None if it can't be read."""
     try:
         path = config.config_path()
-        mtime = path.stat().st_mtime_ns if path.exists() else None
+        st = path.stat() if path.exists() else None
+        mtime = (st.st_mtime_ns, st.st_size) if st is not None else None  # (two saves in one tick)
         if _config_machine_cache[0] != mtime or _config_machine_cache[1] is None:
             _config_machine_cache[:] = [mtime, config.machine_name(config.load_file())]
         return _config_machine_cache[1]
@@ -616,6 +643,7 @@ def claim(desired: str) -> str:
                if isinstance(v, dict) and (
                    k != dropped and chat.handle_key(_recorded_machine(v) or here) == here
                    if v.get("pid") == me else _held_by_other(v, me, now))}
+        reg = _rekeyed(reg)
         reg[key] = {"handle": handle, "pid": me, "ts": now,
                     "since": _since[chat.handle_key(handle)],
                     "started": _my_start(), "session": session_key(), "machine": _machine(),

@@ -231,13 +231,15 @@ _my_posts: list[dict[str, Any]] = []
 
 
 def _remember_post(mode: str, channel_id: str, sent: list[dict[str, Any]],
-                   handle: Optional[str] = None) -> list[str]:
-    """Record a post (all its pieces) as this session's; returns its ids."""
+                   handle: Optional[str] = None, to: Optional[str] = None) -> list[str]:
+    """Record a post (all its pieces) as this session's - a chat turn with
+    whom it was to ("*" for everyone); returns its ids."""
     ids = [str(m.get("id")) for m in sent if isinstance(m, dict) and m.get("id") is not None]
     if not ids:
         return ids
     entries = [{"id": i, "channel": str(channel_id), "mode": mode, "post": ids[0],
-                **({"handle": handle} if handle else {})} for i in ids]
+                **({"handle": handle} if handle else {}),
+                **({"to": to or "*"} if mode == "chat" else {})} for i in ids]
     _my_posts.extend(entries)
     session = handles.session_key()
     if session is not None:
@@ -508,7 +510,7 @@ def delete_messages(message_ids: Optional[Union[str, list[str]]] = None,
         channel: with no ids, your latest post in this channel (default: anywhere).
     """
     cfg = config.load()
-    posts = _all_my_posts()
+    posts = [e for e in _all_my_posts() if not e.get("deleted")]
     if channel is not None:
         rooms = set()
         for resolve in (config.resolve_channel, config.resolve_chat_channel):
@@ -552,26 +554,28 @@ def delete_messages(message_ids: Optional[Union[str, list[str]]] = None,
                         if "(404)" not in str(e):  # already gone is fine
                             raise
             if mode == "chat":
-                since = [chat.parse_msg(simplify_message(m)) for m in
+                since = [simplify_message(m) for m in
                          client.read_messages(channel_id, limit=100, after=max(ids, key=int))]
-                # this name under the machine's earlier name is still this
-                # session, not a reader (not one on an unnamed machine, which
-                # may be another machine's session now - as in _earlier_names)
-                me = poster[(mode, channel_id)] or config.full_name(cfg, handles._current or "")
-                local = chat.local_name(me)
-                mine = [me, config.full_name(cfg, local)] + [
-                    h for h in handles.full_names_used()
-                    if chat.same_handle(chat.local_name(h), local)
-                    and not chat.same_handle(chat.machine_of(h), config.DEFAULT_MACHINE_NAME)]
-                others = sorted({p["participant"] for p in since if p is not None
-                                 and not any(chat.same_handle(p["participant"], h)
-                                             for h in mine)})
+                # Its own posts are known by id - under this name on the
+                # machine's earlier name too - never by name alone: that may
+                # be another session's now (another machine given that name).
+                local = chat.local_name(poster[(mode, channel_id)] or "")
+                own_ids = {str(e.get("id")) for e in _all_my_posts()
+                           if not e.get("handle")
+                           or chat.same_handle(chat.local_name(e["handle"]), local)}
+                if handles._current:  # (another session here, renamed since, as it is now)
+                    _own_earlier(config.full_name(cfg, handles._current))
+                others = sorted({p["participant"] for p in (
+                    chat._parse_own(m, None) for m in since if str(m.get("id")) not in own_ids)
+                    if p is not None})
                 notes.append(
                     f"{', '.join(others)} posted since - they may have read it already; "
                     "post a correction as your next turn." if others else
                     "Nobody had replied to it - post the corrected version now.")
     gone = {str(e["id"]) for e in doomed}
-    _my_posts[:] = [e for e in _my_posts if str(e.get("id")) not in gone]
+    # (kept, marked deleted: whom it went to under an earlier name still counts)
+    _my_posts[:] = [{**e, "deleted": True} if str(e.get("id")) in gone else e
+                    for e in _my_posts]
     session = handles.session_key()
     if session is not None:
         config.forget_posts(session, gone)
@@ -711,7 +715,20 @@ def _chatter(chatter: Optional[str], cfg: dict[str, Any],
             pass  # at worst it reads a few messages twice
     full = config.full_name(cfg, me)
     _carry_on(full)
+    # (for `watch`: chat_begin logs its own; a later name - a role, a machine
+    # renamed, a -2 - is logged as it happens)
+    prev, _named[0] = _named[0], full
+    if not fresh and (note and prev is None or prev is not None
+                      and not chat.same_handle(prev, full)):
+        try:
+            events.record("renamed", handle=full, room=config.resolve_chat_channel(cfg, channel),
+                          note=((f"was {prev}. " if prev else "") + (note or ""))[:200])
+        except Exception:  # noqa: BLE001 - the log never stops a chat call
+            pass
     return full, note
+
+
+_named: list[Optional[str]] = [None]  # the full name this server's last chat call went by
 
 
 def _carry_on(full: str) -> None:
@@ -737,19 +754,33 @@ def _carry_slots(full: str) -> None:
 def _own_earlier(full: str) -> None:
     """Tell chat which of this session's posts carry an earlier name of it -
     this name under the machine's old name - so it still sees them as its own,
-    and which of those names turns to are still for it: not one a running
-    session here goes by (a project's own DISCORDINATOR_LABEL), nor one on an
-    unnamed machine (another unnamed machine's session may go by it)."""
+    which of those names turns to are still for it (not one a running session
+    here goes by - a project's own DISCORDINATOR_LABEL - nor one on an unnamed
+    machine: another unnamed machine's session may go by it), and whom it
+    talked to under them. And the same for the other sessions running here,
+    renamed with the machine."""
     local = chat.handle_key(chat.local_name(full))
     held = {chat.handle_key(h) for h, _ in handles.live_full_claims()}
-    chat.set_own_earlier(full, (
-        e.get("id") for e in _all_my_posts()
-        if e.get("mode") == "chat" and e.get("handle") and not chat.same_handle(e["handle"], full)
-        and chat.handle_key(chat.local_name(e["handle"])) == local), (
+    earlier = [e for e in _all_my_posts()
+               if e.get("mode") == "chat" and e.get("handle")
+               and not chat.same_handle(e["handle"], full)
+               and chat.handle_key(chat.local_name(e["handle"])) == local]
+    chat.set_own_earlier(full, (e.get("id") for e in earlier), (
         h for h in handles.full_names_used()
         if not chat.same_handle(h, full) and chat.machine_of(h) is not None
         and chat.handle_key(chat.local_name(h)) == local and chat.handle_key(h) not in held
-        and not chat.same_handle(chat.machine_of(h), config.DEFAULT_MACHINE_NAME)))
+        and not chat.same_handle(chat.machine_of(h), config.DEFAULT_MACHINE_NAME)), (
+        e["to"] for e in earlier if isinstance(e.get("to"), str)))
+    me = handles.session_key()
+    others = []
+    for key, current, names in handles.renamed_sessions():
+        if key == me or chat.same_handle(current, full) or not names:
+            continue
+        keys = {chat.handle_key(h) for h in names}
+        others.append((current, [e.get("id") for e in config.my_posts(key)
+                                 if e.get("mode") == "chat"
+                                 and chat.handle_key(e.get("handle")) in keys], names))
+    chat.set_local_earlier(others, held)
 
 
 def _unnamed(note: Optional[str], me: Optional[str]) -> Optional[str]:
@@ -852,13 +883,17 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any],
     last_to: dict[str, tuple[str, str]] = {}  # sender -> (whom its latest turn was to, its id)
     newest: dict[str, str] = {}  # name -> id of the newest turn to it
     msgs, parsed = chat._room(client, channel_id, me)
+    at = {str(m["id"]): i for i, m in enumerate(msgs)}
+    told = _told_now()
     answered: set[str] = set()
-    for m, p in zip(msgs, parsed):
+    for i, (m, p) in enumerate(zip(msgs, parsed)):
         if not p or p["status"] not in chat.YIELD_STATUSES or chat._is_broadcast(p["to"]):
             continue
         if chat.same_handle(p["participant"], me) and p["to"]:
             owed = last_to.get(chat.handle_key(p["to"]))
-            if owed is not None and _told.get(owed[0]) == owed[1]:
+            t = told.get(owed[0]) if owed is not None else None
+            if (isinstance(t, dict) and t.get("turn") == owed[1]
+                    and i > at.get(str(t.get("after")), -1)):  # (a reply sent after it was told)
                 answered.add(owed[0])
         last_to[chat.handle_key(p["participant"])] = (chat.handle_key(p["to"]), str(m["id"]))
         newest[chat.handle_key(p["to"])] = str(m["id"])
@@ -885,20 +920,49 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any],
             continue
         if k in looks or (base and k.startswith(chat.handle_key(base) + "/")):
             found[chat.handle_key(p["to"])] = p["to"]
-    out = [h for h in found.values()
-           # (answering is the way only for an older or renamed name - see _lost_note)
-           if not (chat.handle_key(h) in answered
-                   and (chat.machine_of(h) is None or _here(cfg, h) is None))
-           and chat.compute_state(client, channel_id, h).get("your_turn")]
-    for h in out if tell else ():  # (the caller shows them: see _told)
-        _told[chat.handle_key(h)] = newest.get(chat.handle_key(h), "")
+    out = []
+    for h in found.values():
+        # (answering is the way only for an older or renamed name - see _lost_note)
+        if chat.handle_key(h) in answered and (chat.machine_of(h) is None
+                                               or _here(cfg, h) is None):
+            continue
+        st = chat.compute_state(client, channel_id, h)
+        if st.get("your_turn"):
+            out.append(h)
+            owed = st.get("_owed_turn") or {}
+            _lost_turn[chat.handle_key(h)] = (owed.get("from"), st.get("_owed_text") or "")
+    if tell and out:  # (the caller shows them: see _told)
+        _note_told({chat.handle_key(h): {"turn": newest.get(chat.handle_key(h), ""),
+                                         "after": str(msgs[-1]["id"]) if msgs else ""}
+                    for h in out})
     return out
 
 
+# The turn owed to each name _lost_turns last found: (its sender, its text).
+_lost_turn: dict[str, tuple[Optional[str], str]] = {}
+
+
 # The turn (its id) this session was last told about under each name that
-# looks like its own (_lost_turns) - so its next reply to that turn's sender
-# is taken as its answer.
-_told: dict[str, str] = {}
+# looks like its own (_lost_turns), and the newest message in the room then -
+# so its next reply to that turn's sender after that is taken as its answer.
+# Also kept under the session, so a restarted server knows it was answered.
+_told: dict[str, dict[str, str]] = {}
+
+
+def _told_now() -> dict[str, Any]:
+    session = handles.session_key()
+    saved = config.told(session) if session is not None else {}
+    return {**saved, **_told}
+
+
+def _note_told(entries: dict[str, dict[str, str]]) -> None:
+    _told.update(entries)
+    session = handles.session_key()
+    if session is not None:
+        try:
+            config.note_told(session, entries)
+        except (OSError, config.LockTimeout):
+            pass  # this server still remembers them
 
 
 def _earlier_names(channel_id: str, me: str) -> list[str]:
@@ -927,16 +991,19 @@ def _lost_note(lost: list[str], cfg: dict[str, Any]) -> str:
     for h in lost:
         local = chat.local_name(h)
         k = chat.handle_key(local)
+        sender, text = _lost_turn.get(chat.handle_key(h), (None, ""))
+        text = text if len(text) <= 300 else text[:300] + "..."
+        answer = (f"'{h}' (from {sender}: \"{text}\" - answer it with "
+                  f"chat_say(to=\"{sender}\"))" if sender else
+                  f"'{h}' (answer its sender with chat_say(to=...))")
         if chat.machine_of(h) is None or _here(cfg, h) is None:  # an older or renamed name
-            how.append(f"'{h}' (read it with read_messages and answer its sender with "
-                       "chat_say(to=...))")
+            how.append(answer)
         elif base and k.startswith(chat.handle_key(base) + "/"):
             how.append(f"'{h}' (chat_begin(chatter=\"{local[len(base) + 1:]}\") takes it back)")
         elif base and k == chat.handle_key(base):
             how.append(f"'{h}' (chat_begin(chatter=\"{base}\") takes it back)")
         else:
-            how.append(f"'{h}' (read it with read_messages and answer its sender with "
-                       "chat_say(to=...))")
+            how.append(answer)
     return ("A turn in this room is owed to " + ", ".join(how) + ", and no running "
             "session holds that name. If that was you (before a restart, a rename or "
             "an update), do as shown - otherwise you won't see the turn.")
@@ -1137,9 +1204,9 @@ def chat_say(
                 sent = chat.send_chat(client, channel_id, me, status, text, to=target,
                                       files=file_list)
             except Exception as e:
-                _remember_post("chat", channel_id, getattr(e, "chat_sent", []), me)
+                _remember_post("chat", channel_id, getattr(e, "chat_sent", []), me, target)
                 raise _send_failed(e, status) from e
-            message_ids = _remember_post("chat", channel_id, sent, me)
+            message_ids = _remember_post("chat", channel_id, sent, me, target)
         finally:
             lock.__exit__(None, None, None)
         try:
@@ -1227,6 +1294,10 @@ def _check_turn(client: Client, channel_id: str, me: str, status: str,
     note = None
     if target is None:
         back = chat.get_reply_to(channel_id, me)
+        # (a session here that has been renamed with the machine since: by
+        # the name it goes by now)
+        back = next((cur for _, cur, names in handles.renamed_sessions()
+                     if any(chat.same_handle(back, h) for h in names)), back)
         if back:
             target = back
             note = (f"Addressed to {back} (who handed you the turn). Pass to=... to "
@@ -1334,6 +1405,10 @@ def _expand_bare(client: Client, channel_id: str, me: str,
             retired = {chat.handle_key(h) for h in handles.retired_full_names()}
             found = [h for h in found if chat.handle_key(h) not in retired] or found
         if len(found) > 1:
+            # (the one that posted last first - an example, most likely the one meant)
+            order = [p["participant"] for p in history if p]
+            found.sort(key=lambda h: next((i for i, n in enumerate(order)
+                                           if chat.same_handle(n, h)), len(order)))
             raise ChatSendError(
                 f"'{target}' could be {' or '.join(found)} - say which, e.g. "
                 f"{arg}=\"{found[0]}\". {done}")
@@ -1523,8 +1598,7 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
         sessions actually blocked in chat_await.
       - suggest_next: the fair next addressee in a multiparty room (an
         outstanding request, else the most-starved non-speaker), or null
-      - your_turn (if `chatter` is given or this project has a fixed handle):
-        True if the pending turn is owed to you — it's addressed to you (or broadcast) and isn't your own.
+      - your_turn: True if the pending turn is owed to you — it's addressed to you (or broadcast) and isn't your own.
 
     If your_turn is True: call `chat_begin` (it repositions you to receive the
     pending turn) then `chat_await`, or `chat_say` if already in the session.
@@ -1551,9 +1625,10 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
     public["channel"] = channel_id
     if role is not None:
         public["chatter"] = me
-        public["note"] = (f"A turn here is owed to '{me}', which no running session "
-                          "holds - you, before a restart. Your next chat call takes "
-                          "that name back.")
+        public["note"] = ((f"A turn here is owed to '{me}'" if st.get("your_turn") else
+                           f"'{me}' is waiting for the answer to its turn here")
+                          + ", and no running session holds that name - you, before a "
+                          "restart. Your next chat call takes that name back.")
     elif lost:
         public["note"] = _lost_note(lost, cfg)
     note = _unnamed(public.get("note"), me)

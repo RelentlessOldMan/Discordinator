@@ -381,7 +381,7 @@ def test_turn_owed_to_the_name_before_a_project_handle() -> None:
     try:
         b = mcp.chat_begin(chatter="convex", channel=room)
         check(b["chatter"] == "M:TDTS_Convex/convex", "the session keeps its new name")
-        check("'convex'" in b["note"] and "read_messages" in b["note"],
+        check("'convex' (from carver: \"Q?\" - answer it with chat_say(to=\"carver\"))" in b["note"],
               "chat_begin says a turn is owed to its old name and how to answer it")
         st = mcp.chat_status(channel=room)
         check("'convex'" in st.get("note", ""), "chat_status says so too")
@@ -636,7 +636,8 @@ def test_turn_owed_to_the_placeholder_before_a_name() -> None:
         os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CodeCarver"
         b = mcp.chat_begin(channel=room)
         check(b["chatter"] == "M:CodeCarver", "now it has the project's name")
-        check("'M:DefaultChatName'" in b.get("note", "") and "read_messages" in b["note"],
+        check("'M:DefaultChatName' (from Work:Peer: \"here's the plan\"" in b.get("note", "")
+              and 'chat_say(to="Work:Peer")' in b["note"],
               f"and is told a turn is owed to its old name, and how to answer: {b.get('note')}")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE", None)

@@ -795,8 +795,13 @@ def cmd_config(args: argparse.Namespace) -> int:
               "This is how one session relays over Discord while chatting locally "
               "with a sibling session.")
     elif action == "set-label":
+        before = config.load_file().get("machine_label")
         cfg["machine_label"] = args.label
         config.save(cfg)
+        try:
+            config.carry_label(before, args.label)  # (read positions keep up)
+        except (OSError, config.LockTimeout):
+            pass  # at worst a few messages are read twice
         print(f"machine label set to '{args.label}'")
     elif action == "set-ack":
         on = args.state.strip().lower() in ("on", "true", "1", "yes")

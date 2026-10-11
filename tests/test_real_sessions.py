@@ -341,10 +341,90 @@ def test_restart_gap_doesnt_hand_the_name_to_a_newcomer() -> None:
     run(go(True))
 
 
+def _set_label(name: str) -> None:
+    """`config set-label` (the sessions below go by the config file's name)."""
+    path = Path(os.environ["DISCORDINATOR_CONFIG"])
+    cfg = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    cfg["machine_label"] = name
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+
+
+def _unlabelled(session_id: str, handle: str) -> Session:
+    s = Session(session_id, handle=handle)
+    s.env.pop("DISCORDINATOR_LABEL", None)
+    return s
+
+
+def test_two_sessions_here_renamed_together() -> None:
+    print("two sessions on a machine renamed mid-chat go on talking:")
+    room = "renamed-together"
+
+    async def go() -> None:
+        _set_label("Home")
+        a = await _unlabelled("sess-rt-a", "Carver").start()
+        b = await _unlabelled("sess-rt-b", "Other").start()
+        for s in (a, b):
+            await s.call("chat_begin", channel=room)
+        await a.call("chat_say", text="q1", channel=room, to="Other", wait=False)
+        await b.call("chat_await", channel=room, timeout=5, poll=0.1)
+        await b.call("chat_say", text="a1", channel=room, wait=False)
+        await a.call("chat_await", channel=room, timeout=5, poll=0.1)
+        await a.call("chat_say", text="q2", channel=room, wait=False)
+        _set_label("Harbinger")
+        got = await b.call("chat_await", channel=room, timeout=5, poll=0.1)
+        check(got.get("text") == "q2", f"B gets the turn sent to its old name: {str(got)[:80]}")
+        await b.call("chat_say", text="a2", channel=room, wait=False)
+        last = LocalClient().read_messages(room, limit=1)[0]["content"]
+        check(last.startswith("[Harbinger:Other>Harbinger:Carver|over]"),
+              f"its reply goes to A's name now: {last[:45]}")
+        got = await a.call("chat_await", channel=room, timeout=5, poll=0.1)
+        check(got.get("text") == "a2", f"and reaches A: {str(got)[:80]}")
+        st = await a.call("chat_status", channel=room)
+        check(not st.get("multiparty") and st.get("floor") == "Harbinger:Carver",
+              f"still two of them, by the names they go by now: {st.get('participants')}")
+        await b.stop()
+        await a.stop()
+    try:
+        run(go())
+    finally:
+        _set_label("")
+
+
+def test_deleted_old_post_still_counts_after_a_restart() -> None:
+    print("a deleted post under the old name still says whom it talked to, after a restart:")
+    room = "deleted-old-post"
+
+    async def go() -> None:
+        _set_label("Home")
+        c = LocalClient()
+        a = await _unlabelled("sess-do-a", "Deleter").start()
+        try:
+            await a.call("chat_begin", channel=room)
+            chat.send_chat(c, room, "Work:Peer", "over", "q1", to="Home:Deleter")
+            await a.call("chat_await", channel=room, timeout=5, poll=0.1)
+            first = (await a.call("chat_say", text="a1", channel=room, wait=False))["message_ids"]
+            _set_label("Harbinger")
+            await a.call("delete_messages", message_ids=first, channel=room)
+        finally:
+            await a.stop()
+        a = await _unlabelled("sess-do-a", "Deleter").start()
+        try:
+            chat.send_chat(c, room, "Work:Peer", "over", "q2", to="Home:Deleter")
+            got = await a.call("chat_await", channel=room, timeout=5, poll=0.1)
+            check(got.get("text") == "q2",
+                  f"its peer's turn to the old name reaches it: {str(got)[:80]}")
+        finally:
+            await a.stop()
+    try:
+        run(go())
+    finally:
+        _set_label("")
+
+
 def test_session_events_are_logged() -> None:
     print("session events land in the machine's event log:")
     seen = [e["kind"] for e in events.read(0)[0]]
-    for kind in ("server_start", "joined", "error", "server_exit"):
+    for kind in ("server_start", "joined", "error", "server_exit", "renamed"):
         check(kind in seen, f"{kind} logged")
 
 
@@ -359,6 +439,8 @@ def main() -> int:
     test_abandoned_conversation_hears_a_new_opener()
     test_launcher_restart_keeps_the_name()
     test_restart_gap_doesnt_hand_the_name_to_a_newcomer()
+    test_two_sessions_here_renamed_together()
+    test_deleted_old_post_still_counts_after_a_restart()
     test_session_events_are_logged()
     print(f"\nALL {_passed} REAL-SESSION CHECKS PASSED")
     return 0
