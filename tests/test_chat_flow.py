@@ -31,6 +31,8 @@ os.environ["DISCORDINATOR_CHAT_TRANSPORT"] = "local"
 for _k in ("DISCORD_BOT_TOKEN", "DISCORDINATOR_CHAT_HANDLE", "DISCORDINATOR_CHAT_CHANNEL"):
     os.environ.pop(_k, None)
 
+os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full name
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
@@ -248,12 +250,12 @@ def test_non_holder_working_3way() -> None:
     b = mcp.chat_await(chatter="B", channel=r, timeout=0.2, poll=0.02, nudge_after=0)
     check("C is working" not in (b.get("note") or "") and b["progress"] == [],
           "B isn't told C holds the floor")
-    st = chat.compute_state(LocalClient("B"), r, "B")
-    check(st["floor"] == "A" and st["progress"] == [], "state: floor A, no turn in progress")
+    st = chat.compute_state(LocalClient("B"), r, "M:B")
+    check(st["floor"] == "M:A" and st["progress"] == [], "state: floor A, no turn in progress")
     mcp.chat_await(chatter="A", channel=r, timeout=1, poll=0.02, nudge_after=0)
     mcp.chat_say(text="on it", chatter="A", channel=r, status="working", wait=False)
-    st = chat.compute_state(LocalClient("B"), r, "B")
-    check([x["from"] for x in st["progress"]] == ["A"], "the holder's `working` does count")
+    st = chat.compute_state(LocalClient("B"), r, "M:B")
+    check([x["from"] for x in st["progress"]] == ["M:A"], "the holder's `working` does count")
 
 
 def test_ask_doesnt_hide_unfinished_turn() -> None:
@@ -282,12 +284,12 @@ def test_long_turn_recovered_whole() -> None:
     mcp.chat_say(text=LONG, chatter="A", channel=r, wait=False)
     mcp.chat_begin(chatter="B", channel=r)  # B (re)joins: the turn is owed
     got = mcp.chat_await(chatter="B", channel=r, timeout=2, poll=0.02, nudge_after=0)
-    check(got["from"] == "A" and "PART1" in got["text"] and "PART2-END" in got["text"],
+    check(got["from"] == "M:A" and "PART1" in got["text"] and "PART2-END" in got["text"],
           "chat_begin recovery delivers every piece")
     again = mcp.chat_await(chatter="B", channel=r, timeout=2, poll=0.02, nudge_after=0)
     check(again.get("already_received") and "PART1" in again["text"]
           and "PART2-END" in again["text"], "already_received hands back the whole turn")
-    st = chat.compute_state(LocalClient("B"), r, "B")
+    st = chat.compute_state(LocalClient("B"), r, "M:B")
     check(st["_owed_text"].startswith("PART1"), "state's owed text is the whole turn")
 
 
@@ -311,15 +313,23 @@ def test_unknown_to_warns_now() -> None:
         mcp.chat_begin(chatter=h, channel=r)
     mcp.chat_say(text="hi", chatter="Beta", channel=r, wait=False)
     mcp.chat_await(chatter="Alpha", channel=r, timeout=1, poll=0.02, nudge_after=0)
+    before = len(LocalClient("p").read_messages(r, limit=50))
+    try:
+        mcp.chat_say(text="hello", chatter="Alpha", channel=r, to="Bet")
+        check(False, "a short name nobody has should be refused")
+    except mcp.ChatSendError as e:
+        check("did you mean 'M:Beta'" in str(e) and "Nothing was posted" in str(e),
+              f"refused, suggesting the close match: {str(e)[:70]}")
+    check(len(LocalClient("p").read_messages(r, limit=50)) == before, "nothing posted")
     t0 = time.monotonic()
-    out = mcp.chat_say(text="hello", chatter="Alpha", channel=r, to="Bet")
-    check(time.monotonic() - t0 < 5 and "reply" not in out, "doesn't wait for a reply")
-    check("did you mean 'Beta'" in out["note"] and "Check `to`" in out["next"],
-          "suggests the close match and says what to do")
+    out = mcp.chat_say(text="hello", chatter="Alpha", channel=r, to="M:Bet")
+    check(time.monotonic() - t0 < 5 and "reply" not in out, "a full name is sent, without waiting")
+    check("did you mean 'M:Beta'" in out["note"] and "Check `to`" in out["next"],
+          "with a warning: suggests the close match and says what to do")
     ok = mcp.chat_say(text="hello", chatter="Alpha", channel=r, to="Beta", wait=False)
     check("note" not in ok, "a known peer gets no warning")
-    live = mcp.chat_say(text="x", chatter="Alpha", channel=r, to="Gamma", wait=False)
-    check("note" in live, "an unknown handle warns")
+    live = mcp.chat_say(text="x", chatter="Alpha", channel=r, to="M:Gamma", wait=False)
+    check("note" in live, "an unknown full name warns")
     from discordinator import handles
     handles.resolve("Gamma", {})  # Gamma is now a live session on this machine
     quiet = mcp.chat_say(text="x", chatter="Alpha", channel=r, to="Gamma", wait=False)
@@ -360,7 +370,7 @@ def test_interjection_mid_split_turn() -> None:
     check(first["from"] == "human", "the remark is delivered first")
     second = mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
     check(second["text"] == "PART-ONE\nPART-TWO", f"then the whole turn: {second['text']!r}")
-    st = chat.config.load_state()["chat"][r]["a"]
+    st = chat.config.load_state()["chat"][r]["m:a"]
     check("partial" not in st, "nothing left buffered once the turn completed")
 
 
@@ -373,9 +383,9 @@ def test_peer_turn_mid_split_turn_3way() -> None:
     mcp.chat_say(text="for A", chatter="B", channel=r, to="A", wait=False)
     mcp.chat_say(text="C-TWO", chatter="C", channel=r, to="A", wait=False)
     got1 = mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
-    check(got1["from"] == "B", "B's turn wakes A first")
+    check(got1["from"] == "M:B", "B's turn wakes A first")
     got2 = mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
-    check(got2["from"] == "C" and got2["text"] == "C-ONE\nC-TWO", f"C's turn whole: {got2['text']!r}")
+    check(got2["from"] == "M:C" and got2["text"] == "C-ONE\nC-TWO", f"C's turn whole: {got2['text']!r}")
 
 
 def test_begin_mid_split_turn() -> None:
@@ -421,14 +431,14 @@ def test_typo_leaves_no_phantom() -> None:
         mcp.chat_begin(chatter=h, channel=r)
     mcp.chat_say(text="hi", chatter="B", channel=r, wait=False)
     mcp.chat_await(chatter="A", channel=r, timeout=1, poll=0.02, nudge_after=0)
-    mcp.chat_say(text="q", chatter="A", channel=r, to="Bobb", wait=False)
+    mcp.chat_say(text="q", chatter="A", channel=r, to="M:Bobb", wait=False)
     mcp.chat_say(text="q", chatter="A", channel=r, to="B", wait=False)
     mcp.chat_await(chatter="B", channel=r, timeout=1, poll=0.02, nudge_after=0)
     mcp.chat_say(text="answer", chatter="B", channel=r, wait=False)
-    st = chat.compute_state(LocalClient("A"), r, "A")
-    check(st["participants"] == ["B", "A"] or sorted(st["participants"]) == ["A", "B"],
+    st = chat.compute_state(LocalClient("A"), r, "M:A")
+    check(sorted(st["participants"]) == ["M:A", "M:B"],
           f"just A and B: {st['participants']}")
-    check(not st["multiparty"] and st["floor"] == "A", "still a 2-party chat; A's turn")
+    check(not st["multiparty"] and st["floor"] == "M:A", "still a 2-party chat; A's turn")
 
 
 def test_interjection_only_wakes_holder() -> None:
@@ -441,11 +451,11 @@ def test_interjection_only_wakes_holder() -> None:
     mcp.chat_say(text="over to you A", chatter="B", channel=r, wait=False)
     LocalClient("human").post_human(r, "fyi: prefer small commits")
     b = mcp.chat_await(chatter="B", channel=r, timeout=2, poll=0.02, nudge_after=0)
-    check(b["from"] == "human" and b["your_turn"] is False and b["floor"] == "A",
+    check(b["from"] == "human" and b["your_turn"] is False and b["floor"] == "M:A",
           "B (waiting) sees the remark but isn't given the turn")
     check("not your turn" in b["next"] and "chat_await" in b["next"], "B is told to keep waiting")
     a = mcp.chat_await(chatter="A", channel=r, timeout=2, poll=0.02, nudge_after=0)
-    check(a["from"] in ("B", "human") and a["your_turn"], "A (owed the turn) still has it")
+    check(a["from"] in ("M:B", "human") and a["your_turn"], "A (owed the turn) still has it")
 
 
 def test_error_after_post_is_not_a_failed_send() -> None:
@@ -497,9 +507,9 @@ def test_shared_room_two_chats() -> None:
     mcp.chat_say(text="Beta, what's the schema?", chatter="Alpha", channel=r, to="Beta", wait=False)
     mcp.chat_await(chatter="Beta", channel=r, timeout=1, poll=0.02, nudge_after=0)
     reply = mcp.chat_say(text="it's in schema.sql", chatter="Beta", channel=r, wait=False)
-    check(reply["to"] == "Alpha", "an unaddressed reply goes back to who handed over the turn")
+    check(reply["to"] == "M:Alpha", "an unaddressed reply goes back to who handed over the turn")
     last = LocalClient("x").read_messages(r, limit=1)[0]["content"]
-    check(last.startswith("[Beta>Alpha|over]"), f"...and is addressed on the wire: {last[:20]}")
+    check(last.startswith("[M:Beta>M:Alpha|over]"), f"...and is addressed on the wire: {last[:20]}")
     mcp.chat_await(chatter="Alpha", channel=r, timeout=1, poll=0.02, nudge_after=0)
     mcp.chat_say(text="thanks - and table Y?", chatter="Alpha", channel=r, wait=False)
     e = mcp.chat_begin(chatter="Echo", channel=r)
@@ -507,8 +517,8 @@ def test_shared_room_two_chats() -> None:
           "a newcomer isn't handed their turn, and is told to address its own")
     mcp.chat_say(text="anyone free for PR 12?", chatter="Echo", channel=r, wait=False)
     for h in ("Alpha", "Beta"):
-        st = chat.compute_state(LocalClient("x"), r, h)
-        check(st["floor"] == "Beta" and "Echo" not in st["participants"],
+        st = chat.compute_state(LocalClient("x"), r, "M:" + h)
+        check(st["floor"] == "M:Beta" and "M:Echo" not in st["participants"],
               f"an unaddressed opener from a newcomer stays out of {h}'s chat")
     mcp.chat_begin(chatter="Foxtrot", channel=r)
     mcp.chat_say(text="let's review PR 12", chatter="Echo", channel=r, to="Foxtrot", wait=False)
@@ -517,9 +527,9 @@ def test_shared_room_two_chats() -> None:
     st = mcp.chat_status(chatter="Beta", channel=r)
     check(st["your_turn"], "Beta is still owed Alpha's question, though Echo spoke since")
     f = mcp.chat_await(chatter="Foxtrot", channel=r, timeout=1, poll=0.02, nudge_after=0)
-    check(f["from"] == "Echo" and f["your_turn"], "Foxtrot gets Echo's opener")
+    check(f["from"] == "M:Echo" and f["your_turn"], "Foxtrot gets Echo's opener")
     b = mcp.chat_await(chatter="Beta", channel=r, timeout=1, poll=0.02, nudge_after=0)
-    check(b["from"] == "Alpha" and "table Y" in b["text"], "and Beta gets Alpha's")
+    check(b["from"] == "M:Alpha" and "table Y" in b["text"], "and Beta gets Alpha's")
 
 
 def test_say_without_begin_ignores_old_chat() -> None:
@@ -577,7 +587,7 @@ def test_plain_reply_goes_to_asker() -> None:
     b = mcp.chat_await(chatter="B", channel=r, timeout=0.3, poll=0.02, nudge_after=0)
     check(b["timed_out"], "B isn't handed its own reply")
     a = mcp.chat_await(chatter="A", channel=r, timeout=1, poll=0.02, nudge_after=0)
-    check(a["from"] == "B" and a["your_turn"] and "8080" in a["text"],
+    check(a["from"] == "M:B" and a["your_turn"] and "8080" in a["text"],
           "A gets it as B's turn (sent as a chat turn, since B owed A a reply)")
     check(not mcp.chat_status(chatter="B", channel=r)["your_turn"], "and B's state agrees")
     r2 = "plain-then-say"
@@ -607,7 +617,7 @@ def test_first_reply_wins() -> None:
         check("A posted something you haven't read" in str(exc) and "chat_await" in str(exc),
               "B is told to read A's reply first; nothing posted")
     got = mcp.chat_await(chatter="B", channel=r, timeout=1, poll=0.02, nudge_after=0)
-    check(got["from"] == "A" and got["your_turn"], "B then gets A's turn and answers that")
+    check(got["from"] == "M:A" and got["your_turn"], "B then gets A's turn and answers that")
     mcp.chat_say(text="ok", chatter="B", channel=r, wait=False)
 
 
@@ -644,8 +654,8 @@ def test_wrap_says_confirm_with_end() -> None:
     print("a peer's wrap comes with a next that says how to confirm it:")
     c = LocalClient()
     room = "wrapn"
-    chat.reset(room, "B", _latest(c, room), 20)
-    chat.send_chat(c, room, "A", "wrap", "all done?", to="B")
+    chat.reset(room, "M:B", _latest(c, room), 20)
+    chat.send_chat(c, room, "M:A", "wrap", "all done?", to="M:B")
     r = mcp.chat_await(chatter="B", channel=room, timeout=2, poll=0.05)
     check(r["status"] == "wrap" and "status='end'" in r["next"], f"next: {r['next'][:50]}")
 

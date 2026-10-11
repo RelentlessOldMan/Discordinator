@@ -158,7 +158,7 @@ def test_delete_own_messages() -> None:
         mid = mcp.send_message("second", channel=r).split("ids: ")[1].rstrip(").")
         mcp._my_posts.clear()  # the session's server restarted
         res = mcp.delete_messages(message_ids=[mid])
-        check(res["deleted"] == 1 and "[me/DefaultChatName] first" in _contents(r) and "[me/DefaultChatName] second" not in _contents(r),
+        check(res["deleted"] == 1 and "[me:DefaultChatName] first" in _contents(r) and "[me:DefaultChatName] second" not in _contents(r),
               "after a restart it can still delete a post it names")
         try:
             mcp.delete_messages(message_ids=[mid])
@@ -312,14 +312,14 @@ def test_everything_has_a_name() -> None:
     print("relay tags: machine, then project and role - every combination named:")
     from discordinator import handles
     cases = [  # (machine, project, role) -> tag; the table in AGENTS.md
-        ("Home", "CodeCarver", "ui", "Home/CodeCarver/ui"),
-        ("Home", "CodeCarver", None, "Home/CodeCarver"),
-        ("Home", None, "ui", "Home/ui"),
-        ("Home", None, None, "Home/DefaultChatName"),
-        (None, "CodeCarver", "ui", "DefaultMachineName/CodeCarver/ui"),
-        (None, "CodeCarver", None, "DefaultMachineName/CodeCarver"),
-        (None, None, "ui", "DefaultMachineName/ui"),
-        (None, None, None, "DefaultMachineName/DefaultChatName"),
+        ("Home", "CodeCarver", "ui", "Home:CodeCarver/ui"),
+        ("Home", "CodeCarver", None, "Home:CodeCarver"),
+        ("Home", None, "ui", "Home:ui"),
+        ("Home", None, None, "Home:DefaultChatName"),
+        (None, "CodeCarver", "ui", "DefaultMachineName:CodeCarver/ui"),
+        (None, "CodeCarver", None, "DefaultMachineName:CodeCarver"),
+        (None, None, "ui", "DefaultMachineName:ui"),
+        (None, None, None, "DefaultMachineName:DefaultChatName"),
     ]
     saved = os.environ.pop("DISCORDINATOR_LABEL")
     try:
@@ -342,11 +342,11 @@ def test_everything_has_a_name() -> None:
         os.environ["DISCORDINATOR_LABEL"] = "Home"
         os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CodeCarver"
         _run(["send", "--channel", "names-cli", "from the CLI"])
-        check(_contents("names-cli") == ["[Home/CodeCarver] from the CLI"],
+        check(_contents("names-cli") == ["[Home:CodeCarver] from the CLI"],
               "the CLI tags machine/project too")
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")  # a shell never sees .mcp.json
         _run(["send", "--channel", "names-shell", "from a shell"])
-        check(_contents("names-shell") == ["[Home/DefaultChatName] from a shell"],
+        check(_contents("names-shell") == ["[Home:DefaultChatName] from a shell"],
               "from a plain shell: DefaultChatName, as AGENTS.md says")
     finally:
         os.environ["DISCORDINATOR_LABEL"] = saved
@@ -388,11 +388,11 @@ def test_cli_relay() -> None:
     r = "relay-cli"
     LocalClient("x").send_message(r, "from them", label="them")
     LocalClient("x").send_message(r, "from me", label="me")
-    LocalClient("x").send_message(r, "from a session here", label="me/CodeCarver")
-    LocalClient("x").send_message(r, "from meadow", label="meadow/CodeCarver")
+    LocalClient("x").send_message(r, "from a session here", label="me:CodeCarver")
+    LocalClient("x").send_message(r, "from meadow", label="meadow:CodeCarver")
     rc, out = _run(["relay", "-c", r, "--json"])
     got = [m["content"] for m in json.loads(out)]
-    check(rc == 0 and got == ["[them] from them", "[meadow/CodeCarver] from meadow"],
+    check(rc == 0 and got == ["[them] from them", "[meadow:CodeCarver] from meadow"],
           f"first run: theirs, not this machine's (old or new tags): {got}")
     rc, out = _run(["relay", "-c", r])
     check(rc == 0 and "no new messages" in out, "second run: nothing new")
@@ -434,7 +434,7 @@ def test_get_new_messages_options() -> None:
     mcp.send_message("mine", channel=r)
     LocalClient("x").send_message(r, "theirs", label="them")
     got = [m["content"] for m in mcp.get_new_messages(channel=r, include_self=True)]
-    check(got == ["[me/DefaultChatName] mine", "[them] theirs"], f"include_self shows my own too: {got}")
+    check(got == ["[me:DefaultChatName] mine", "[them] theirs"], f"include_self shows my own too: {got}")
     for n in range(150):
         LocalClient("x").send_message(r, f"n{n}", label="them")
     first = mcp.get_new_messages(channel=r)
@@ -449,9 +449,9 @@ def test_get_new_messages_options() -> None:
 def test_watch_state_footer() -> None:
     print("watch --state shows who holds the floor:")
     r = "watch-state"
-    chat.send_chat(LocalClient("x"), r, "A", "over", "your go", to="B")
+    chat.send_chat(LocalClient("x"), r, "Work:A", "over", "your go", to="Home:B")
     rc, out = _run(["watch", r, "--state", "--no-events", "--no-color"])
-    check(rc == 0 and "your go" in out and "floor: B" in out, "the footer names B")
+    check(rc == 0 and "your go" in out and "floor: Home:B" in out, "the footer names B")
 
 
 def test_chat_say_fails_part_way() -> None:
@@ -478,8 +478,8 @@ def test_chat_say_fails_part_way() -> None:
                   f"the error says the first piece went out: {str(e)[:90]}")
     finally:
         LocalClient.post = real  # type: ignore[assignment]
-    sent = [c for c in _contents(r) if c.startswith("[A>B|")]
-    check(len(sent) == 1 and sent[0].startswith("[A>B|say]"), "exactly that piece is in the room, as `say`")
+    sent = [c for c in _contents(r) if c.startswith("[me:A>me:B|")]
+    check(len(sent) == 1 and sent[0].startswith("[me:A>me:B|say]"), "exactly that piece is in the room, as `say`")
 
 
 def test_deleting_the_last_read_message_replays_nothing() -> None:
@@ -510,7 +510,7 @@ def test_sessions_sharing_a_label_see_each_other() -> None:
         handles._SESSION_KEY = "id:session-b"  # another Claude Code session
         mcp._sent_ids.clear()
         got = [m["content"] for m in mcp.get_new_messages(channel=r)]
-        check(got == ["[me/DefaultChatName] hello from A"], f"B gets A's message: {got}")
+        check(got == ["[me:DefaultChatName] hello from A"], f"B gets A's message: {got}")
         handles._SESSION_KEY = "id:session-a"  # A again, after a restart
         mcp._sent_ids.clear()
         mcp.send_message("more from A", channel=r)
@@ -555,17 +555,17 @@ def test_restart_keeps_the_name() -> None:
         _new_server("restarts")
         mcp.chat_begin(chatter="ui", channel="rs-chat")
         chat.send_chat(LocalClient("peer"), "rs-chat", "Peer", "over", "question?",
-                       to="CodeCarver/ui")
+                       to="me:CodeCarver/ui")
         got = mcp.chat_await(channel="rs-chat", timeout=1, poll=0.02, nudge_after=0)
         check(got["your_turn"], "the session has Peer's question")
         _new_server("restarts")  # /mcp reconnect
         mcp.send_message("first after restart", channel="rs-relay")
-        check(_contents("rs-relay") == ["[me/CodeCarver/ui] first after restart"],
+        check(_contents("rs-relay") == ["[me:CodeCarver/ui] first after restart"],
               f"its first send is still tagged with its role: {_contents('rs-relay')}")
         _new_server("restarts")
         out = mcp.send_message("the answer", channel="rs-chat")
         check(out.startswith("Sent as your chat turn to Peer")
-              and _contents("rs-chat")[-1] == "[CodeCarver/ui>Peer|over] the answer",
+              and _contents("rs-chat")[-1] == "[me:CodeCarver/ui>Peer|over] the answer",
               "its first call, an owed reply via send_message, is posted as its turn")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
@@ -587,7 +587,7 @@ def test_new_name_keeps_the_read_position() -> None:
         for i in (4, 5, 6):
             LocalClient("x").send_message(r, f"m{i}", label="them")
         check(len(mcp.get_new_messages(channel=r)) == 6, "today's session reads m1-m6 as Carry")
-        check(mcp.chat_begin(chatter="ui", channel="carry-chat")["chatter"] == "Carry/ui",
+        check(mcp.chat_begin(chatter="ui", channel="carry-chat")["chatter"] == "me:Carry/ui",
               "then takes the role ui")
         got = [m["content"] for m in mcp.get_new_messages(channel=r)]
         check(got == [], f"and isn't handed m4-m6 again from yesterday's place: {got}")
@@ -612,7 +612,7 @@ def test_long_project_name_tag_stays_put() -> None:
         mcp.chat_begin(channel="long-chat")
         mcp.send_message("after", channel=r)
         tags = {c.split("]")[0] for c in _contents(r)[1:]}
-        check(tags == {f"[me/{long_name[:32]}"}, f"one tag, the chat name: {tags}")
+        check(tags == {f"[me:{long_name[:32]}"}, f"one tag, the chat name: {tags}")
         check(mcp.get_new_messages(channel=r) == [], "and m1 isn't read again")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")

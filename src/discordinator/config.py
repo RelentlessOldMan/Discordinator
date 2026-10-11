@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import tempfile
 import time
 from contextlib import contextmanager
@@ -637,28 +638,37 @@ def is_default_chat_name(handle: Optional[str]) -> bool:
 
 
 def machine_name(cfg: dict[str, Any]) -> str:
-    """This machine's label (``config set-label``, or DISCORDINATOR_LABEL)."""
-    return str(cfg.get("machine_label") or DEFAULT_MACHINE_NAME)
+    """This machine's label (``config set-label``, or DISCORDINATOR_LABEL), as
+    names carry it: without []|>:/ (they mark a name's parts), at most 31
+    characters."""
+    name = re.sub(r"[|\]\[>:/]", "", str(cfg.get("machine_label") or "")).strip()[:31].strip()
+    return name or DEFAULT_MACHINE_NAME
 
 
 def project_name(cfg: dict[str, Any]) -> Optional[str]:
     """The project's chat name (DISCORDINATOR_CHAT_HANDLE) as chats show it -
-    trimmed, without []|>, at most 32 characters - or None if it has none."""
-    from .chat import sanitize_handle  # (chat imports this module)
+    trimmed, without []|>:, at most 32 characters - or None if it has none."""
+    from .chat import sanitize_local  # (chat imports this module)
     raw = cfg.get("chat_handle")
     if raw in (None, ""):
         return None
     try:
-        return sanitize_handle(raw)
+        return sanitize_local(raw)
     except ValueError:
         return None  # nothing left of it
 
 
+def full_name(cfg: dict[str, Any], handle: str) -> str:
+    """A session's full name, the same in relay tags and chat turns: this
+    machine, then its chat name - ``Harbinger:CodeCarver/ui``."""
+    return f"{machine_name(cfg)}:{handle}"
+
+
 def relay_tag(cfg: dict[str, Any], handle: Optional[str] = None) -> str:
-    """The tag on a relay message: the machine, then the session's chat name -
-    ``Home/CodeCarver``, or with a role ``Home/CodeCarver/ui``. ``handle`` is
-    the session's name once it has chatted; else the project's."""
-    return f"{machine_name(cfg)}/{handle or project_name(cfg) or DEFAULT_CHAT_NAME}"
+    """The tag on a relay message: the session's full name - ``Home:CodeCarver``,
+    or with a role ``Home:CodeCarver/ui``. ``handle`` is the session's chat
+    name once it has chatted; else the project's."""
+    return full_name(cfg, handle or project_name(cfg) or DEFAULT_CHAT_NAME)
 
 
 def relay_reader(cfg: dict[str, Any], session: Optional[str] = None) -> Optional[str]:

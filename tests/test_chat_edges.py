@@ -27,6 +27,8 @@ for _k in ("DISCORD_BOT_TOKEN", "DISCORDINATOR_CHAT_HANDLE", "DISCORDINATOR_CHAT
            "DISCORDINATOR_RELAY_CHANNEL", "DISCORDINATOR_LABEL", "DISCORDINATOR_SESSION_ID"):
     os.environ.pop(_k, None)
 
+os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full name
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
@@ -60,16 +62,16 @@ def test_long_wait_in_a_busy_room() -> None:
     r = "busy"
     c = begin(r, "A", "B", "C", "D")
     mcp.chat_say(text="please run the full suite", chatter="A", channel=r, to="B", wait=False)
-    check(wait("B", r)["from"] == "A", "B gets the job")
+    check(wait("B", r)["from"] == "M:A", "B gets the job")
     mcp.chat_say(text="running it, ~1h", chatter="B", channel=r, status="working", wait=False)
     for n in range(55):
         chat.send_chat(c, r, "C", "over", f"c {n}", to="D")
         chat.send_chat(c, r, "D", "over", f"d {n}", to="C")
     st = mcp.chat_status(chatter="A", channel=r)
-    check("B" in st["participants"] and not st["your_turn"],
+    check("M:B" in st["participants"] and not st["your_turn"],
           f"A's chat still has B in it: {st['participants']}")
     a = wait("A", r, 0.3)
-    check(a["timed_out"] and any(x["from"] == "B" and x["status"] == "working"
+    check(a["timed_out"] and any(x["from"] == "M:B" and x["status"] == "working"
                                   for x in a.get("progress", [])),
           "A's wait still shows B is working")
     check("not_in_chat" not in a, "A isn't told to join C and D's chat")
@@ -84,13 +86,13 @@ def test_from_whom_keeps_other_turns() -> None:
     r = "fromwhom"
     c = begin(r, "A", "B", "C")
     mcp.chat_say(text="B?", chatter="A", channel=r, to="B", wait=False)
-    chat.send_chat(c, r, "C", "over", "A, a question from C", to="A")
-    chat.send_chat(c, r, "B", "over", "B's answer", to="A")
+    chat.send_chat(c, r, "M:C", "over", "A, a question from C", to="M:A")
+    chat.send_chat(c, r, "M:B", "over", "B's answer", to="M:A")
     a = wait("A", r, from_whom="B")
-    check(a["from"] == "B" and a["text"] == "B's answer", "from_whom=B returns B's turn")
+    check(a["from"] == "M:B" and a["text"] == "B's answer", "from_whom=B returns B's turn")
     mcp.chat_say(text="thanks B", chatter="A", channel=r, to="B", wait=False)
     a = wait("A", r)
-    check(a["from"] == "C" and a["your_turn"] and a["text"] == "A, a question from C",
+    check(a["from"] == "M:C" and a["your_turn"] and a["text"] == "A, a question from C",
           f"the next wait delivers C's turn: {a.get('from')} {a.get('text')!r}")
     a = wait("A", r, 0.3)
     check(a["timed_out"], "and only once")
@@ -102,15 +104,15 @@ def test_shutdown_keeps_read_pieces() -> None:
     c = begin(r, "A", "B")
     mcp.chat_say(text="go", chatter="A", channel=r, to="B", wait=False)
     wait("B", r)
-    chat.send_chat(c, r, "B", "say", "part one", to="A")
-    chat.send_chat(c, r, "B", "say", "part two", to="A")
+    chat.send_chat(c, r, "M:B", "say", "part one", to="M:A")
+    chat.send_chat(c, r, "M:B", "say", "part two", to="M:A")
     threading.Timer(0.3, chat.SHUTDOWN.set).start()
     try:
         a = wait("A", r, 3.0)
     finally:
         chat.SHUTDOWN.clear()
     check(a["timed_out"] and not a["your_turn"], "the stopping server returns at once")
-    chat.send_chat(c, r, "B", "over", "part three", to="A")
+    chat.send_chat(c, r, "M:B", "over", "part three", to="M:A")
     a = wait("A", r)  # the session's next server
     check(a["text"] == "part one\npart two\npart three",
           f"the next server gets the whole turn: {a['text']!r}")
@@ -126,14 +128,14 @@ def test_stray_end_doesnt_stop_a_waiting_session() -> None:
     mcp.chat_begin(chatter="A", channel=r)
     mcp.chat_say(text="hi B", chatter="A", channel=r, to="B", wait=False)
     b = wait("B", r)
-    check(b["from"] == "A" and b["your_turn"], "and gets it")
+    check(b["from"] == "M:A" and b["your_turn"], "and gets it")
     # An old-style unaddressed chat still ends for the one it was with.
     r2 = "strayend2"
     begin(r2, "P", "Q")
-    chat.send_chat(LocalClient(), r2, "P", "over", "hello")
-    check(wait("Q", r2)["from"] == "P", "Q gets P's unaddressed opener")
-    chat.send_chat(LocalClient(), r2, "Q", "over", "hi")
-    chat.send_chat(LocalClient(), r2, "P", "end", "bye")
+    chat.send_chat(LocalClient(), r2, "M:P", "over", "hello")
+    check(wait("Q", r2)["from"] == "M:P", "Q gets P's unaddressed opener")
+    chat.send_chat(LocalClient(), r2, "M:Q", "over", "hi")
+    chat.send_chat(LocalClient(), r2, "M:P", "end", "bye")
     q = wait("Q", r2)
     check(q["ended"], "an unaddressed end still ends the unaddressed chat it was in")
 
@@ -177,7 +179,7 @@ def test_human_text_that_looks_like_a_turn() -> None:
     r = "human"
     begin(r, "A", "B")
     mcp.chat_say(text="B?", chatter="A", channel=r, to="B", wait=False)
-    check(wait("B", r)["from"] == "A", "B gets A's question")
+    check(wait("B", r)["from"] == "M:A", "B gets A's question")
     LocalClient().post_human(r, "[URGENT|fyi] prod is down")
     b = wait("B", r)
     check(b["from"] == "human" and "prod is down" in b["text"], "an unknown status: a human remark")
@@ -202,12 +204,12 @@ def test_held_turn_dropped_when_its_chat_ends() -> None:
     r = "held-end"
     c = begin(r, "A", "B", "C")
     mcp.chat_say(text="B?", chatter="A", channel=r, to="B", wait=False)
-    chat.send_chat(c, r, "C", "over", "A, from C", to="A")
-    chat.send_chat(c, r, "B", "over", "from B", to="A")
-    check(wait("A", r, from_whom="B")["from"] == "B", "from_whom=B gets B's turn, C's is held")
-    chat.send_chat(c, r, "C", "end", "never mind, done", to="A")
+    chat.send_chat(c, r, "M:C", "over", "A, from C", to="M:A")
+    chat.send_chat(c, r, "M:B", "over", "from B", to="M:A")
+    check(wait("A", r, from_whom="B")["from"] == "M:B", "from_whom=B gets B's turn, C's is held")
+    chat.send_chat(c, r, "M:C", "end", "never mind, done", to="M:A")
     a = wait("A", r)
-    check(a["from"] == "C" and a["ended"] and not a.get("your_turn"),
+    check(a["from"] == "M:C" and a["ended"] and not a.get("your_turn"),
           f"the next wait gives C's ending, not its stale question: {a.get('text')!r}")
 
 
@@ -216,7 +218,7 @@ def test_last_post_only_while_waiting() -> None:
     r = "lastpost"
     begin(r, "A", "B")
     mcp.chat_say(text="B?", chatter="A", channel=r, to="B", wait=False)
-    slot = lambda: chat._slot(chat.config.load_state(), r, "A")  # noqa: E731
+    slot = lambda: chat._slot(chat.config.load_state(), r, "M:A")  # noqa: E731
     check("last_post" in slot(), "kept while A waits for B")
     wait("B", r)
     mcp.chat_say(text="answer", chatter="B", channel=r, wait=False)
@@ -256,14 +258,16 @@ def test_peer_who_spoke_long_ago_is_known() -> None:
     print("addressing a peer whose last post is 100+ messages back isn't 'nobody':")
     r = "known"
     c = LocalClient()
-    chat.send_chat(c, r, "Far", "over", "hello from another machine", to="D")
+    chat.send_chat(c, r, "Work:Far", "over", "hello from another machine", to="M:D")
     begin(r, "A", "C", "D")
     for n in range(60):
-        chat.send_chat(c, r, "C", "over", f"c {n}", to="D")
-        chat.send_chat(c, r, "D", "over", f"d {n}", to="C")
+        chat.send_chat(c, r, "M:C", "over", f"c {n}", to="M:D")
+        chat.send_chat(c, r, "M:D", "over", f"d {n}", to="M:C")
     wait("A", r, 0.2)  # A has read past all of it
     out = mcp.chat_say(text="hi Far", chatter="A", channel=r, to="Far", wait=False)
     check("Nobody called" not in str(out.get("note", "")), "no 'unknown handle' warning")
+    last = LocalClient("p").read_messages(r, limit=1)[0]["content"]
+    check(last.startswith("[M:A>Work:Far|over]"), f"and 'Far' is spelled out: {last[:22]}")
 
 
 def main() -> int:

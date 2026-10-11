@@ -66,7 +66,7 @@ import discordinator.mcp_server as mcp  # noqa: E402
 from discordinator import client_factory, config  # noqa: E402
 from discordinator.discord_client import DiscordClient, DiscordError  # noqa: E402
 
-TAG = "[live-a/DefaultChatName] "  # machine live-a, no project name set
+TAG = "[live-a:DefaultChatName] "  # machine live-a, no project name set
 _passed = 0
 _notes: list[str] = []
 
@@ -182,7 +182,7 @@ def test_chat() -> None:
         mcp.chat_begin(chatter=h)
     mcp.chat_say(text="beta, are you there?", chatter="alpha", to="beta", wait=False)
     got = _await("beta")
-    check(got["your_turn"] and got["from"] == "alpha" and got["text"] == "beta, are you there?",
+    check(got["your_turn"] and got["from"] == "live-a:alpha" and got["text"] == "beta, are you there?",
           "beta gets alpha's turn")
     reply = "\n".join(f"point {i}: " + "z" * 60 for i in range(60))
     mcp.chat_say(text=reply, chatter="beta", wait=False)  # back to alpha

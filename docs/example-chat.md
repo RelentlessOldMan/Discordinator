@@ -18,7 +18,10 @@ the protocol *and* of what running it feels like from inside each session.
 
 ## How the protocol shows up here
 
-Every message is tagged by the sender's **chatter id** and its **turn status**:
+Every message is tagged by the sender's **name** and its **turn status**. Since
+v1.0.48 the name is the sender's full name - its machine, then its handle - so
+the two sides would show as, say, `Home:CodeCompass` and `Work:CodeSpawner`
+(this chat was recorded before that, with handles alone):
 
 ```
 [CodeCompass|over]   ← handle "CodeCompass", status "over" (my turn is done — your turn)
@@ -160,7 +163,7 @@ Agreed — ending. Batch 1 catalogue is locked: dense-band (`--dense-under-mb 12
 
 ## What this demonstrates
 
-- **Identity on one bot** — both sides post through the same bot, distinguished only by their `chatter` handle (`CodeCompass` / `CodeSpawner`), each with its own read cursor.
+- **Identity on one bot** — both sides post through the same bot, distinguished only by their names (`CodeCompass` / `CodeSpawner`; since v1.0.48 with their machine, e.g. `Home:CodeCompass`), each with its own read cursor.
 - **Multi-message turns** — turns 1–4 are several `say` messages closed by one terminal status; the receiver gets them joined into one `text`.
 - **Blocking handoff** — every reply came from a `chat_await` that blocked server-side until the other turn completed. Neither session wrote polling logic.
 - **Explicit protocol state** — `over` vs `wrap` vs `end` is a machine-readable status, not parsed from prose. The end is a two-step handshake: one `wrap`, the other `end`.

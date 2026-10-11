@@ -89,25 +89,61 @@ BROADCAST_ALIASES = frozenset({"all", "everyone", "*", "any", "anyone"})
 # with this so a nudge is never mistaken for a participant's turn.
 NUDGE_MARK = "⏳"  # ⏳
 
-# [from] or [from>to], then |status], then the body.
-_HEADER_RE = re.compile(r"^\[([^|\]>]{1,32})(?:>([^|\]]{1,32}))?\|([a-z]+)\]\s?(.*)$", re.S)
+# [from] or [from>to], then |status], then the body. A name is
+# "machine:name" (up to 31 + 1 + 32 characters), or just "name".
+_HEADER_RE = re.compile(r"^\[([^|\]>]{1,64})(?:>([^|\]]{1,64}))?\|([a-z]+)\]\s?(.*)$", re.S)
 
 
 RESERVED_HANDLES = BROADCAST_ALIASES | {"human"}
 
 
 def sanitize_handle(handle: str) -> str:
+    """A name as headers carry it: no []|>, the machine part (if any) at most
+    31 characters and the rest at most 32."""
     h = re.sub(r"[|\]\[>]", "", str(handle)).strip()
     if not h:
         raise ValueError("participant handle is empty after removing []|> characters")
+    machine, sep, local = h.partition(":")
+    machine = re.sub(r"[/]", "", machine).strip()[:31].strip()  # as config.machine_name
+    if sep and local.strip():
+        # (A machine part that cleans away to nothing names no machine.)
+        return f"{machine}:{local.strip()[:32]}" if machine else local.strip()[:32]
     return h[:32]
+
+
+def sanitize_local(handle: str) -> str:
+    """A session's own name (no machine): no []|> and no ':', which marks the
+    machine in a full name. At most 32 characters."""
+    h = re.sub(r"[|\]\[>:]", "", str(handle)).strip()
+    if not h:
+        raise ValueError("participant handle is empty after removing []|>: characters")
+    return h[:32]
+
+
+def split_name(handle: Optional[str]) -> tuple[Optional[str], str]:
+    """("Harbinger", "CodeCarver/ui") for "Harbinger:CodeCarver/ui"; (None,
+    name) for a name that doesn't say its machine (an address like "Peer", or
+    a turn from before names carried one)."""
+    h = str(handle or "").strip()
+    machine, sep, local = h.partition(":")
+    if sep and machine.strip() and local.strip():
+        return machine.strip(), local.strip()
+    return None, h
+
+
+def local_name(handle: Optional[str]) -> str:
+    return split_name(handle)[1]
+
+
+def machine_of(handle: Optional[str]) -> Optional[str]:
+    return split_name(handle)[0]
 
 
 def check_own_handle(handle: str) -> str:
     """A handle a session may go by: not 'human' (that's how the human's
     messages are delivered) or a broadcast word like 'all' (nobody could
     address it)."""
-    if handle_key(handle) in RESERVED_HANDLES:
+    if handle_key(local_name(handle)) in RESERVED_HANDLES:
         raise ValueError(f"'{handle}' can't be a chat handle - it's reserved "
                          f"({', '.join(sorted(RESERVED_HANDLES))}). Pick another name.")
     return handle
@@ -177,6 +213,30 @@ def parse(content: str) -> Optional[dict[str, Optional[str]]]:
             "status": m.group(3), "body": m.group(4)}
 
 
+# Ids of this session's own chat posts made under an earlier name of it - the
+# same name on this machine before the machine was renamed - and the name it
+# goes by now. They're still its own (the MCP server sets this on each chat
+# call; see mcp_server._chatter) - read as anyone else's, they're as posted.
+_own_earlier: set[str] = set()
+_own_earlier_by: list[Optional[str]] = [None]
+
+
+def set_own_earlier(owner: str, ids: Any) -> None:
+    _own_earlier.clear()
+    _own_earlier.update(str(i) for i in ids)
+    _own_earlier_by[0] = owner
+
+
+def _parse_own(m: dict[str, Any], me: Optional[str]) -> Optional[dict[str, Optional[str]]]:
+    """parse_msg, with this session's own earlier-named posts as ``me``'s when
+    ``me`` is this session."""
+    p = parse_msg(m)
+    if (p is not None and str(m.get("id")) in _own_earlier
+            and same_handle(me, _own_earlier_by[0])):
+        p = {**p, "participant": me}
+    return p
+
+
 def parse_msg(m: dict[str, Any]) -> Optional[dict[str, Optional[str]]]:
     """``parse`` for a (simplified) message: only the bot posts chat turns, so a
     human whose message happens to look like a header is still a human."""
@@ -192,7 +252,19 @@ def handle_key(handle: Optional[str]) -> str:
 
 
 def same_handle(a: Optional[str], b: Optional[str]) -> bool:
+    """The same participant (case-insensitive; a full name must match in full,
+    machine too)."""
     return a is not None and b is not None and handle_key(a) == handle_key(b)
+
+
+def name_matches(given: Optional[str], name: Optional[str]) -> bool:
+    """Does ``given`` - a name someone typed, maybe without the machine
+    ("Peer") - fit the participant ``name`` ("Work:Peer")?"""
+    if given is None or name is None:
+        return False
+    if machine_of(given) is None and machine_of(name) is not None:
+        return handle_key(given) == handle_key(local_name(name))
+    return same_handle(given, name)
 
 
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
@@ -217,9 +289,44 @@ def _targets(to: Optional[str], me: str) -> bool:
 
 
 def _project_of(handle: Optional[str]) -> Optional[str]:
-    """"projectb" for "ProjectB/convex"; None for a handle with no role."""
-    k = handle_key(handle)
-    return k.split("/", 1)[0] if "/" in k else None
+    """"projectb" for "ProjectB/convex" ("work:projectb" for
+    "Work:ProjectB/convex"); None for a handle with no role."""
+    machine, local = split_name(handle_key(handle))
+    if "/" not in local:
+        return None
+    project = local.split("/", 1)[0]
+    return f"{machine}:{project}" if machine is not None else project
+
+
+def names_for(parsed: list[Optional[dict[str, Any]]], name: str,
+              me: Optional[str] = None, live: Any = ()) -> list[str]:
+    """Who a typed ``name`` with no machine ("Peer", or a project's bare
+    "ProjectB") can be: the sessions that have posted here (``parsed``) or run
+    on this machine (``live``, full names) by that name, on whichever machine -
+    and a project's bare name on a machine where one of its roles is. Not
+    ``me``. Sorted."""
+    found: dict[str, str] = {}
+    key = handle_key(name)
+
+    def add(h: Optional[str]) -> None:
+        if not h or same_handle(h, me):
+            return
+        machine, local = split_name(h)
+        if handle_key(local) == key:
+            found[handle_key(h)] = str(h)
+        elif machine is not None and "/" in local and handle_key(local.split("/", 1)[0]) == key:
+            full = f"{machine}:{local.split('/', 1)[0]}"
+            found[handle_key(full)] = full
+
+    for p in parsed:
+        if p:
+            add(p["participant"])
+    try:
+        for h in (live() if callable(live) else live):
+            add(h if isinstance(h, str) else h[0])
+    except Exception:
+        pass
+    return sorted(found.values(), key=handle_key)
 
 
 def bare_aliases(parsed: list[Optional[dict[str, Any]]], me: Optional[str] = None,
@@ -237,8 +344,31 @@ def bare_aliases(parsed: list[Optional[dict[str, Any]]], me: Optional[str] = Non
     return _bare_walk(parsed, me, live, stamps)[0]
 
 
+def _among(name: Optional[str], keys: Any) -> bool:
+    """Is ``name`` one of ``keys`` (by same_handle)?"""
+    return any(same_handle(name, k) for k in keys)
+
+
+def roles_of(parsed: list[Optional[dict[str, Any]]], project: str,
+             me: Optional[str] = None, live: Any = ()) -> list[str]:
+    """The sessions of ``project`` (a bare name, "Work:ProjectB") with a role -
+    "Work:ProjectB/ui" - that have posted here or run on this machine, not
+    ``me``. Sorted."""
+    key = handle_key(project)
+    found: dict[str, str] = {}
+    names = [p["participant"] for p in parsed if p]
+    try:
+        names += [h if isinstance(h, str) else h[0] for h in (live() if callable(live) else live)]
+    except Exception:
+        pass
+    for h in names:
+        if _project_of(h) == key and not same_handle(h, me):
+            found[handle_key(h)] = h
+    return sorted(found.values(), key=handle_key)
+
+
 def _is_bare(to: Optional[str]) -> bool:
-    return not _is_broadcast(to) and "/" not in handle_key(to)
+    return not _is_broadcast(to) and "/" not in local_name(handle_key(to))
 
 
 def _when(v: Any) -> Optional[datetime]:
@@ -278,11 +408,11 @@ def _bare_walk(parsed: list[Optional[dict[str, Any]]], me: Optional[str], live: 
     def roles(base: str, ts: Optional[datetime], extra: list[str]) -> list[str]:
         """The roles of ``base`` around at ``ts``: in a chat that spoke within
         STALE_AFTER, or ``extra``; failing those, any whose chat never ended."""
-        chatting = {k: h for k, h in keys.items() if _project_of(k) == base}
+        chatting = {k: h for k, h in keys.items() if same_handle(_project_of(k), base)}
         found = {k: h for k, h in chatting.items()
                  if ts is None or seen.get(k) is None or seen[k] >= ts - STALE_AFTER}
         for h in extra:
-            if _project_of(h) == base:
+            if same_handle(_project_of(h), base):
                 found.setdefault(handle_key(h), h)
         return list((found or chatting).values())
 
@@ -293,14 +423,14 @@ def _bare_walk(parsed: list[Optional[dict[str, Any]]], me: Optional[str], live: 
         now = datetime.now(timezone.utc) if stamps else None
         out: dict[str, str] = {}
         for base in {_project_of(k) for k in keys} | {_project_of(h) for h in extra}:
-            if base and base not in keys:
+            if base and not _among(base, keys):
                 found = roles(base, now, extra)
                 if len(found) == 1:
                     out[base] = found[0]
         return out
 
     posters = {handle_key(p["participant"]) for p in parsed if p}
-    needs_live = any(p and _is_bare(p.get("to")) and handle_key(p["to"]) not in posters
+    needs_live = any(p and _is_bare(p.get("to")) and not _among(p["to"], posters)
                      for p in parsed)
     for i, p in enumerate(parsed):
         if not p:
@@ -313,16 +443,17 @@ def _bare_walk(parsed: list[Optional[dict[str, Any]]], me: Optional[str], live: 
         base = _project_of(k)
         if base and not _is_broadcast(to):
             # A role answering a bare turn nobody could firmly mean: it was theirs.
-            for j in waiting.pop((base, handle_key(to)), []):
-                at[j] = p["participant"]
+            for w in [w for w in waiting if same_handle(w[0], base) and same_handle(w[1], to)]:
+                for j in waiting.pop(w):
+                    at[j] = p["participant"]
         if _is_bare(to):
             b = handle_key(to)
             # Sessions running here count for turns sent since they started.
             running = [h for h, since in here()
-                       if ts is None or since is None or since < ts] if b not in keys else []
+                       if ts is None or since is None or since < ts] if not _among(b, keys) else []
             firm = roles(b, ts, [])
             found = roles(b, ts, running)
-            if b in keys or len(found) > 1:
+            if _among(b, keys) or len(found) > 1:
                 at[i] = None  # someone posts as the bare name, or two roles: ambiguous
             elif found and any(same_handle(found[0], h) for h in firm):
                 at[i] = found[0]
@@ -337,7 +468,8 @@ def _bare_walk(parsed: list[Optional[dict[str, Any]]], me: Optional[str], live: 
             keys.pop(k, None)
             if not _is_broadcast(to):
                 # An end addressed to the bare name ends its role's chat.
-                keys.pop(handle_key(at.get(i) or to), None)
+                for gone in [x for x in keys if same_handle(x, at.get(i) or to)]:
+                    keys.pop(gone)
     return aliases(), at
 
 
@@ -351,7 +483,7 @@ def resolve_bare(parsed: list[Optional[dict[str, Any]]], me: Optional[str] = Non
     out = list(parsed)
     for i, role in at.items():
         if role == "":
-            role = aliases.get(handle_key(parsed[i]["to"]))
+            role = next((v for b, v in aliases.items() if same_handle(b, parsed[i]["to"])), None)
         if role:
             out[i] = {**parsed[i], "to": role}
     return out
@@ -367,15 +499,15 @@ def bare_target(parsed: list[Optional[dict[str, Any]]], stamps: list[Any], sende
 
 
 def _live_here() -> list[tuple[str, Optional[float]]]:
-    """Sessions running on this machine: (handle, running since) - see
-    handles.live_claims."""
+    """Sessions running on this machine: (full name, running since) - see
+    handles.live_full_claims."""
     from . import handles  # (imports this module)
-    return handles.live_claims()
+    return handles.live_full_claims()
 
 
 def _could_mean(to: Optional[str], me: str) -> bool:
     """Is ``to`` my project's bare handle (it may stand for me - see bare_aliases)?"""
-    return not _is_broadcast(to) and _project_of(me) == handle_key(to)
+    return not _is_broadcast(to) and same_handle(_project_of(me), to)
 
 
 def _room(client: DiscordClient, channel_id: str, me: Optional[str], scan: int = 100,
@@ -385,7 +517,7 @@ def _room(client: DiscordClient, channel_id: str, me: Optional[str], scan: int =
     bare project handles readdressed to the role each meant (resolve_bare)."""
     raw = _history(client, channel_id, me, scan, upto)
     msgs = list(reversed([simplify_message(m) for m in raw]))  # chronological
-    parsed = resolve_bare([parse_msg(m) for m in msgs], me, _live_here,
+    parsed = resolve_bare([_parse_own(m, me) for m in msgs], me, _live_here,
                           [m["timestamp"] for m in msgs])
     return msgs, parsed
 
@@ -403,8 +535,9 @@ def _means_me(client: DiscordClient, channel_id: str, to: Optional[str], me: str
     i = next((i for i, m in enumerate(msgs) if str(m["id"]) == str(message_id)), None)
     if i is not None and parsed[i] is not None:
         return same_handle(parsed[i]["to"], me)
-    return same_handle(bare_aliases([parse_msg(m) for m in msgs], me, _live_here,
-                                    [m["timestamp"] for m in msgs]).get(handle_key(to)), me)
+    aliases = bare_aliases([parse_msg(m) for m in msgs], me, _live_here,
+                           [m["timestamp"] for m in msgs])
+    return any(same_handle(full, me) for bare, full in aliases.items() if same_handle(bare, to))
 
 
 def bare_taken(client: DiscordClient, channel_id: str, me: str,
@@ -419,7 +552,7 @@ def bare_taken(client: DiscordClient, channel_id: str, me: str,
             continue
         raw = parse_msg(m) or {}
         if (_could_mean(raw.get("to"), me) and not same_handle(p["to"], me)
-                and _project_of(p["to"]) == _project_of(me)):
+                and same_handle(_project_of(p["to"]), _project_of(me))):
             return p["to"]
         return None
     return None
@@ -443,6 +576,27 @@ def is_human_stop(text: str) -> bool:
 
 def _slot(state: dict[str, Any], channel_id: str, me: str) -> dict[str, Any]:
     return state.setdefault("chat", {}).setdefault(channel_id, {}).setdefault(handle_key(me), {})
+
+
+def carry_slots(earlier: list[str], me: str) -> None:
+    """Give ``me`` this session's chat state (read position, who to reply to,
+    held turns...) in each room from the first of its ``earlier`` names that
+    has some there, where ``me`` has none yet - a session whose machine was
+    renamed, or that ran an older version (state kept by its name without a
+    machine), carries on where it was."""
+    keys = [handle_key(h) for h in earlier if not same_handle(h, me)]
+    rooms = config.load_state().get("chat")
+    if not keys or not isinstance(rooms, dict) or not any(
+            isinstance(r, dict) and handle_key(me) not in r and any(k in r for k in keys)
+            for r in rooms.values()):
+        return
+    with config.update_state() as state:
+        for room in state.get("chat", {}).values():
+            if not isinstance(room, dict) or handle_key(me) in room:
+                continue
+            k = next((k for k in keys if isinstance(room.get(k), dict)), None)
+            if k is not None:
+                room[handle_key(me)] = room.pop(k)
 
 
 def reset(channel_id: str, me: str, cursor: str, cap: int) -> None:
@@ -819,7 +973,7 @@ def await_turn(
 
     owed = st0.get("_owed_turn")
     if (owed and int(owed["id"]) <= int(cursor0)
-            and (from_whom is None or same_handle(owed["from"], from_whom))):
+            and (from_whom is None or name_matches(from_whom, owed["from"]))):
         result = _result(
             me, channel_id, sender=owed["from"], status=owed["status"],
             text=st0.get("_owed_text") or "", messages=[], ended=False,
@@ -920,7 +1074,7 @@ def _take_held(channel_id: str, me: str, from_whom: Optional[str]) -> Optional[d
         slot = _slot(state, channel_id, me)
         held = list(slot.get("held") or [])
         i = next((i for i, h in enumerate(held) if from_whom is None
-                  or same_handle((h.get("result") or {}).get("from"), from_whom)), None)
+                  or name_matches(from_whom, (h.get("result") or {}).get("from"))), None)
         if i is None:
             return None
         item = held.pop(i)
@@ -985,7 +1139,7 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
 
         for m in messages:
             pos.move(m["id"])
-            parsed = parse_msg(m)
+            parsed = _parse_own(m, me)
 
             if parsed is None:
                 text = m["content"]
@@ -1064,7 +1218,7 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
                 me, channel_id, sender=sender, status=status, text=text,
                 messages=_lean(pieces), ended=False, stop_reason=None,
                 your_turn=True, addressed_to=to, attachments=atts)
-            if want is not None and not same_handle(sender, want):
+            if want is not None and not name_matches(want, sender):
                 # For me, but I'm waiting for someone else: my next wait gets it.
                 pos.held.append({"message": m, "result": result})
                 continue
@@ -1367,6 +1521,19 @@ def _history(client: DiscordClient, channel_id: str, me: Optional[str], scan: in
     return out
 
 
+def posters(client: DiscordClient, channel_id: str) -> list[Optional[dict[str, Any]]]:
+    """The chat turns in the room's last HISTORY_CAP messages (newest first),
+    for working out who a typed name stands for."""
+    out: list[Optional[dict[str, Any]]] = []
+    page = client.read_messages(channel_id, limit=100)
+    while page:
+        out.extend(parse_msg(simplify_message(m)) for m in page)
+        if len(page) < 100 or len(out) >= HISTORY_CAP:
+            break
+        page = client.read_messages(channel_id, limit=100, before=page[-1]["id"])
+    return out
+
+
 def has_posted(client: DiscordClient, channel_id: str, handle: str) -> bool:
     """Has ``handle`` posted a chat turn in the room's last HISTORY_CAP messages?"""
     page = client.read_messages(channel_id, limit=100)
@@ -1591,10 +1758,10 @@ def _named_since(me: str) -> Optional[datetime]:
     """For a session going by the placeholder name (no chat name set up): when
     it took that name. Every unnamed session goes by it, so a turn sent to it
     before then was another one's. None for a real name."""
-    if not config.is_default_chat_name(me):
+    if not config.is_default_chat_name(local_name(me)):
         return None
     from . import handles  # (imports this module)
-    t = handles.held_since(me)
+    t = handles.held_since(local_name(me))
     return datetime.fromtimestamp(t if t is not None else time.time(), timezone.utc)
 
 
@@ -1654,14 +1821,14 @@ def _would_wake(m: dict[str, Any], me: str, from_whom: Optional[str] = None) -> 
     content = m.get("content") or ""
     if content.lstrip().startswith(NUDGE_MARK):
         return False
-    p = parse_msg(m)
+    p = _parse_own(m, me)
     if p is None:
         return not m.get("bot")  # a human, not relay traffic
     if same_handle(p["participant"], me) or p["status"] in PROGRESS_STATUSES + ("ask",):
         return False
     if p["status"] in TERMINAL_STATUSES:
         return True
-    if from_whom is not None and not same_handle(p["participant"], from_whom):
+    if from_whom is not None and not name_matches(from_whom, p["participant"]):
         return False
     return _targets(p["to"], me) or _could_mean(p["to"], me)  # _wakes checks the room
 

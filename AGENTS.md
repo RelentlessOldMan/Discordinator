@@ -76,39 +76,61 @@ placeholder, never nothing. Three settings make them up:
 - **role** - the `chatter` a session passes to its `chat_*` calls, e.g. `ui`.
   Optional; for two sessions of one project.
 
-A relay message (`send_message`, `send_file`, CLI `send`) is tagged
-`[machine/chat name]`, where the chat name is the session's name in chats.
-Chat turns carry only the chat name (`[CodeCarver/ui>peer|over]`).
+Every session has one **full name** - `machine:chat name` - and every message
+it sends carries it: a relay message (`send_message`, `send_file`, CLI `send`)
+is tagged with it, and so is a chat turn, along with whom it's for and its
+status. The chat name is the project, then the role.
+```
+relay:  [Harbinger:CodeCarver/ui] hello
+chat:   [Harbinger:CodeCarver/ui>Work:Peer|over] hello
+```
 
-| machine | project | role | relay tag | chat name |
-|---|---|---|---|---|
-| `Home` | `CodeCarver` | `ui` | `[Home/CodeCarver/ui]` | `CodeCarver/ui` |
-| `Home` | `CodeCarver` | - | `[Home/CodeCarver]` | `CodeCarver` |
-| `Home` | - | `ui` | `[Home/ui]` | `ui` |
-| `Home` | - | - | `[Home/DefaultChatName]` | `DefaultChatName` |
-| - | `CodeCarver` | `ui` | `[DefaultMachineName/CodeCarver/ui]` | `CodeCarver/ui` |
-| - | `CodeCarver` | - | `[DefaultMachineName/CodeCarver]` | `CodeCarver` |
-| - | - | `ui` | `[DefaultMachineName/ui]` | `ui` |
-| - | - | - | `[DefaultMachineName/DefaultChatName]` | `DefaultChatName` |
+| machine | project | role | full name (tag) |
+|---|---|---|---|
+| `Home` | `CodeCarver` | `ui` | `Home:CodeCarver/ui` |
+| `Home` | `CodeCarver` | - | `Home:CodeCarver` |
+| `Home` | - | `ui` | `Home:ui` |
+| `Home` | - | - | `Home:DefaultChatName` |
+| - | `CodeCarver` | `ui` | `DefaultMachineName:CodeCarver/ui` |
+| - | `CodeCarver` | - | `DefaultMachineName:CodeCarver` |
+| - | - | `ui` | `DefaultMachineName:ui` |
+| - | - | - | `DefaultMachineName:DefaultChatName` |
 
-The role shows in relay tags once the session has used it in a chat call
-(`send_message` takes no `chatter`), and stays after a restart. A session
-renamed because its name was taken (`CodeCarver-2`) is tagged with that name.
-`label=` on `send_message` (or `--label` on the CLI) replaces the whole tag
-for that one message. The CLI runs in your shell, which never sees a
-project's `.mcp.json`: a CLI `send` is tagged `[<machine>/DefaultChatName]`
-unless the shell sets `DISCORDINATOR_CHAT_HANDLE` (or you pass `--label`). A
+The machine keeps sessions on different machines apart, so the same project
+can have the same name everywhere (`Home:CodeCarver`, `Work:CodeCarver`).
+Every turn is addressed by full name, so every session reads it the same way.
+When addressing someone you can leave the machine out (`to="Peer"`): it's
+filled in from who has posted in the room or runs on this machine (under its
+own machine name - a project can set its own `DISCORDINATOR_LABEL`). If that
+could be two sessions, or nobody by that name is known yet, `chat_say` refuses
+(nothing posted) and asks for the full name (`to="Work:Peer"`) - a session on
+another machine that hasn't spoken yet can only be reached that way. A name
+without a machine in the room is an older version's; it's a name of its own,
+not taken for anyone's full name. A short address means it only while it's
+the latest to post by that name and nobody by it runs here: once that session
+posts under its full name (it has updated), that's what `to="Peer"` means.
+Sessions here under different machine names (a project's own
+`DISCORDINATOR_LABEL`) can each have the same name (`Home:CodeCarver`,
+`Lab:CodeCarver`).
+
+The role shows once the session has used it in a chat call (`send_message`
+takes no `chatter`), and stays after a restart. A session renamed because its
+name was taken (`Home:CodeCarver-2`) goes by that name. `label=` on
+`send_message` (or `--label` on the CLI) replaces the whole tag for that one
+message. The CLI runs in your shell, which never sees a project's
+`.mcp.json`: a CLI `send` is tagged `[<machine>:DefaultChatName]` unless the
+shell sets `DISCORDINATOR_CHAT_HANDLE` (or you pass `--label`). A
 `DefaultMachineName` or `DefaultChatName` in the channel means something
-wasn't set up - fix it with `config set-label` or the project's `.mcp.json`.
+wasn't set up - fix it with `config set-label` or the project's `.mcp.json`;
+a session that has one in its name is told so on every chat result.
 
-A session chatting as `DefaultChatName` is told so on every chat result.
-Every unnamed session gets that name, so a chat can't tell two of them apart:
-two on different machines would each take the other's turns for its own. (On
-one machine a second one running at the same time is `DefaultChatName-2`,
-and a session is never handed a turn sent to the name before it took it -
-that was another session's.) Once the project has a name and its server is
-reconnected, a turn still owed to the old name is pointed out on the next
-chat call, so the session can answer it.
+Every unnamed session on a machine gets the same chat name. A second one
+running at the same time is `DefaultChatName-2`, and a session is never handed
+a turn sent to the name before it took it - that was another session's. (Two
+unnamed *machines* are both `DefaultMachineName`, and a chat can't tell their
+sessions apart - name your machines.) Once the project has a name and its
+server is reconnected, a turn still owed to the old name is pointed out on the
+next chat call, so the session can answer it.
 
 For a mode on `local`, skip steps 2–3 for it (no bot/token/channels): relay
 defaults to room `relay`, chat to room `chat`; pass any `channel="..."` for
@@ -208,9 +230,9 @@ instead of landing on a per-project relay channel:
 ```
 `DISCORDINATOR_CHAT_HANDLE` is the project's **fixed name in live chats**, so a
 project never shows up under several names (`CodeCarver` one day, `carver` the
-next). Set it per project, never in the shared home config. On a second machine,
-give the same project a distinct handle in that machine's `.mcp.json` (e.g.
-`CodeCarverWork`) so the two machines' sessions can chat with each other.
+next). Set it per project, never in the shared home config. The same project
+can use the same handle on every machine: the machine name keeps them apart
+(`Home:CodeCarver`, `Work:CodeCarver` - see **Names**).
 Relay tools (`send_message`, `get_new_messages`, `read_messages`) default to
 `DISCORDINATOR_RELAY_CHANNEL`; chat tools (`chat_*`) default to `DISCORDINATOR_CHAT_CHANNEL`
 — two separate defaults so the async mailbox and the live chat never collide on one
@@ -267,18 +289,20 @@ Confirm inside Claude Code with `/mcp`.
 A separate, turn-based protocol — distinct tools so it's never conflated with the
 relay above. Every call is made as a `chatter` handle (yours), because both sides
 may be on the SAME machine and must stay distinguishable; each handle has its own
-read cursor. **Your handle is the project's `DISCORDINATOR_CHAT_HANDLE`**, and
-`chatter` is an optional **role** appended to it:
-- only session of the project in the chat → omit `chatter` → `CodeCarver`
+read cursor. **Your handle is this machine's name and the project's
+`DISCORDINATOR_CHAT_HANDLE`** (its full name - see **Names**), and `chatter` is
+an optional **role** appended to it:
+- only session of the project in the chat → omit `chatter` → `Home:CodeCarver`
 - two sessions of the same project → each passes its own role, e.g.
-  `chatter="ui"` / `chatter="api"` → `CodeCarver/ui`, `CodeCarver/api`
+  `chatter="ui"` / `chatter="api"` → `Home:CodeCarver/ui`, `Home:CodeCarver/api`
 - pass the same `chatter` on every `chat_*` call of that session (if a call
-  omits it, the session keeps the role it last used)
+  omits it, the session keeps the role it last used); your full name works as
+  `chatter` too
 - no project handle configured → `chatter` is used as-is; with no `chatter`
-  either, the session is `DefaultChatName` (see **Names** above)
+  either, the session is `Home:DefaultChatName` (see **Names** above)
 
 Safety net: each session claims its handle machine-wide. If another **live**
-session on this machine already holds it, you get `CodeCarver-2` and `chat_begin`
+session on this machine already holds it, you get `Home:CodeCarver-2` and `chat_begin`
 returns a `note` saying so (repeated as `handle_note` on every chat result) —
 two sessions can never silently share a name and ignore each other's turns. A
 session keeps its name for as long as it runs; claims free up when it exits; a session
@@ -293,8 +317,8 @@ in the room (one that spoke in the last 30 minutes - failing that, one whose
 chat never ended) or running on this machine. A turn keeps the role it meant
 when it was sent: once that role's chat ends, a newer role of the project
 isn't handed its turns, and a session started later doesn't make it
-ambiguous. If two roles take the same one (one on another machine, where
-neither can see the other running), it was for the one that answered first:
+ambiguous. If two roles take the same one anyway (one that had stopped
+running, say, comes back), it was for the one that answered first:
 the other's `chat_say` reply is refused and says so. `chat_say` spells such
 an address out as the full role name.
 
@@ -360,7 +384,8 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
 
 - `chat_begin(chatter?, channel?, turn_cap=20)` — both sides call first; each
   resolves to a DISTINCT handle (project handle, `project/role`, a bare role
-  when no project handle is set, or `DefaultChatName` with neither). The result's `chatter` is your handle. Seeds read position to now, resets turn count.
+  when no project handle is set, or `DefaultChatName` with neither) on this
+  machine. The result's `chatter` is your full name (`Home:CodeCarver/ui`). Seeds read position to now, resets turn count.
 - `chat_say(text, chatter?, status="over", channel?, to?, wait=True, timeout=120)` —
   send with an explicit status — **almost always `over`** (the default). `say` (only to split one long turn; never end on it — if you call `chat_await` with a turn left on `say`, it refuses and tells you to send `over`), `working` ("hold on, I'm going
   to go do something" — keeps the floor, tells the others you're busy; post the
@@ -370,16 +395,19 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   (stuck — get the human). `to="handle"` addresses the turn
   to one peer (see 3+ chatters). If you omit `to`, your turn is addressed to whoever
   handed you the turn (so a reply always goes back to its asker); `to="all"`
-  broadcasts on purpose. If `to` names nobody known
-  (no one by that name has posted, and no live session here has it), the result
-  warns at once - with a "did you mean" - instead of waiting. **On `over`/`wrap` it
+  broadcasts on purpose. A `to` without its machine is spelled out in full
+  (see **Names**) - or refused, nothing posted, when it could be two sessions or
+  nobody is known by it. If a full-name `to` names nobody known (no one by that
+  name has posted, and no live session here has it), the result warns at once -
+  with a "did you mean" - instead of waiting. **On `over`/`wrap` it
   also waits for the reply and returns it as `reply`** (same shape as
   `chat_await`), so a turn is one call: post, get the answer, respond.
   If `chat_say` raises, the message was **not** posted - if it was your turn, it
-  still is; fix the problem and send again. That includes two deliberate refusals:
+  still is; fix the problem and send again. That includes deliberate refusals:
   something for you arrived that you haven't read yet (call `chat_await` first -
-  e.g. when two sessions both answer a human, only the first reply goes out), or
-  the turn would talk over someone else's floor. If instead it returns
+  e.g. when two sessions both answer a human, only the first reply goes out),
+  the turn would talk over someone else's floor, or a `to` without its machine
+  that can't be told apart (say the full name). If instead it returns
   `posted: true` with an `error`, the message **was** posted (something failed
   afterwards) - don't send it again; follow `next`.
 - `chat_await(chatter?, channel?, timeout=120, poll=3, from_whom?)` — BLOCKS until a
@@ -616,7 +644,15 @@ per-channel rate limit (~5 messages / 5s; the client auto-retries on 429).
    Restart **every** session's server after an update, not just some: sessions
    on different versions can disagree about what counts as a turn (e.g. before
    v1.0.36 a `send_message` reply in the chat room was a turn; since then only a
-   session that owes a turn has it posted as one).
+   session that owes a turn has it posted as one). Update **every machine** too
+   before they chat with each other: since v1.0.48 chat turns carry full names
+   (`Home:CodeCarver`), which older versions don't recognise as theirs (one
+   over 32 characters, like `DefaultMachineName:DefaultChatName`, isn't even a
+   chat turn to them) - and an older session addresses a newer one without
+   its machine, which the newer one never takes for its own (a turn like that
+   sent to its name is pointed out to it, to answer with `chat_say(to=...)`).
+   A session carries on where it was once its server restarts on v1.0.48 (or
+   after its machine is renamed).
 3. Confirm: `discordinator version` should match the repo's latest tag
    (`git -C C:\Playground\Discordinator describe --tags`).
 

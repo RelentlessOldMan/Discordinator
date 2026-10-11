@@ -41,6 +41,10 @@ token**: `chat_await` wakes *only* the addressee. Everyone else keeps waiting.
 [Carver>all|end]        ← broadcast to everyone; the chat ends for all three
 ```
 
+(Recorded with handles alone. Since v1.0.48 each name is the full name, machine
+first - `[Home:Carver>Work:Spawner|over]` - and `to="Spawner"` still works: the
+machine is filled in from who's in the room.)
+
 Carver states a **round-robin** up front — Carver → Spawner → Compass → back to
 Carver — and each turn hands the floor to the next in line, so nobody is starved.
 The "floor holder" (who may speak next) is **derived from history** — the
@@ -302,8 +306,8 @@ Spawner — open the tickets. Thanks both; this was a good one. End.
   `end`) still applies, but here the final `end` is broadcast to `all`, so both
   waiting sessions return `ended: true` together. No per-peer teardown.
 - **Same three tools, one bot** — all three sessions posted through the same bot,
-  distinguished only by their `chatter` handle (`Carver` / `Spawner` /
-  `Compass`), each with its own read cursor, calling only `chat_begin`,
+  distinguished only by their names (`Carver` / `Spawner` / `Compass`; since
+  v1.0.48 with their machine, e.g. `Home:Carver`), each with its own read cursor, calling only `chat_begin`,
   `chat_say`, `chat_await`.
 
 For the two-participant walk-through of the base protocol (multi-message turns,

@@ -15,8 +15,9 @@ process is gone is ignored, so a restarted session gets its name back. Each
 claim records its process's start time, so a recycled pid can't hold a dead
 session's name, and a live session keeps its name however long it's idle.
 
-The registry is per machine. Across machines, give each machine's project its
-own handle in that machine's .mcp.json (e.g. ``CodeCarverWork``).
+The registry is per machine. Across machines the machine name tells sessions
+apart: chats use the full name ``<machine>:<handle>`` (see config.full_name),
+and each claim records the machine name its session runs under.
 
 A session's name also survives its MCP server restarting (an /mcp reconnect):
 each process records the role it uses and the names it holds under its
@@ -55,6 +56,9 @@ _current: Optional[str] = None  # the handle this session's last chat call used
 # When this session first took each of its names (handle key -> unix time), so
 # a turn sent before it was running isn't counted as possibly meant for it.
 _since: dict[str, float] = {}
+# Every full name this session has gone by (machine:handle), so a turn sent to
+# one it had before - e.g. under its machine's old name - can be pointed out.
+_full_used: list[str] = []
 
 SESSION_TTL = 7 * 24 * 3600.0  # forget a session record after a week unused
 # A session named by DISCORDINATOR_SESSION_ID has no process to watch: its name
@@ -273,6 +277,47 @@ def restore() -> None:
     if isinstance(since, dict):
         _since.update({k: float(v) for k, v in since.items()
                        if isinstance(k, str) and isinstance(v, (int, float))})
+    full = entry.get("full")
+    if isinstance(full, list):
+        _full_used.extend(h for h in full if isinstance(h, str) and h not in _full_used)
+
+
+def note_full(name: str) -> None:
+    """Record a full name this session goes by (see _full_used)."""
+    if name not in _full_used:
+        _full_used.append(name)
+        _remember()
+
+
+def full_names_used() -> list[str]:
+    return list(_full_used)
+
+
+def retired_full_names() -> list[str]:
+    """Full names sessions running on this machine went by before their
+    machine was renamed - the name they go by now under the old machine name -
+    that no running session goes by now."""
+    now = time.time()
+    out: list[str] = []
+    data = _load(sessions_path())
+    mine = session_key()
+    held = {chat.handle_key(h) for h, _ in live_full_claims()}
+    for key, entry in data.items():
+        if not isinstance(entry, dict) or not _session_alive(key, now, entry):
+            continue
+        full = entry.get("full") if key != mine else _full_used
+        handle, machine = entry.get("handle"), entry.get("machine")
+        current = f"{machine}:{handle}" if isinstance(handle, str) and machine else None
+        if key == mine and _current is not None:
+            current = f"{_machine()}:{_current}"
+        if current is None:
+            continue
+        for h in full if isinstance(full, list) else []:
+            if (isinstance(h, str) and not chat.same_handle(h, current)
+                    and chat.same_handle(chat.local_name(h), chat.local_name(current))
+                    and chat.handle_key(h) not in held):
+                out.append(h)
+    return out
 
 
 def _remember() -> None:
@@ -288,7 +333,8 @@ def _remember() -> None:
             data = {k: v for k, v in data.items() if _session_alive(k, now, v)}
             data[key] = {"chatter": _last_chatter, "resolved": dict(_resolved),
                          "handle": _current, "since": dict(_since), "ts": now,
-                         "pid": os.getpid(), "started": _my_start()}
+                         "full": list(_full_used),
+                         "pid": os.getpid(), "started": _my_start(), "machine": _machine()}
             config._atomic_write(path, json.dumps(data, indent=2, sort_keys=True))
     except OSError:
         pass  # only a convenience for the next restart
@@ -349,12 +395,12 @@ def compose(chatter: Optional[str], base: Optional[str]) -> str:
     if not chatter and not base:
         base = config.DEFAULT_CHAT_NAME  # no name set anywhere: an obvious placeholder
     if not base:
-        return chat.check_own_handle(chat.sanitize_handle(chatter))
+        return chat.check_own_handle(chat.sanitize_local(chatter))
     if not chatter or chat.same_handle(chatter, base):
-        return chat.check_own_handle(chat.sanitize_handle(base))
+        return chat.check_own_handle(chat.sanitize_local(base))
     if chat.handle_key(chatter).startswith(chat.handle_key(base) + "/"):
-        return chat.check_own_handle(chat.sanitize_handle(chatter))
-    return chat.check_own_handle(chat.sanitize_handle(f"{base}/{chatter}"))
+        return chat.check_own_handle(chat.sanitize_local(chatter))
+    return chat.check_own_handle(chat.sanitize_local(f"{base}/{chatter}"))
 
 
 def _with_suffix(handle: str, n: int) -> str:
@@ -375,13 +421,15 @@ def _reserved(now: float) -> dict[str, str]:
     their session records: held for them while their server restarts, so a
     new session can't take the name - and the turns sent to it - in the gap
     before their next server claims it again."""
-    return {k: h for k, (h, _) in _reserved_since(now).items()}
+    return {k: h for k, (h, _, _) in _reserved_since(now).items()}
 
 
-def _reserved_since(now: float) -> dict[str, tuple[str, Optional[float]]]:
-    """_reserved, with when each session took the name (None if unknown)."""
+def _reserved_since(now: float) -> dict[str, tuple[str, Optional[float], Optional[str]]]:
+    """_reserved, with when each session took the name (None if unknown) and
+    the machine name it runs under (None in a record from before v1.0.48),
+    keyed by full name (see _key)."""
     mine = session_key()
-    out: dict[str, tuple[str, Optional[float]]] = {}
+    out: dict[str, tuple[str, Optional[float], Optional[str]]] = {}
     for key, entry in _load(sessions_path()).items():
         if key == mine or not _session_alive(key, now, entry):
             continue
@@ -406,8 +454,40 @@ def _reserved_since(now: float) -> dict[str, tuple[str, Optional[float]]]:
         for h in names:
             if isinstance(h, str):
                 t = since.get(chat.handle_key(h))
-                out[chat.handle_key(h)] = (h, float(t) if isinstance(t, (int, float)) else None)
+                out[_key(h, _machine_in(entry))] = (
+                    h, float(t) if isinstance(t, (int, float)) else None, _machine_in(entry))
     return out
+
+
+def _key(handle: str, machine: Optional[str] = None) -> str:
+    """The registry key for ``handle`` claimed under ``machine`` (this
+    session's when None - a claim from before v1.0.48 didn't say): its full
+    name. Sessions here with their own machine names (a project's
+    DISCORDINATOR_LABEL) can each have the same name."""
+    return chat.handle_key(f"{machine or _machine()}:{handle}")
+
+
+def _claims_of(reg: dict[str, Any], handle: str) -> list[Any]:
+    """The claims on ``handle`` here: its own, then an older version's (kept
+    by the name alone, with no machine - a session on this machine too)."""
+    old = reg.get(chat.handle_key(handle))
+    return [reg.get(_key(handle))] + ([old] if isinstance(old, dict) and not old.get("machine")
+                                      else [])
+
+
+def _taken(reg: dict[str, Any], handle: str, me: int, now: float) -> bool:
+    return any(_held_by_other(e, me, now) for e in _claims_of(reg, handle))
+
+
+def _machine_in(entry: Any) -> Optional[str]:
+    m = entry.get("machine") if isinstance(entry, dict) else None
+    return m if isinstance(m, str) and m else None
+
+
+def _machine() -> str:
+    """The machine name this session runs under (its label, maybe set per
+    project), as recorded with its claims."""
+    return config.machine_name(config.load())
 
 
 def _held_by_other(entry: Any, me: int, now: float) -> bool:
@@ -456,19 +536,18 @@ def claim(desired: str) -> str:
     with _AppendLock(path):
         reg = _load(path)
         handle, n = desired, 1
-        while (_held_by_other(reg.get(chat.handle_key(handle)), me, now)
-               or chat.handle_key(handle) in reserved):
+        while _taken(reg, handle, me, now) or _key(handle) in reserved:
             n += 1
             handle = _with_suffix(desired, n)
-        key = chat.handle_key(handle)
-        prev = reg.get(key)
-        if key not in _since:
+        key = _key(handle)
+        prev = next((e for e in _claims_of(reg, handle) if e is not None), None)
+        if chat.handle_key(handle) not in _since:
             # Since when this session has had the name: its own earlier claim
             # (or its previous server's, still winding down), else now.
             same = isinstance(prev, dict) and (prev.get("pid") == me or (
                 prev.get("session") and prev.get("session") == session_key()))
             t = prev.get("since") if same else None
-            _since[key] = float(t) if isinstance(t, (int, float)) else now
+            _since[chat.handle_key(handle)] = float(t) if isinstance(t, (int, float)) else now
         # Prune dead/expired claims while we hold the lock - and, taking a role
         # of a project, the plain project name this session went by before (or,
         # taking any name, the placeholder it went by with none): it would block
@@ -477,12 +556,17 @@ def claim(desired: str) -> str:
         bare = _resolved.get(chat.handle_key(handle.split("/", 1)[0])) if "/" in handle else None
         if bare is None and not config.is_default_chat_name(handle):
             bare = _resolved.get(chat.handle_key(config.DEFAULT_CHAT_NAME))
-        dropped = chat.handle_key(bare) if bare and "/" not in bare else None
+        dropped = _key(bare) if bare and "/" not in bare else None
+        # (Its own claims under another machine name are from before the
+        # machine was renamed: it goes by none of them now.)
+        here = chat.handle_key(_machine())
         reg = {k: v for k, v in reg.items()
-               if isinstance(v, dict) and (k != dropped if v.get("pid") == me
-                                           else _held_by_other(v, me, now))}
-        reg[key] = {"handle": handle, "pid": me, "ts": now, "since": _since[key],
-                    "started": _my_start(), "session": session_key()}
+               if isinstance(v, dict) and (
+                   k != dropped and chat.handle_key(_machine_in(v) or here) == here
+                   if v.get("pid") == me else _held_by_other(v, me, now))}
+        reg[key] = {"handle": handle, "pid": me, "ts": now,
+                    "since": _since[chat.handle_key(handle)],
+                    "started": _my_start(), "session": session_key(), "machine": _machine()}
         config._atomic_write(path, json.dumps(reg, indent=2, sort_keys=True))
     return handle
 
@@ -569,31 +653,43 @@ def current(chatter: Optional[str], cfg: dict[str, Any]) -> Optional[str]:
     me, now = os.getpid(), time.time()
     reserved = _reserved(now)
     handle, n = desired, 1
-    while (_held_by_other(reg.get(chat.handle_key(handle)), me, now)
-           or chat.handle_key(handle) in reserved):
+    while _taken(reg, handle, me, now) or _key(handle) in reserved:
         n += 1
         handle = _with_suffix(desired, n)
     return handle
 
 
 def live_handles() -> list[str]:
-    """Handles currently held by live sessions on this machine (including a
-    running session's names while its server restarts)."""
+    """Handles currently held by live sessions on this machine under this
+    session's machine name (including a running session's names while its
+    server restarts)."""
     return [h for h, _ in live_claims()]
 
 
 def live_claims() -> list[tuple[str, Optional[float]]]:
     """live_handles, each with when its session took it (unix time; None if
     unknown)."""
+    here = chat.handle_key(_machine())
+    return [(h, since) for h, since, m in _live() if m is None or chat.handle_key(m) == here]
+
+
+def live_full_claims() -> list[tuple[str, Optional[float]]]:
+    """live_claims by full name: each with the machine name its own session
+    runs under (a project can set its own), this one's for an older claim."""
+    here = _machine()
+    return [(f"{m or here}:{h}", since) for h, since, m in _live()]
+
+
+def _live() -> list[tuple[str, Optional[float], Optional[str]]]:
     reg = _load(registry_path())
     me, now = os.getpid(), time.time()
-    out: dict[str, tuple[str, Optional[float]]] = {}
+    out: dict[str, tuple[str, Optional[float], Optional[str]]] = {}
     for v in reg.values():
         if (isinstance(v, dict) and isinstance(v.get("handle"), str)
                 and (v.get("pid") == me or _held_by_other(v, me, now))):
             t = v.get("since")
-            out[chat.handle_key(v["handle"])] = (
-                v["handle"], float(t) if isinstance(t, (int, float)) else None)
+            out[_key(v["handle"], _machine_in(v))] = (
+                v["handle"], float(t) if isinstance(t, (int, float)) else None, _machine_in(v))
     for k, hs in _reserved_since(now).items():
         out.setdefault(k, hs)
     return list(out.values())
