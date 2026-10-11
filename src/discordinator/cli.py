@@ -204,7 +204,7 @@ def cmd_relay(args: argparse.Namespace) -> int:
 
         print(
             f"relay watching '{label_name}' every {args.interval}s "
-            f"(filtering out this machine's own [{own_label}:...] posts — Ctrl+C to stop)"
+            f"(filtering out this machine's own [{config.machine_name(cfg)}:...] posts — Ctrl+C to stop)"
             if own_label and not args.include_self
             else f"relay watching '{label_name}' every {args.interval}s (Ctrl+C to stop)"
         )

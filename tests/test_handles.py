@@ -401,7 +401,7 @@ def test_name_taken_meanwhile_isnt_shared() -> None:
         h2, note = handles.resolve("ProjQ/ui", cfg)
         check(h2 == "ProjQ/ui-2", f"this session moves to ProjQ/ui-2, not a shared name: {h2}")
         check(note and "ProjQ/ui-2" in note, "and is told so")
-        check("/ui/ui" not in note and "chatter=\"api\" -> 'ProjQ/api'" in note.split("e.g.")[1],
+        check("/ui/ui" not in note and "chatter=\"api\" -> 'DefaultMachineName:ProjQ/api'" in note.split("e.g.")[1],
               f"the note's example is a real handle nobody holds: {note.split('e.g.')[1]}")
         again, _ = handles.resolve("ProjQ/ui-2", cfg)
         check(again == "ProjQ/ui-2", "and it keeps that name")
