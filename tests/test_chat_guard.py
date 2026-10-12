@@ -282,6 +282,15 @@ def test_cli_end_to_end() -> None:
     r2 = subprocess.run([sys.executable, "-m", "discordinator.cli", "chat-guard"],
                         input="{}", capture_output=True, text=True, env=env, timeout=60)
     check(r2.returncode == 0 and r2.stdout.strip() == "", "no-op prints nothing")
+    accented = _TMP / "José"
+    accented.mkdir(exist_ok=True)
+    q = str(accented / "t.jsonl")
+    Path(q).write_text(Path(p).read_text(encoding="utf-8"), encoding="utf-8")
+    r3 = subprocess.run([sys.executable, "-m", "discordinator.cli", "chat-guard"],
+                        input=json.dumps({"transcript_path": q}, ensure_ascii=False).encode("utf-8"),
+                        capture_output=True, env=env, timeout=60)
+    check(r3.stdout.strip() and json.loads(r3.stdout)["decision"] == "block",
+          "a path with an accent in it, sent as UTF-8 (as Claude Code sends it), is found")
     import io
     from discordinator import cli
     old_in, old_out = sys.stdin, sys.stdout

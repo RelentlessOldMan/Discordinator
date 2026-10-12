@@ -670,6 +670,31 @@ def test_process_info_without_proc() -> None:
         child.kill()
 
 
+def test_unreadable_registry_isnt_written_over() -> None:
+    print("a claims file that can't be read is never written back empty:")
+    _fresh()
+    _plant("Keeper", os.getppid())
+    before = handles.registry_path().read_text(encoding="utf-8")
+    real = config.read_json
+
+    def locked(path, default):
+        if Path(path) == handles.registry_path():
+            raise PermissionError("held open by another program")
+        return real(path, default)
+
+    config.read_json = locked
+    try:
+        handles.claim("Keeper")
+        check(False, "a claim went ahead")
+    except OSError:
+        check(True, "the claim fails instead of guessing")
+    finally:
+        config.read_json = real
+    check(handles.registry_path().read_text(encoding="utf-8") == before,
+          "and the other session's claim is still there")
+    _fresh()
+
+
 def main() -> int:
     test_compose()
     test_pid_alive()
@@ -692,6 +717,7 @@ def main() -> int:
     test_id_session_names_free_up_when_its_server_is_gone()
     test_reserved_names_dont_walk_the_process_table()
     test_claims_say_since_when()
+    test_unreadable_registry_isnt_written_over()
     test_two_live_servers_of_one_session_dont_share()
     test_plain_name_freed_when_a_role_is_taken()
     test_unnamed_session_isnt_handed_anothers_turn()

@@ -597,7 +597,10 @@ def cmd_interject(args: argparse.Namespace) -> int:
 def cmd_chat_guard(args: argparse.Namespace) -> int:
     """Claude Code Stop hook: block a stop that would strand a live chat."""
     from . import guard
-    out = guard.main(sys.stdin.read())
+    # (Claude Code sends the hook's JSON as UTF-8, whatever the console's
+    # code page - a transcript path with "é" in it must still be found)
+    raw = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else sys.stdin.read()
+    out = guard.main(raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else raw)
     if out:
         print(out)
     return 0

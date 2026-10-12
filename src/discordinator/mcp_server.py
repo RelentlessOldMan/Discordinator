@@ -743,8 +743,12 @@ def _carry_on(full: str) -> None:
 def _carry_slots(full: str) -> None:
     """chat.carry_slots from the names this session went by before with the
     same name as ``full`` (newest first), then the older version's name."""
+    held = {chat.handle_key(h) for h, _ in handles.live_full_claims()}
+    # (not a name another session running here goes by now - a project's own
+    # DISCORDINATOR_LABEL may be the machine's old name: that state is its)
     earlier = [h for h in reversed(handles.full_names_used())
-               if chat.same_handle(chat.local_name(h), chat.local_name(full))]
+               if chat.same_handle(chat.local_name(h), chat.local_name(full))
+               and chat.handle_key(h) not in held]
     try:
         chat.carry_slots(earlier + [chat.local_name(full)], full)
     except (OSError, config.LockTimeout):
@@ -891,7 +895,7 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any],
             continue
         if chat.same_handle(p["participant"], me) and p["to"]:
             owed = last_to.get(chat.handle_key(p["to"]))
-            t = told.get(owed[0]) if owed is not None else None
+            t = told.get(f"{channel_id}|{owed[0]}") if owed is not None else None
             if (isinstance(t, dict) and t.get("turn") == owed[1]
                     and i > at.get(str(t.get("after")), -1)):  # (a reply sent after it was told)
                 answered.add(owed[0])
@@ -932,7 +936,7 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any],
             owed = st.get("_owed_turn") or {}
             _lost_turn[chat.handle_key(h)] = (owed.get("from"), st.get("_owed_text") or "")
     if tell and out:  # (the caller shows them: see _told)
-        _note_told({chat.handle_key(h): {"turn": newest.get(chat.handle_key(h), ""),
+        _note_told({f"{channel_id}|{chat.handle_key(h)}": {"turn": newest.get(chat.handle_key(h), ""),
                                          "after": str(msgs[-1]["id"]) if msgs else ""}
                     for h in out})
     return out
@@ -943,7 +947,8 @@ _lost_turn: dict[str, tuple[Optional[str], str]] = {}
 
 
 # The turn (its id) this session was last told about under each name that
-# looks like its own (_lost_turns), and the newest message in the room then -
+# looks like its own (_lost_turns), by "<room>|<name>", and the newest message
+# in the room then -
 # so its next reply to that turn's sender after that is taken as its answer.
 # Also kept under the session, so a restarted server knows it was answered.
 _told: dict[str, dict[str, str]] = {}
@@ -1045,9 +1050,10 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         # spoke again) is re-delivered by chat_await - recovery instead of a
         # silent stall; a long turn in progress arrives whole.
         cursor = chat.seed_cursor(client, channel_id, me)
+        held = chat.held_from(client, channel_id, me)
     chat.reset(channel_id, me, cursor, turn_cap)
     chat.note_room(channel_id, config.is_local(cfg, "chat"))
-    owed = bool(st.get("your_turn"))
+    owed = bool(st.get("your_turn") or held)
     out = {
         "channel": channel_id, "chatter": me, "turn_cap": turn_cap,
         "recovered_pending_turn": owed,
@@ -1199,6 +1205,11 @@ def chat_say(
             chat.note_room(channel_id, config.is_local(cfg, "chat"))
             if target == typed:  # (filled in: the asker's own name, exactly as it posted)
                 target = _expand_bare(client, channel_id, me, target)
+            if target and chat.same_handle(target, me):
+                raise ChatSendError(
+                    f"to='{typed}' is you ({me}): nobody else would get that turn, and "
+                    "you'd wait on yourself. Address someone else (or to='all'). "
+                    "Nothing was posted.")
             to_note = _unknown_to_note(client, channel_id, me, target)
             try:
                 sent = chat.send_chat(client, channel_id, me, status, text, to=target,
@@ -1251,6 +1262,24 @@ def _send_failed(e: Exception, status: str) -> ChatSendError:
         "send it again with chat_say(...) before calling chat_await.")
 
 
+def _renamed_here(msgs: list[dict[str, Any]]) -> dict[str, str]:
+    """The earlier full names (by key) of sessions running here, renamed with
+    the machine, that stand for them in these messages: each to the name the
+    session goes by now. Not a name anyone else has posted under in them - a
+    session on another machine since given the old machine name may go by it."""
+    out: dict[str, str] = {}
+    me = handles.session_key()
+    for key, current, names in handles.renamed_sessions():
+        if not names:
+            continue
+        ids = {str(e.get("id")) for e in (_all_my_posts() if key == me else config.my_posts(key))}
+        for h in names:
+            if all(str(m.get("id")) in ids for m in msgs
+                   if (p := chat.parse_msg(m)) and chat.same_handle(p["participant"], h)):
+                out[chat.handle_key(h)] = current
+    return out
+
+
 def _check_turn(client: Client, channel_id: str, me: str, status: str,
                 target: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     """Checks before posting a turn. Returns the address to use (an unaddressed
@@ -1292,17 +1321,20 @@ def _check_turn(client: Client, channel_id: str, me: str, status: str,
                 "answered it first - it was theirs, not yours. Call chat_await to "
                 "wait for a turn meant for you, or pass to=... to say something anyway.")
     note = None
+    unaddressed = target is None
     if target is None:
         back = chat.get_reply_to(channel_id, me)
         # (a session here that has been renamed with the machine since: by
         # the name it goes by now)
-        back = next((cur for _, cur, names in handles.renamed_sessions()
-                     if any(chat.same_handle(back, h) for h in names)), back)
+        if back:
+            back = _renamed_here(chat.history(client, channel_id)).get(chat.handle_key(back), back)
         if back:
             target = back
             note = (f"Addressed to {back} (who handed you the turn). Pass to=... to "
                     "pick someone else, or to='all' to let anyone answer.")
-    if target is None and status in chat.YIELD_STATUSES:
+    if unaddressed and status in chat.YIELD_STATUSES:
+        # (whether or not it would go back to whoever last handed me a turn:
+        # that's past - someone else has the floor now)
         pend, floor = st.get("pending_turn"), st.get("floor")
         if (pend and floor and not st.get("your_turn")
                 and not chat._is_broadcast(pend.get("to"))
@@ -1388,7 +1420,8 @@ def _expand_bare(client: Client, channel_id: str, me: str,
     parsed = [chat.parse_msg(m) for m in msgs]
     if chat.machine_of(target) is None:
         # (newest first)
-        history = chat.posters(client, channel_id) if len(msgs) >= 100 else parsed[::-1]
+        raw = chat.history(client, channel_id) if len(msgs) >= 100 else msgs[::-1]
+        history = [chat.parse_msg(m) for m in raw]
         found = chat.names_for(history, target, me, chat._live_here)
         older = [h for h in found if chat.machine_of(h) is None]
         if older and len(found) > len(older):
@@ -1402,7 +1435,7 @@ def _expand_bare(client: Client, channel_id: str, me: str,
         if len(found) > 1:
             # A running session's own earlier name (before its machine was
             # renamed) is that session, not another one.
-            retired = {chat.handle_key(h) for h in handles.retired_full_names()}
+            retired = _renamed_here(raw)
             found = [h for h in found if chat.handle_key(h) not in retired] or found
         if len(found) > 1:
             # (the one that posted last first - an example, most likely the one meant)
@@ -1599,6 +1632,8 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
       - suggest_next: the fair next addressee in a multiparty room (an
         outstanding request, else the most-starved non-speaker), or null
       - your_turn: True if the pending turn is owed to you — it's addressed to you (or broadcast) and isn't your own.
+        Also True when a turn to you came while you waited for someone else
+        (chat_await from_whom) - `held_from` says whom from; chat_await hands it over.
 
     If your_turn is True: call `chat_begin` (it repositions you to receive the
     pending turn) then `chat_await`, or `chat_say` if already in the session.
@@ -1621,8 +1656,16 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
         st = chat.compute_state(client, channel_id, me)
         lost = (_lost_turns(client, channel_id, me, cfg)
                 if me and not st.get("your_turn") else [])
+        held = chat.held_from(client, channel_id, me) if me else []
     public = {k: v for k, v in st.items() if not k.startswith("_")}
     public["channel"] = channel_id
+    if held:
+        # Turns that came while it waited for someone else (from_whom): owed
+        # to it all the same, and its next chat_await hands them over.
+        public["your_turn"] = True
+        public["held_from"] = held
+        public["note"] = (f"A turn to you from {', '.join(dict.fromkeys(held))} came while you "
+                          "waited for someone else - call chat_await to receive it.")
     if role is not None:
         public["chatter"] = me
         public["note"] = ((f"A turn here is owed to '{me}'" if st.get("your_turn") else
@@ -1630,7 +1673,7 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
                           + ", and no running session holds that name - you, before a "
                           "restart. Your next chat call takes that name back.")
     elif lost:
-        public["note"] = _lost_note(lost, cfg)
+        public["note"] = (f"{public['note']} " if held else "") + _lost_note(lost, cfg)
     note = _unnamed(public.get("note"), me)
     if note:
         public["note"] = note

@@ -961,6 +961,83 @@ def test_a_stale_claim_doesnt_block_its_old_name() -> None:
         os.environ["DISCORDINATOR_LABEL"] = label
 
 
+def test_another_machine_now_has_a_renamed_sessions_old_name() -> None:
+    print("another machine now going by a session's old name here is that machine, not it:")
+    _fresh()
+    r, c = "old-name-elsewhere", LocalClient()
+    try:
+        handles.claim("Yo")  # Yo runs here: it was Lab:Yo, until this machine was renamed Home
+        _as_other_process("Home:Yo")
+        _other_session("id:xy", "Yo", ["Lab:Yo", "Home:Yo"])
+        mcp.chat_begin(chatter="Xo", channel=r)
+        chat.send_chat(c, r, "Lab:Yo", "over", "from the machine named Lab now", to="Home:Xo")
+        got = wait(r, chatter="Xo")
+        check(got.get("from") == "Lab:Yo", f"it asks: {got.get('from')}")
+        mcp.chat_say(text="answer", chatter="Xo", channel=r, wait=False)
+        check(last(r).startswith("[Home:Xo>Lab:Yo|over]"), f"the reply goes back to it: {last(r)[:24]}")
+        try:
+            mcp.chat_say(text="Yo?", chatter="Xo", channel=r, to="Yo", wait=False)
+            check(False, f"to='Yo' could be either - but it went: {last(r)[:24]}")
+        except Exception as e:
+            check("Lab:Yo or Home:Yo" in str(e) or "Home:Yo or Lab:Yo" in str(e),
+                  f"to='Yo' could be either: {str(e)[:50]}")
+    finally:
+        _drop_claim("Home:Yo")
+        _drop_other_sessions()
+
+
+def test_renamed_session_leaves_anothers_state_alone() -> None:
+    print("a renamed session doesn't take the chat state of a session here that has its old name:")
+    from discordinator import config
+    _fresh()
+    handles._SESSION_KEY = "id:cs"
+    c = LocalClient()
+    try:
+        mcp.chat_begin(chatter="Cs", channel="carry-1")
+        os.environ["DISCORDINATOR_LABEL"] = "Lab"  # the machine, renamed
+        mcp.chat_status(chatter="Cs", channel="carry-1")
+        # A project here with its own DISCORDINATOR_LABEL - the old name - and the same name
+        now, other = time.time(), os.getppid()
+        path = handles.registry_path()
+        reg = json.loads(path.read_text(encoding="utf-8"))
+        reg["home:cs"] = {"handle": "Cs", "machine": "Home", "pid": other, "ts": now,
+                          "since": now, "started": handles.process_started(other),
+                          "own_label": True}
+        path.write_text(json.dumps(reg), encoding="utf-8")
+        chat.send_chat(c, "carry-2", "Work:Q", "over", "older", to="all")
+        chat.reset("carry-2", "Home:Cs", c.read_messages("carry-2", limit=1)[0]["id"], 20)
+        mcp.chat_status(chatter="Cs", channel="carry-1")
+        slots = sorted((config.load_state().get("chat") or {}).get("carry-2") or {})
+        check("home:cs" in slots and "lab:cs" not in slots, f"its state stays its own: {slots}")
+    finally:
+        os.environ["DISCORDINATOR_LABEL"] = "Home"
+        handles._SESSION_KEY = None
+        _drop_claim("Home:Cs")
+
+
+def test_answered_in_one_room_stays_answered() -> None:
+    print("an old name's turn answered in one room isn't pointed out again after another room's:")
+    _fresh()
+    handles._SESSION_KEY = "id:tw"
+    c = LocalClient()
+    try:
+        for r, peer in (("told-a", "PeerA"), ("told-b", "PeerB")):
+            chat.send_chat(c, r, "Tw9", "over", f"hi {peer}", to=peer)  # an older version's
+            chat.send_chat(c, r, peer, "over", f"hi Tw9 from {peer}", to="Tw9")
+        os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Tw9"
+        b = mcp.chat_begin(channel="told-a")
+        check("owed to 'Tw9'" in (b.get("note") or ""), "pointed out in one room")
+        mcp.chat_say(text="answering PeerA", channel="told-a", to="PeerA", wait=False)
+        b = mcp.chat_begin(channel="told-b")
+        check("owed to 'Tw9'" in (b.get("note") or ""), "and in the other")
+        st = mcp.chat_status(channel="told-a")
+        check("owed to 'Tw9'" not in (st.get("note") or ""),
+              f"the first still answered: {(st.get('note') or '-')[:50]}")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        handles._SESSION_KEY = None
+
+
 def main() -> int:
     test_one_name_everywhere()
     test_same_project_on_two_machines()
@@ -1004,6 +1081,9 @@ def main() -> int:
     test_deleting_counts_whoever_has_the_old_name()
     test_set_label_carries_every_read_position()
     test_a_stale_claim_doesnt_block_its_old_name()
+    test_another_machine_now_has_a_renamed_sessions_old_name()
+    test_renamed_session_leaves_anothers_state_alone()
+    test_answered_in_one_room_stays_answered()
     print(f"\nALL {_passed} CHECKS PASSED")
     return 0
 

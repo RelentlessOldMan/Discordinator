@@ -300,16 +300,11 @@ def full_names_used() -> list[str]:
     return list(_full_used)
 
 
-def retired_full_names() -> list[str]:
-    """Full names sessions running on this machine went by before their
-    machine was renamed - the name they go by now under the old machine name -
-    that no running session goes by now."""
-    return [h for _, _, names in renamed_sessions() for h in names]
-
-
 def renamed_sessions() -> list[tuple[str, str, list[str]]]:
-    """(session key, the full name it goes by now, its retired full names -
-    see retired_full_names) for each session running on this machine."""
+    """(session key, the full name it goes by now, its retired full names)
+    for each session running on this machine: the names it went by before its
+    machine was renamed - the name it goes by now under the old machine name -
+    that no running session goes by now."""
     now = time.time()
     out: list[tuple[str, str, list[str]]] = []
     data = _load(sessions_path())
@@ -345,7 +340,7 @@ def _remember() -> None:
     now = time.time()
     try:
         with _AppendLock(path):
-            data = _load(path)
+            data = _load_to_write(path)
             data = {k: v for k, v in data.items() if _session_alive(k, now, v)}
             before = data.get(key) if isinstance(data.get(key), dict) else {}
             data[key] = {"chatter": _last_chatter, "resolved": dict(_resolved),
@@ -432,9 +427,16 @@ def _with_suffix(handle: str, n: int) -> str:
 
 def _load(path) -> dict[str, Any]:
     try:
-        data = config.read_json(path, {})  # retries while another session swaps it
+        return _load_to_write(path)
     except OSError:
         return {}
+
+
+def _load_to_write(path) -> dict[str, Any]:
+    """_load for a read that's written back: a file that stays unreadable
+    raises (OSError) - written back as empty, it would drop every other
+    session's entry."""
+    data = config.read_json(path, {})  # retries while another session swaps it
     return data if isinstance(data, dict) else {}
 
 
@@ -613,7 +615,7 @@ def claim(desired: str) -> str:
     me, now = os.getpid(), time.time()
     reserved = _reserved(now)
     with _AppendLock(path):
-        reg = _load(path)
+        reg = _load_to_write(path)
         handle, n = desired, 1
         while _taken(reg, handle, me, now) or _key(handle) in reserved:
             n += 1
@@ -786,7 +788,7 @@ def release_all() -> None:
     me = os.getpid()
     try:
         with _AppendLock(path):
-            reg = _load(path)
+            reg = _load_to_write(path)
             kept = {k: v for k, v in reg.items()
                     if not (isinstance(v, dict) and v.get("pid") == me)}
             if kept != reg:

@@ -182,8 +182,30 @@ def test_human_interject_and_stop() -> None:
           "a human [[STOP]] ends the chat")
 
 
+def test_ids_never_repeat_across_rooms() -> None:
+    print("ids never repeat, even across rooms posted to at the same moment:")
+    import threading
+    ids: list[str] = []
+
+    def post(room: str) -> None:
+        c = LocalClient(label=room)
+        for n in range(40):
+            ids.append(c.post(room, f"n{n}")["id"])
+
+    threads = [threading.Thread(target=post, args=(r,)) for r in ("same-tick-a", "same-tick-b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    check(len(ids) == 80 and len(set(ids)) == 80, f"80 posts, 80 ids: {len(set(ids))}")
+    cfg = {"relay_transport": "local", "channels": {}}
+    check(config.resolve_channel(cfg, "Ops Team") == config.resolve_channel(cfg, "ops-team"),
+          "'Ops Team' and 'ops-team' are one room, with one read position")
+
+
 def main() -> int:
     test_client_primitives()
+    test_ids_never_repeat_across_rooms()
     test_relay_roundtrip()
     test_chat_two_party()
     test_chat_nway_addressing()

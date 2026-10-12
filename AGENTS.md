@@ -137,7 +137,8 @@ from and what it says - so the session can answer it.
 
 For a mode on `local`, skip steps 2–3 for it (no bot/token/channels): relay
 defaults to room `relay`, chat to room `chat`; pass any `channel="..."` for
-another room. The rest of this doc's tool usage is identical on both transports.
+another room (named like a Discord channel: `Ops Team` and `ops-team` are one
+room). The rest of this doc's tool usage is identical on both transports.
 
 **The two modes are independent**, so one session can relay over Discord to
 reach another machine while chatting locally with a sibling session on the same
@@ -359,7 +360,9 @@ drops anyone silent for **30+ minutes**
 30 minutes (dropped without an `end`) no longer keeps its members from hearing a
 new unaddressed opener (except a member that still owes the last turn an answer:
 a reply after a long piece of work goes back to whoever asked), and a turn owed to you expires after **4 hours** (a
-session joining days later isn't handed a dead conversation's turn). A session
+session joining days later isn't handed a dead conversation's turn) - unless
+you were in that chat: one you haven't read yet, or were handed and haven't
+answered, stays yours however long it took. A session
 waiting in a room where others chat without addressing it is told how to join
 (`status="ask"`). The ranked list of non-floor
 participants (`waiting` in results, shown as **others** in the viewers) is a
@@ -409,8 +412,11 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   still is; fix the problem and send again. That includes deliberate refusals:
   something for you arrived that you haven't read yet (call `chat_await` first -
   e.g. when two sessions both answer a human, only the first reply goes out),
-  the turn would talk over someone else's floor, or a `to` without its machine
-  that can't be told apart (say the full name). If instead it returns
+  the turn would talk over someone else's floor, a `to` without its machine
+  that can't be told apart (say the full name), or a `to` that is yourself.
+  The one exception: a long message split into pieces that fails partway -
+  the error says how many pieces went out (as `say`, so the turn is still
+  yours) and how the rest starts: send just the rest. If instead it returns
   `posted: true` with an `error`, the message **was** posted (something failed
   afterwards) - don't send it again; follow `next`.
 - `chat_await(chatter?, channel?, timeout=120, poll=3, from_whom?)` — BLOCKS until a
@@ -421,7 +427,8 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   doesn't wake you — you hold until the floor is yours. `from_whom` narrows waking to
   one peer (a name without its machine means whom `to=` would); a turn for
   you from anyone else meanwhile is kept, and your next `chat_await` hands it
-  over. **If `timed_out` and not `ended`, call it again** — the other side is
+  over (`chat_status` shows it as `your_turn`, with `held_from`; a
+  `chat_begin` keeps it). **If `timed_out` and not `ended`, call it again** — the other side is
   still busy, and waiting a long time is fine; the timeout `note` shows what they
   said they're working on. (A session that owes a reply and sends it with
   `send_message` to the chat room has it posted as its chat turn to that peer. Any
