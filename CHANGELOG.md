@@ -8,6 +8,13 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.53] - 2026-10-12
+Own posts known by id; working notes stand alone; more stop forms; old-name turns past 500
+- delete_messages counts every post of this session (any role, earlier machine name) as its own - the note names only others
+- A working note is shown on its own, never joined onto the sender's next turn
+- 'stop, please', 'please, stop', 'stop it' and 'end it.' halt a chat
+- A turn to an old name or bare project handle is found even with more than 500 messages after it
+
 ## [1.0.52] - 2026-10-12
 Turns held and owed stay yours; no turns to yourself; local ids never repeat
 - chat_say refuses a turn addressed to yourself (nothing posted)
