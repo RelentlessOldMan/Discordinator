@@ -682,11 +682,17 @@ def carry_slots(earlier: list[str], me: str) -> None:
 
 
 def reset(channel_id: str, me: str, cursor: str, cap: int) -> None:
+    """A fresh start in the room (chat_begin) - keeping the turns held for my
+    next wait (see _Position): they're still waiting on me."""
     with config.update_state() as state:
-        state.setdefault("chat", {}).setdefault(channel_id, {})[handle_key(me)] = {
+        room = state.setdefault("chat", {}).setdefault(channel_id, {})
+        before = room.get(handle_key(me))
+        held = before.get("held") if isinstance(before, dict) else None
+        room[handle_key(me)] = {
             "cursor": cursor,
             "turns": 0,
             "cap": cap,
+            **({"held": held} if held else {}),
         }
 
 
@@ -1020,6 +1026,7 @@ def await_turn(
                               "it's your turn to answer it.")
             if result.get("from"):
                 set_reply_to(channel_id, me, result["from"])
+            result.update(_floor_context(client, channel_id, me))
             return _finish(channel_id, me, result)
     except BaseException:
         if held is not None:
@@ -1065,6 +1072,7 @@ def await_turn(
                           "turn now. Reply with chat_say; don't call chat_await until "
                           "you have.")
         set_reply_to(channel_id, me, owed["from"])
+        result.update(_floor_context(client, channel_id, me))
         return _finish(channel_id, me, result)
 
     # Per-sender say-continuation buffers so interleaved multiparty turns don't
@@ -1146,6 +1154,13 @@ def _hold(channel_id: str, me: str, items: list[dict[str, Any]]) -> None:
     with config.update_state() as state:
         slot = _slot(state, channel_id, me)
         slot["held"] = (list(slot.get("held") or []) + items)[-HELD_MAX:]
+
+
+def held_from(client: DiscordClient, channel_id: str, me: str) -> list[str]:
+    """Who the turns held for my next wait (still waiting on me) are from."""
+    held = _slot(config.load_state(), channel_id, me).get("held") or []
+    return [str((h.get("result") or {}).get("from")) for h in held
+            if isinstance(h, dict) and _held_still_open(client, channel_id, me, h)]
 
 
 def _take_held(channel_id: str, me: str, from_whom: Optional[str]) -> Optional[dict[str, Any]]:
@@ -1266,7 +1281,10 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
             status = parsed["status"]
             to = parsed["to"]
             if status == "ask":
-                continue  # a hand-raise — recorded in history, doesn't wake me
+                # A hand-raise - recorded in history, doesn't wake me. (A long
+                # one's earlier pieces were part of it, not of the sender's next turn.)
+                pending_by_sender.pop(sender, None)
+                continue
 
             buf = pending_by_sender.setdefault(sender, [])
             buf.append({
@@ -1568,7 +1586,9 @@ def compute_state(
     }
     if me_norm is not None:
         owed = None if ended else _owed_to(turns, me_norm, last_turn_index_by,
-                                           _named_since(me_norm))
+                                           _named_since(me_norm),
+                                           get_cursor(channel_id, me_norm),
+                                           get_reply_to(channel_id, me_norm))
         state["your_turn"] = owed is not None
         state["_owed_turn"] = (
             {k: owed[k] for k in ("from", "to", "status", "id", "ts")} if owed else None)
@@ -1608,10 +1628,15 @@ def _history(client: DiscordClient, channel_id: str, me: Optional[str], scan: in
 def posters(client: DiscordClient, channel_id: str) -> list[Optional[dict[str, Any]]]:
     """The chat turns in the room's last HISTORY_CAP messages (newest first),
     for working out who a typed name stands for."""
-    out: list[Optional[dict[str, Any]]] = []
+    return [parse_msg(m) for m in history(client, channel_id)]
+
+
+def history(client: DiscordClient, channel_id: str) -> list[dict[str, Any]]:
+    """The room's last HISTORY_CAP messages, simplified (newest first)."""
+    out: list[dict[str, Any]] = []
     page = client.read_messages(channel_id, limit=100)
     while page:
-        out.extend(parse_msg(simplify_message(m)) for m in page)
+        out.extend(simplify_message(m) for m in page)
         if len(page) < 100 or len(out) >= HISTORY_CAP:
             break
         page = client.read_messages(channel_id, limit=100, before=page[-1]["id"])
@@ -1671,6 +1696,7 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
             comp[k] = {k}
             epoch[k] = i
 
+    lone_ends: set[int] = set()  # endings that were their sender's first word: its own
     seen: dict[str, datetime] = {}  # handle -> its latest turn (sent or addressed to it)
     last: dict[str, tuple[int, str, Optional[str]]] = {}  # handle -> (i, status, to) it sent
     for i, m in enumerate(msgs):
@@ -1699,6 +1725,7 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
         for h in (k,) if _is_broadcast(p["to"]) else (k, handle_key(p["to"])):
             if ts is not None:
                 seen[h] = ts
+        before = last.get(k)
         last[k] = (i, p["status"], p["to"])
         if not _is_broadcast(p["to"]):
             link(k, handle_key(p["to"]))
@@ -1709,8 +1736,14 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
             # wants into the one going on (the most recent).
             link(k, recent)
         if p["status"] in TERMINAL_STATUSES:
-            if len(grp(k)) == 1:  # an unaddressed chat: everyone not in a conversation
-                close([h for h, s in comp.items() if len(s) == 1], i)
+            if len(grp(k)) == 1:
+                # An unaddressed chat: everyone not in a conversation - once
+                # the sender has taken part in it. Its first word being an
+                # ending ends nobody else's (an opener still waiting stays open).
+                took_part = before is not None and before[0] >= max(epoch.get(k, 0), room_stop)
+                close([h for h, s in comp.items() if len(s) == 1] if took_part else [k], i)
+                if not took_part:
+                    lone_ends.add(i)
             else:
                 close(list(grp(k)), i)
 
@@ -1756,7 +1789,7 @@ def _conversation(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[st
             latest = ts if latest is None else max(latest, ts)
         if i == epoch.get(my):
             scope.append(i)  # what closed my last conversation (so `ended` shows)
-        elif i < ep(k):
+        elif i < ep(k) or i in lone_ends:
             continue
         elif k in mine or (alone and _is_broadcast(p["to"]) and len(grp(k)) == 1):
             scope.append(i)
@@ -1849,21 +1882,38 @@ def _named_since(me: str) -> Optional[datetime]:
     return datetime.fromtimestamp(t if t is not None else time.time(), timezone.utc)
 
 
+def _after(message_id: Any, read_to: Optional[str]) -> bool:
+    """Is ``message_id`` past the read position ``read_to``?"""
+    try:
+        return read_to is not None and int(message_id) > int(read_to)
+    except (TypeError, ValueError):
+        return False
+
+
 def _owed_to(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
-             not_before: Optional[datetime] = None) -> Optional[dict[str, Any]]:
+             not_before: Optional[datetime] = None,
+             read_to: Optional[str] = None,
+             handed_by: Optional[str] = None) -> Optional[dict[str, Any]]:
     """The turn owed to ``me``: the latest yield that targets me, that I haven't
     answered since (no completed turn of mine after it), and whose sender hasn't
     moved on (it's still their latest turn). Worked out per caller, so two
     conversations sharing one room don't hide each other's owed turns. An
     unaddressed turn counts as answered once anyone else replies to it.
-    A turn addressed to ``me`` before ``not_before`` isn't (see _named_since)."""
+    A turn addressed to ``me`` before ``not_before`` isn't (see _named_since).
+    One older than OWED_EXPIRY isn't either - a session joining days later
+    isn't handed a dead conversation's turn - unless ``me`` was in this chat:
+    the turn came after ``read_to`` (where it has read the room to - not
+    read yet, chat_await would hand it over), or was handed to it and not
+    answered yet (it's from ``handed_by``, whom its reply goes back to - a
+    chat_begin starts that afresh)."""
     mine = last_by.get(me, -1)
     horizon = datetime.now(timezone.utc) - OWED_EXPIRY
     for t in reversed(turns):
         if t["i"] <= mine:
             return None
         ts = _parse_ts(t.get("ts"))
-        if ts is not None and ts < horizon:
+        if (ts is not None and ts < horizon and not _after(t.get("id"), read_to)
+                and not (handed_by and same_handle(t["from"], handed_by))):
             return None  # long dead: nothing older is owed either
         if (not_before is not None and not _is_broadcast(t["to"])
                 and (ts is None or ts < not_before)):

@@ -463,7 +463,93 @@ def test_disconnect_lets_a_post_finish() -> None:
         chat.SHUTDOWN.clear()
 
 
+def test_held_turn_survives_chat_begin() -> None:
+    print("a turn held while waiting for someone else survives a chat_begin:")
+    r, c = "held-begin", LocalClient()
+    for h in "ABC":
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "M:B", "over", "B asks A", to="M:A")
+    chat.send_chat(c, r, "M:C", "over", "C asks A", to="M:A")
+    got = mcp.chat_await(chatter="A", channel=r, timeout=1, poll=0.02, nudge_after=0, from_whom="C")
+    check(got.get("from") == "M:C", f"it waits for C: {got.get('from')}")
+    mcp.chat_say(text="to C", chatter="A", channel=r, wait=False)
+    st = mcp.chat_status(chatter="A", channel=r)
+    check(st["your_turn"] and st.get("held_from") == ["M:B"], f"chat_status says B's is owed: {st.get('held_from')}")
+    b = mcp.chat_begin(chatter="A", channel=r)
+    check(b["recovered_pending_turn"], "chat_begin says a turn is owed")
+    got = wait("A", r)
+    check(got.get("from") == "M:B" and got.get("text") == "B asks A", f"and it arrives: {got.get('text')}")
+    check(got.get("multiparty") and "suggest_next" in got, "with the floor context of a multiparty room")
+
+
+def test_no_unaddressed_reply_over_the_floor() -> None:
+    print("an unaddressed turn doesn't go back to an old asker while someone else has the floor:")
+    r = "old-asker"
+    for h in "ABC":
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="C?", chatter="A", channel=r, to="M:C", wait=False)
+    wait("C", r)
+    mcp.chat_say(text="I think X", chatter="C", channel=r, wait=False)
+    wait("A", r)
+    mcp.chat_say(text="B?", chatter="A", channel=r, to="M:B", wait=False)
+    try:
+        mcp.chat_say(text="also Y", chatter="C", channel=r, wait=False)
+        check(False, "C's unaddressed turn went out over B's floor")
+    except Exception as e:
+        check("has the floor" in str(e), f"refused: {str(e)[:40]}")
+    st = mcp.chat_status(chatter="B", channel=r)
+    check(st["your_turn"] and st["floor"] == "M:B", "B still has it")
+
+
+def test_a_first_word_end_ends_nobody_elses() -> None:
+    print("a session whose first word is an unaddressed end doesn't close a waiting opener:")
+    r = "first-word-end"
+    mcp.chat_begin(chatter="Op", channel=r)
+    mcp.chat_say(text="anyone up for planning?", chatter="Op", channel=r, wait=False)
+    mcp.chat_begin(chatter="Nope", channel=r)
+    mcp.chat_say(text="not me, bye", chatter="Nope", channel=r, status="end", wait=False)
+    got = wait("Op", r, 0.3)
+    check(not got.get("ended"), f"the opener's wait goes on: {got.get('stop_reason')}")
+    b = mcp.chat_begin(chatter="Later", channel=r)
+    check(b["recovered_pending_turn"], "and a session joining later is handed the opener")
+    got = wait("Later", r)
+    check(got.get("from") == "M:Op", f"from: {got.get('from')}")
+
+
+def test_long_ask_stays_an_ask() -> None:
+    print("a long hand-raise isn't stuck onto the front of its sender's next turn:")
+    r = "long-ask"
+    for h in "ABC":
+        mcp.chat_begin(chatter=h, channel=r)
+    mcp.chat_say(text="B?", chatter="A", channel=r, to="M:B", wait=False)
+    mcp.chat_say(text="ASK " * 600, chatter="C", channel=r, status="ask", to="M:A", wait=False)
+    wait("B", r)
+    mcp.chat_say(text="B answers", chatter="B", channel=r, wait=False)
+    check(wait("A", r).get("text") == "B answers", "A gets B's answer")
+    mcp.chat_say(text="C, go", chatter="A", channel=r, to="M:C", wait=False)
+    wait("C", r)
+    mcp.chat_say(text="my point", chatter="C", channel=r, wait=False)
+    got = wait("A", r)
+    check(got.get("text") == "my point", f"and then C's turn, as sent: {got.get('text', '')[:20]}")
+
+
+def test_a_turn_to_yourself_is_refused() -> None:
+    print("a turn addressed to yourself is refused:")
+    r = "to-self"
+    mcp.chat_begin(chatter="Me", channel=r)
+    try:
+        mcp.chat_say(text="note to self", chatter="Me", channel=r, to="M:Me", wait=False)
+        check(False, "it was posted")
+    except Exception as e:
+        check("is you" in str(e) and "Nothing was posted" in str(e), f"refused: {str(e)[:40]}")
+
+
 def main() -> int:
+    test_held_turn_survives_chat_begin()
+    test_no_unaddressed_reply_over_the_floor()
+    test_a_first_word_end_ends_nobody_elses()
+    test_long_ask_stays_an_ask()
+    test_a_turn_to_yourself_is_refused()
     test_other_chats_end_isnt_mine()
     test_two_pairs_not_multiparty()
     test_opener_survives_other_traffic()

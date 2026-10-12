@@ -217,6 +217,30 @@ def test_footer_label() -> None:
     check("others:" in footer and "waiting" not in footer, f"footer: {footer}")
 
 
+def test_a_turn_still_owed_after_hours() -> None:
+    print("a turn to a session in the chat stays owed past 4 hours; a newcomer isn't handed it:")
+    c, room = LocalClient(), "hours-later"
+
+    def aw(h: str) -> dict:
+        return mcp.chat_await(chatter=h, channel=room, timeout=0.3, poll=0.02, nudge_after=0)
+
+    for h in ("Asker", "Busy"):
+        mcp.chat_begin(chatter=h, channel=room)
+    mcp.chat_say(text="question", chatter="Asker", channel=room, to="M:Busy", wait=False)
+    _age(c, room, [300])  # sent 5 hours ago, while Busy was off working
+    st = mcp.chat_status(chatter="Busy", channel=room)
+    check(st["your_turn"], "chat_status: still its turn (not read yet)")
+    check(mcp.chat_begin(chatter="Busy", channel=room)["recovered_pending_turn"],
+          "chat_begin: still owed, not skipped")
+    check(aw("Busy").get("text") == "question", "chat_await: handed over")
+    check(mcp.chat_status(chatter="Busy", channel=room)["your_turn"],
+          "and owed until it answers")
+    _say(c, room, "M:Asker", "over", "to someone new", to="M:Late")
+    _age(c, room, [300, 300])
+    b = mcp.chat_begin(chatter="Late", channel=room)
+    check(not b["recovered_pending_turn"], "a session joining hours later isn't handed a dead turn")
+
+
 def main() -> int:
     test_case_insensitive_handles()
     test_await_skips_own_message_any_case()
@@ -228,6 +252,7 @@ def main() -> int:
     test_from_whom_case_insensitive()
     test_configured_handle()
     test_footer_label()
+    test_a_turn_still_owed_after_hours()
     print(f"\nALL {_passed} CHAT-IDENTITY CHECKS PASSED")
     return 0
 

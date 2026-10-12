@@ -101,7 +101,12 @@ def purge_room(cfg: dict[str, Any], channel: Optional[str]) -> tuple[str, str]:
         chat_id: Optional[str] = config.resolve_chat_channel(cfg, channel)
     except config.ConfigError:
         chat_id = None
-    if chat_id is not None and str(channel) == str(cfg.get("chat_channel") or ""):
+    try:
+        # (by id: the room's name or its id, however the room is configured)
+        room = config.resolve_chat_channel(cfg, None) if cfg.get("chat_channel") else None
+    except config.ConfigError:
+        room = None
+    if chat_id is not None and str(chat_id) == str(room):
         return "chat", chat_id
     try:
         return "relay", config.resolve_channel(cfg, channel)

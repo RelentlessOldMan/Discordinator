@@ -516,13 +516,22 @@ def resolve_channel(cfg: dict[str, Any], channel: Optional[str], mode: str = "re
     if name.isdigit():
         return name
     if local:
-        return name  # arbitrary room name (LocalClient sanitizes for storage)
+        # Any room name - as stored: "Ops Team" and "ops-team" are one room
+        # (one file), so they're one read position too.
+        return room_name(name)
 
     known = ", ".join(sorted(channels)) or "(none)"
     raise ConfigError(
         f"Unknown channel '{name}'. Known names: {known}. "
         f"Add one with: discordinator config add-channel <name> <channel_id>"
     )
+
+
+def room_name(name: str) -> str:
+    """A local room's name as stored (its file's stem): letters, digits, - and
+    _, lowercase."""
+    safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in str(name))
+    return safe.strip("-").lower() or "room"
 
 
 def resolve_chat_channel(cfg: dict[str, Any], channel: Optional[str]) -> str:
@@ -589,9 +598,12 @@ def _reader_keys(reader: str) -> list[str]:
     a session's first read starts where its project (or machine) left off."""
     label, _, handle = reader.partition("|")
     keys = [reader]
-    for cut in ("/", "-"):
-        if handle and cut in handle:
-            keys.append(f"{label}|{handle.split(cut)[0]}")
+    if "/" in handle:
+        handle = handle.split("/")[0]
+        keys.append(f"{label}|{handle}")
+    base, cut, n = handle.rpartition("-")
+    if cut and base and n.isdigit():  # "CodeCarver-2" (not "Code-Carver": a project of its own)
+        keys.append(f"{label}|{base}")
     keys.append(label)
     return keys
 
@@ -621,7 +633,13 @@ def carry_cursors(old: Optional[str], new: Optional[str]) -> None:
         channels = set(rc if isinstance(rc, dict) else ()) | set(
             shared if isinstance(shared, dict) else ())
         for ch in channels:
-            have, now = _cursor_in(state, ch, old), _cursor_in(state, ch, new)
+            have = _cursor_in(state, ch, old)
+            # (its own position, not one it would fall back on - that is
+            # someone else's too: it starts its own here)
+            if new:
+                now = ((rc or {}).get(ch) or {}).get(new) if isinstance(rc, dict) else None
+            else:
+                now = shared.get(ch) if isinstance(shared, dict) else None
             try:
                 if not have or (now is not None and int(now) >= int(have)):
                     continue

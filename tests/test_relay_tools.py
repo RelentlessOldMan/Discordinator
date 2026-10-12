@@ -252,6 +252,9 @@ def test_purge_reaches_the_chat_room() -> None:
             "channels": {"lounge": "456"}}
     check(purge_room(flip, "lounge") == ("chat", "456"), "reversed: the chat room on Discord")
     check(purge_room(flip, "notes") == ("relay", "notes"), "and other names are local relay rooms")
+    check(purge_room(flip, "456") == ("chat", "456"), "the chat room by its id too")
+    check(purge_room({**flip, "chat_channel": "456"}, "lounge") == ("chat", "456"),
+          "and by its name when the chat room is set by id")
     same = {**cfg, "relay_transport": "local", "chat_transport": "local"}
     check(purge_room(same, "lounge") == ("relay", "lounge"), "one transport: just the room")
     os.environ["DISCORDINATOR_RELAY_TRANSPORT"] = "discord"
@@ -661,6 +664,33 @@ def test_stop_needs_a_local_room() -> None:
     check(not (local_dir() / "no-such-room.jsonl").exists(), "and no room was created")
 
 
+def test_a_role_reads_for_itself() -> None:
+    print("a session that takes a role has its own read position from then on:")
+    from discordinator import handles
+    from discordinator.client_factory import read_new
+    r, peer = "role-read", LocalClient("x")
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Proj"
+    try:
+        peer.send_message(r, "m0", label="Work:Peer")
+        check(len(mcp.get_new_messages(channel=r)) == 1, "it reads as the project")
+        mcp.chat_begin(chatter="ui")
+        peer.send_message(r, "m1", label="Work:Peer")
+        sibling = read_new(LocalClient("me"), r, "me|Proj", 50)  # the project's other session
+        check([m["content"] for m in sibling] == ["[Work:Peer] m1"], "its sibling reads it")
+        got = [m["content"] for m in mcp.get_new_messages(channel=r)]
+        check(got == ["[Work:Peer] m1"], f"and so does it, as its role: {got}")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        handles.release_all()
+        handles._resolved.clear()
+        handles._last_chatter = None
+        handles._current = None
+    check(config._reader_keys("me|Code-Carver") == ["me|Code-Carver", "me"],
+          "a hyphen in a project's name doesn't make it another project's")
+    check(config._reader_keys("me|Code-2/ui") == ["me|Code-2/ui", "me|Code-2", "me|Code", "me"],
+          "a renamed session's role still starts from its project's")
+
+
 def main() -> int:
     test_mcp_purge_takes_everything()
     test_discord_purge_without_manage_messages()
@@ -674,6 +704,7 @@ def main() -> int:
     test_cli_relay()
     test_read_messages_tool()
     test_get_new_messages_options()
+    test_a_role_reads_for_itself()
     test_watch_state_footer()
     test_chat_say_fails_part_way()
     test_deleting_the_last_read_message_replays_nothing()

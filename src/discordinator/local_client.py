@@ -15,7 +15,8 @@ Message records mirror the subset of the Discord message shape that
 
 IDs are strictly increasing integer strings (``max(last + 1, time_ns())``), so
 the ``after=`` / ``before=`` cursors and the protocol's integer id comparisons
-behave like Discord snowflakes.
+behave like Discord snowflakes - and, like those, never repeat across rooms
+(see _next_id): a session tells its own posts by id alone.
 """
 
 from __future__ import annotations
@@ -79,14 +80,33 @@ def _append_line(path: Path, rec: dict[str, Any]) -> None:
         fh.write(line.encode("utf-8"))
 
 
-def sanitize_room(name: str) -> str:
-    """Map a room name to a safe filename stem (alnum/dash/underscore)."""
-    safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in str(name))
-    return safe.strip("-").lower() or "room"
+sanitize_room = config.room_name  # a room name -> its file's stem
 
 
 # One lock implementation for every shared file (rooms, handles, state).
 _AppendLock = config.FileLock
+
+
+def _next_id(folder: Path, room_last: int, candidate: int) -> int:
+    """An id after ``room_last`` (and no earlier than ``candidate``) that no
+    room on this machine has had (the caller holds the room's lock): the
+    clock alone can give two rooms the same one - it ticks in milliseconds on
+    Windows."""
+    path = folder / ".last_id"
+    with _AppendLock(path):
+        try:
+            last = int(path.read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            last = 0
+        new = max(room_last + 1, candidate, last + 1)
+        try:
+            # (in place: only ever read under this lock, and a torn one just
+            # leaves the room's own order and the clock to go by)
+            path.write_text(str(new), encoding="utf-8")
+        except OSError:
+            pass
+    return new
+
 
 # A delete swaps in a rewritten room. Windows refuses while any session is
 # reading it, so it tries for a moment (0.02s apart) and otherwise appends a
@@ -324,7 +344,7 @@ class LocalClient:
                 raise
         with _AppendLock(path):
             self._prune_locked(channel_id)
-            new_id = max(self._max_id(channel_id) + 1, candidate)  # monotonic
+            new_id = _next_id(self._dir, self._max_id(channel_id), candidate)  # monotonic
             rec = {
                 "id": str(new_id),
                 "author": {
@@ -483,7 +503,7 @@ class LocalClient:
         id like a message, so ids stay increasing, and reads like a reminder
         line, so an older reader running alongside skips it."""
         rec = {
-            "id": str(max(self._max_id(channel_id) + 1, time.time_ns())),
+            "id": str(_next_id(self._dir, self._max_id(channel_id), time.time_ns())),
             "author": {"id": "discordinator", "username": "discordinator",
                        "global_name": "discordinator", "bot": True},
             "timestamp": datetime.now(timezone.utc).isoformat(),
