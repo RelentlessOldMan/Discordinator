@@ -8,6 +8,14 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.54] - 2026-10-12
+CLI reads for itself; unreadable rooms aren't empty; config locked; renames into a project's label
+- The CLI's relay no longer uses up an unnamed session's messages
+- A local room that can't be read is an error, never an empty room
+- config set-* commands run at once each keep their change; a damaged state.json is kept as state.json.bad
+- 'did you mean' suggests the same name on another machine
+- Renaming the machine to a project's own label: that project's turns and chat state stay its own, and set-label warns
+
 ## [1.0.53] - 2026-10-12
 Own posts known by id; working notes stand alone; more stop forms; old-name turns past 500
 - delete_messages counts every post of this session (any role, earlier machine name) as its own - the note names only others
