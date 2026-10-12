@@ -745,8 +745,13 @@ def _carry_slots(full: str) -> None:
     earlier = [h for h in reversed(handles.full_names_used())
                if chat.same_handle(chat.local_name(h), chat.local_name(full))
                and chat.handle_key(h) not in held]
+    # Taking this name for the first time, renamed with the machine: whatever
+    # is kept under it is another session's (a project here with the new
+    # machine name as its own), not where this one was.
+    new = not any(chat.same_handle(h, full) for h in handles.full_names_used())
     try:
-        chat.carry_slots(earlier + [chat.local_name(full)], full)
+        chat.carry_slots(earlier + [chat.local_name(full)], full,
+                         over=[h for h in earlier if chat.machine_of(h) is not None] if new else ())
     except (OSError, config.LockTimeout):
         pass  # at worst it starts that room afresh
 
@@ -1495,9 +1500,14 @@ def _unknown_to_note(client: Client, channel_id: str, me: str,
     if chat.has_posted(client, channel_id, target):
         return None  # a peer (maybe on another machine) who spoke further back
     names = sorted({chat.handle_key(h): h for h in known}.values())
-    close = difflib.get_close_matches(target.casefold(),
-                                      [h.casefold() for h in names], n=1, cutoff=0.6)
-    hint = next((h for h in names if close and h.casefold() == close[0]), None)
+    # The same name on another machine first (to="Lab:Peer" for Work:Peer -
+    # too short a name for the spelling to look close), else a near spelling.
+    hint = next((h for h in names if chat.same_handle(chat.local_name(h),
+                                                      chat.local_name(target))), None)
+    if hint is None:
+        close = difflib.get_close_matches(target.casefold(),
+                                          [h.casefold() for h in names], n=1, cutoff=0.6)
+        hint = next((h for h in names if close and h.casefold() == close[0]), None)
     return (f"Nobody called '{target}' has posted in this room and no live session "
             f"on this machine has that name"
             + (f" - did you mean '{hint}'?" if hint else ".")

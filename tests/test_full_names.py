@@ -1074,6 +1074,54 @@ def test_answered_in_one_room_stays_answered() -> None:
         handles._SESSION_KEY = None
 
 
+def test_renamed_into_a_projects_own_machine_name() -> None:
+    print("renamed to a machine name a project here sets as its own: its turns stay that project's:")
+    import contextlib
+    import io
+    from discordinator import cli, config
+    _fresh()
+    handles._full_used.clear()
+    label = os.environ.pop("DISCORDINATOR_LABEL")
+    r, c, path = "into-own-label", LocalClient(), handles.sessions_path()
+    _drop_claim("Lab:Yp")  # (not running: else this session is Lab:Yp-2)
+    try:
+        config.save({**config.load_file(), "machine_label": "Old"})
+        check(mcp.chat_begin(chatter="Yp", channel=r)["chatter"] == "Old:Yp", "Old:Yp starts")
+        # A project here with DISCORDINATOR_LABEL=Lab, also called Yp, is
+        # answered, and stopped running a while ago.
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        data["id:lab-project"] = {"own_label": True, "machine": "Lab", "handle": "Yp",
+                                  "ts": time.time() - 600}
+        path.write_text(json.dumps(data), encoding="utf-8")
+        chat.send_chat(c, r, "Lab:Yp", "over", "question from the Lab project", to="Work:B")
+        chat.send_chat(c, r, "Work:B", "over", "answer for the Lab project", to="Lab:Yp")
+        chat.set_reply_to(r, "Lab:Yp", "Work:B")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["config", "set-label", "Lab"])
+        check("Lab:Yp" in out.getvalue() and "same full name" in out.getvalue(),
+              f"set-label says a project here goes by that name: {out.getvalue()[-90:]!r}")
+        got = wait(r, 0.3, chatter="Yp")
+        check(not got.get("your_turn"),
+              f"the project's answer isn't handed to it: {got.get('text')!r}")
+        check(not mcp.chat_status(chatter="Yp", channel=r)["your_turn"], "nor shown as its turn")
+        check(chat.get_reply_to(r, "Lab:Yp") is None,
+              "it carries on with its own chat state, not the project's")
+        chat.send_chat(c, r, "Work:C", "over", "hello Lab Yp", to="Lab:Yp")
+        got = wait(r, 1, chatter="Yp")
+        check(got.get("your_turn") and got["text"] == "hello Lab Yp",
+              "a turn to its new name since then is its own")
+    finally:
+        config.save({**config.load_file(), "machine_label": None, "machine_label_since": None})
+        os.environ["DISCORDINATOR_LABEL"] = label
+        handles.last_label = None
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        data.pop("id:lab-project", None)
+        path.write_text(json.dumps(data), encoding="utf-8")
+        handles._full_used.clear()
+        _fresh()
+
+
 def main() -> int:
     test_one_name_everywhere()
     test_same_project_on_two_machines()
@@ -1118,6 +1166,7 @@ def main() -> int:
     test_answered_stays_answered_after_a_restart()
     test_deleting_counts_whoever_has_the_old_name()
     test_set_label_carries_every_read_position()
+    test_renamed_into_a_projects_own_machine_name()
     test_a_stale_claim_doesnt_block_its_old_name()
     test_another_machine_now_has_a_renamed_sessions_old_name()
     test_renamed_session_leaves_anothers_state_alone()

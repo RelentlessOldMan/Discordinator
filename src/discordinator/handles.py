@@ -300,6 +300,35 @@ def full_names_used() -> list[str]:
     return list(_full_used)
 
 
+def renamed_since(full: Optional[str]) -> Optional[float]:
+    """When this session, renamed with its machine, took the full name ``full``:
+    when `config set-label` renamed the machine (unix time). None if it went by
+    no other machine's name before, or runs under a project's own. A turn to
+    ``full`` from before then was another session's: a project here with that
+    machine name as its own (DISCORDINATOR_LABEL) may go by the same name."""
+    if not full or _own_label() or not any(
+            chat.same_handle(chat.local_name(h), chat.local_name(full))
+            and not chat.same_handle(h, full) and chat.machine_of(h) is not None
+            for h in _full_used):
+        return None
+    t = config.load_file().get("machine_label_since")
+    return float(t) if isinstance(t, (int, float)) else None
+
+
+def own_label_names(label: str) -> list[str]:
+    """The full names sessions here go by under ``label`` as a machine name of
+    their own (a project's DISCORDINATOR_LABEL): running, or run this week."""
+    now, out = time.time(), {}
+    for entry in list(_load(registry_path()).values()) + list(_load(sessions_path()).values()):
+        if (isinstance(entry, dict) and entry.get("own_label") is True
+                and isinstance(entry.get("handle"), str)
+                and chat.same_handle(_recorded_machine(entry), label)
+                and now - float(entry.get("ts") or 0) < SESSION_TTL):
+            name = f"{_recorded_machine(entry)}:{entry['handle']}"
+            out[chat.handle_key(name)] = name
+    return sorted(out.values())
+
+
 def renamed_sessions() -> list[tuple[str, str, list[str]]]:
     """(session key, the full name it goes by now, its retired full names)
     for each session running on this machine: the names it went by before its
@@ -347,7 +376,8 @@ def _remember() -> None:
                          # (a restarted server that hasn't made a chat call yet
                          # still goes by the name its session had)
                          "handle": _current if _current is not None else before.get("handle"), "since": dict(_since), "ts": now,
-                         "full": list(_full_used), "label": last_label,
+                         "full": list(_full_used),
+                         "label": last_label,
                          "pid": os.getpid(), "started": _my_start(), "machine": _machine(),
                          "own_label": _own_label()}
             config._atomic_write(path, json.dumps(data, indent=2, sort_keys=True))

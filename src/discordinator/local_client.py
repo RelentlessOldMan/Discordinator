@@ -148,19 +148,23 @@ class LocalClient:
         return [r for r in raw if "deletes" not in r and str(r["id"]) not in deleted]
 
     def _read_raw(self, channel_id: str) -> list[dict[str, Any]]:
-        """Every record in the room file, deletion records included."""
+        """Every record in the room file, deletion records included. A room that
+        stays unreadable raises - never mistaken for an empty one (a session
+        joining would start reading from its beginning; held turns would look
+        deleted)."""
         path = self._room_path(channel_id)
         if not path.exists():
             return []
-        text = None
-        for _ in range(10):  # a prune/delete may be swapping the file in right now
+        for attempt in range(10):  # a prune/delete may be swapping the file in right now
             try:
                 text = path.read_text(encoding="utf-8")
                 break
+            except FileNotFoundError:
+                return []
             except OSError:
+                if attempt == 9:
+                    raise
                 time.sleep(0.02)
-        if text is None:
-            return []
         out: list[dict[str, Any]] = []
         for line in text.splitlines():
             line = line.strip()
@@ -199,7 +203,10 @@ class LocalClient:
                 return int(rec["id"])
             except (json.JSONDecodeError, UnicodeDecodeError, KeyError, ValueError, TypeError):
                 continue
-        return max((int(r["id"]) for r in self._read_raw(channel_id)), default=0)
+        try:
+            return max((int(r["id"]) for r in self._read_raw(channel_id)), default=0)
+        except OSError:
+            return 0
 
     def _files_dir(self, message_id: str) -> Path:
         """Per-message directory holding copies of that message's attachments."""
@@ -260,16 +267,24 @@ class LocalClient:
             # Unusable head record (no/odd timestamp, damaged line): find the
             # oldest dated record the slow way so one bad line can't switch
             # retention off for the room forever.
-            records = self._read_all(channel_id)
+            try:
+                records = self._read_all(channel_id)
+            except OSError:
+                return 0
             oldest = min((t for t in map(_record_time, records) if t is not None), default=None)
             if oldest is None:
                 return 0
         if oldest > now - window * 1.1:
             return 0
         cutoff = now - window
+        if records is None:
+            try:
+                records = self._read_all(channel_id)
+            except OSError:
+                return 0
         kept: list[dict[str, Any]] = []
         dropped: list[dict[str, Any]] = []
-        for r in records if records is not None else self._read_all(channel_id):
+        for r in records:
             ts = _record_time(r)
             (dropped if ts is not None and ts < cutoff else kept).append(r)
         if not dropped:

@@ -64,7 +64,9 @@ position (by its chat handle, e.g. `CodeCarver/ui`), so one session reading its
 inbox doesn't use up another's messages. (Two sessions of one project that only
 relay and never chat share their project's position; give each its own role
 with one `chat_begin(chatter="<role>")`, which posts nothing. A session that
-takes a role or another name carries on from where it had read to.)
+takes a role or another name carries on from where it had read to. The CLI's
+`discordinator relay` has a read position of its own too, so reading in your
+shell never uses up a session's messages.)
 
 **Names.** Everything has a name - anything not set shows an obvious
 placeholder, never nothing. Three settings make them up:
@@ -111,7 +113,11 @@ the latest to post by that name and nobody by it runs here: once that session
 posts under its full name (it has updated), that's what `to="Peer"` means.
 Sessions here under different machine names (a project's own
 `DISCORDINATOR_LABEL`) can each have the same name (`Home:CodeCarver`,
-`Lab:CodeCarver`).
+`Lab:CodeCarver`). Renaming the machine to such a project's machine name
+(`config set-label Lab`) makes those names one - `set-label` says so. A
+session renamed that way is never handed a turn sent to its new name before
+it had it (that was the project's), nor takes over the project's place in a
+chat.
 
 The role shows once the session has used it in a chat call (`send_message`
 takes no `chatter`), and stays after a restart. A session renamed because its
@@ -702,6 +708,8 @@ python release.py "one-line summary" --bullet "detail" --bullet "detail"
 ## Gotchas
 - **Token stays local** — home config / git-ignored `.env` / MCP `env` block.
   Never commit it. `.env`, `config.json`, `state.json` are git-ignored.
+- **A damaged `state.json`** (read positions, chat state) is set aside as
+  `state.json.bad` and started afresh: at worst some messages are read again.
 - **`.env` auto-load** — only this repo's own `.env`, and only when run from
   inside the repo (a dev convenience). Another project's `.env` is never read,
   so its `DISCORD_BOT_TOKEN` can't replace yours.
