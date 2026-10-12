@@ -179,7 +179,8 @@ def test_delete_own_messages() -> None:
         out = mcp.chat_say(text="the right question", chatter="A", channel=rc, to="B", wait=False)
         b = mcp.chat_await(chatter="B", channel=rc, timeout=1, poll=0.02, nudge_after=0)
         check(b["text"] == "the right question", "the reposted turn does")
-        mcp.chat_say(text="an answer", chatter="B", channel=rc, wait=False)
+        # (B is another session: its answer isn't one of this one's posts)
+        chat.send_chat(LocalClient("b"), rc, b["to"], "over", "an answer", to=b["from"])
         res = mcp.delete_messages(message_ids=out["message_ids"])
         check("B posted since" in res["note"], "deleting after a reply says B may have read it")
     finally:

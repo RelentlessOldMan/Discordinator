@@ -179,7 +179,8 @@ def test_is_human_stop() -> None:
               "End users will see this, keep the old name.",
               "halt, wait - check the CHANGELOG first", "stop: use the v2 API"):
         check(chat.is_human_stop(t) is False, f"{t!r} is a remark, not a stop")
-    for t in ("please stop", "Stop the chat", "end chat now!"):
+    for t in ("please stop", "Stop the chat", "end chat now!", "stop, please",
+              "please, stop", "Stop it", "stop it now!", "end it."):
         check(chat.is_human_stop(t) is True, f"{t!r} is still a stop")
 
 

@@ -536,10 +536,8 @@ def delete_messages(message_ids: Optional[Union[str, list[str]]] = None,
         wanted = {by_id[i]["post"] for i in ids}
     doomed = [e for e in posts if e["post"] in wanted]
     groups: dict[tuple[str, str], list[str]] = {}
-    poster: dict[tuple[str, str], Optional[str]] = {}
     for e in doomed:
         groups.setdefault((e["mode"], e["channel"]), []).append(str(e["id"]))
-        poster[(e["mode"], e["channel"])] = e.get("handle")
     deleted, notes = 0, []
     for (mode, channel_id), ids in groups.items():
         with _client(mode) as client:
@@ -556,13 +554,11 @@ def delete_messages(message_ids: Optional[Union[str, list[str]]] = None,
             if mode == "chat":
                 since = [simplify_message(m) for m in
                          client.read_messages(channel_id, limit=100, after=max(ids, key=int))]
-                # Its own posts are known by id - under this name on the
-                # machine's earlier name too - never by name alone: that may
-                # be another session's now (another machine given that name).
-                local = chat.local_name(poster[(mode, channel_id)] or "")
-                own_ids = {str(e.get("id")) for e in _all_my_posts()
-                           if not e.get("handle")
-                           or chat.same_handle(chat.local_name(e["handle"]), local)}
+                # Its own posts are known by id - under any name it has gone
+                # by (another role, the machine's earlier name) - never by
+                # name alone: that may be another session's now (another
+                # machine given that name).
+                own_ids = {str(e.get("id")) for e in _all_my_posts()}
                 if handles._current:  # (another session here, renamed since, as it is now)
                     _own_earlier(config.full_name(cfg, handles._current))
                 others = sorted({p["participant"] for p in (
