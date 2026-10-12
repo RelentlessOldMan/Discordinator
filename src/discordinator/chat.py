@@ -310,7 +310,8 @@ def _parse_own(m: dict[str, Any], me: Optional[str],
     peers = saved | seen["peers"].get(handle_key(whose), set())
     sender = handle_key(p["participant"])
     if "*" in peers or sender in peers or sender in _here_now:
-        p = {**p, "to": me if mine and to in _own_names else whose}
+        # ("readdressed": it named an earlier name of that session)
+        p = {**p, "to": me if mine and to in _own_names else whose, "readdressed": True}
     return p
 
 
@@ -665,23 +666,28 @@ def _slot(state: dict[str, Any], channel_id: str, me: str) -> dict[str, Any]:
     return state.setdefault("chat", {}).setdefault(channel_id, {}).setdefault(handle_key(me), {})
 
 
-def carry_slots(earlier: list[str], me: str) -> None:
+def carry_slots(earlier: list[str], me: str, over: Any = ()) -> None:
     """Give ``me`` this session's chat state (read position, who to reply to,
     held turns...) in each room from the first of its ``earlier`` names that
     has some there, where ``me`` has none yet - a session whose machine was
     renamed, or that ran an older version (state kept by its name without a
-    machine), carries on where it was."""
+    machine), carries on where it was. State under one of its ``over`` names
+    replaces what ``me`` has: that was another session's (a project here
+    with the machine's new name as its own)."""
     keys = [handle_key(h) for h in earlier if not same_handle(h, me)]
+    over = {handle_key(h) for h in over if not same_handle(h, me)}
     rooms = config.load_state().get("chat")
     if not keys or not isinstance(rooms, dict) or not any(
-            isinstance(r, dict) and handle_key(me) not in r and any(k in r for k in keys)
-            for r in rooms.values()):
+            isinstance(r, dict) and (handle_key(me) not in r or over & set(r))
+            and any(k in r for k in keys) for r in rooms.values()):
         return
     with config.update_state() as state:
         for room in state.get("chat", {}).values():
-            if not isinstance(room, dict) or handle_key(me) in room:
+            if not isinstance(room, dict) or (
+                    handle_key(me) in room and not over & set(room)):
                 continue
-            k = next((k for k in keys if isinstance(room.get(k), dict)), None)
+            k = next((k for k in keys if isinstance(room.get(k), dict)
+                      and (handle_key(me) not in room or k in over)), None)
             if k is not None:
                 room[handle_key(me)] = room.pop(k)
 
@@ -1324,6 +1330,8 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
             # A yielded turn (over/wrap). Does the floor actually come to me?
             if not _targets(to, me) and not _means_me(client, channel_id, to, me, m["id"]):
                 continue  # addressed to another peer — keep holding the wait
+            if _before_mine(m, to, me):
+                continue  # sent to my name before I had it: another session's
             if _is_broadcast(to) and not _broadcast_for_me(client, channel_id, me, m["id"]):
                 continue  # open to all - but in a conversation I'm not part of
 
@@ -1479,7 +1487,8 @@ def compute_state(
             last_turn = {"from": who, "to": to, "status": p["status"],
                          "id": m["id"], "ts": m["timestamp"]}
             last_text = join_pieces(bodies)
-            turns.append({**last_turn, "i": i, "first": first, "text": last_text})
+            turns.append({**last_turn, "i": i, "first": first, "text": last_text,
+                          "readdressed": bool(p.get("readdressed"))})
 
     # The querying caller is a participant too (it may not have posted yet).
     me_norm = canon(sanitize_handle(me)) if me is not None else None
@@ -1883,16 +1892,31 @@ def _wakes(client: DiscordClient, channel_id: str, m: dict[str, Any], me: str,
         return _ends_mine(client, channel_id, me, p, m["id"])
     if _is_broadcast(p["to"]):
         return _broadcast_for_me(client, channel_id, me, m["id"])
+    if _before_mine(m, p["to"], me):
+        return False
     return _means_me(client, channel_id, p["to"], me, m["id"])
+
+
+def _before_mine(m: dict[str, Any], to: Optional[str], me: str) -> bool:
+    """Was ``m``, addressed ``to`` my name, sent before I had it (see
+    _named_since)? Then it was another session's."""
+    if not same_handle(to, me):
+        return False
+    took = _named_since(me)
+    ts = _parse_ts(m.get("timestamp"))
+    return took is not None and (ts is None or ts < took)
 
 
 def _named_since(me: str) -> Optional[datetime]:
     """For a session going by the placeholder name (no chat name set up): when
     it took that name. Every unnamed session goes by it, so a turn sent to it
-    before then was another one's. None for a real name."""
-    if not config.is_default_chat_name(local_name(me)):
-        return None
+    before then was another one's. Likewise for a session renamed with its
+    machine: when it took its new full name (see handles.renamed_since). None
+    for any other name."""
     from . import handles  # (imports this module)
+    if not config.is_default_chat_name(local_name(me)):
+        t = handles.renamed_since(me)
+        return datetime.fromtimestamp(t, timezone.utc) if t is not None else None
     t = handles.held_since(local_name(me))
     return datetime.fromtimestamp(t if t is not None else time.time(), timezone.utc)
 
@@ -1931,7 +1955,9 @@ def _owed_to(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
                 and not (handed_by and same_handle(t["from"], handed_by))):
             return None  # long dead: nothing older is owed either
         if (not_before is not None and not _is_broadcast(t["to"])
-                and (ts is None or ts < not_before)):
+                and (ts is None or ts < not_before)
+                # (renamed: one to its old name is still its own)
+                and not t.get("readdressed")):
             continue  # sent to this name before this session had it
         if same_handle(t["from"], me) or t["status"] not in YIELD_STATUSES:
             continue

@@ -128,6 +128,9 @@ def test_corrupt_state_recovers() -> None:
     check(config.load_state() == {}, "corrupt -> {}")
     chat.set_cursor("fresh", "A", "1")
     check(chat.get_cursor("fresh", "A") == "1", "and the next write works")
+    bad = config.state_path().with_name("state.json.bad")
+    check(bad.exists() and bad.read_text(encoding="utf-8") == "{not json",
+          "the damaged file is set aside as state.json.bad, not lost")
 
 
 def test_replace_retries_sharing_violation() -> None:

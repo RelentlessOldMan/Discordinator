@@ -692,7 +692,79 @@ def test_a_role_reads_for_itself() -> None:
           "a renamed session's role still starts from its project's")
 
 
+def test_cli_reads_for_itself() -> None:
+    print("the CLI's relay doesn't use up an unnamed session's messages (or theirs its):")
+    from discordinator import handles
+    handles._resolved.clear()  # a session with no project name that hasn't chatted
+    handles._last_chatter = None
+    r = "cli-own"
+    try:
+        _new_server("unnamed")
+        LocalClient("x").send_message(r, "earlier", label="them")
+        check(len(mcp.get_new_messages(channel=r)) == 1, "the session reads what's there")
+        check(_run(["relay", "-c", r])[0] == 0, "so does the CLI")
+        LocalClient("x").send_message(r, "for everyone", label="them")
+        rc, out = _run(["relay", "-c", r, "--json"])
+        check([m["content"] for m in json.loads(out)] == ["[them] for everyone"],
+              "the CLI reads it")
+        got = [m["content"] for m in mcp.get_new_messages(channel=r)]
+        check(got == ["[them] for everyone"], f"and so does the session: {got}")
+        LocalClient("x").send_message(r, "and more", label="them")
+        got = [m["content"] for m in mcp.get_new_messages(channel=r)]
+        check(got == ["[them] and more"], "the session reads the next one")
+        rc, out = _run(["relay", "-c", r, "--json"])
+        check([m["content"] for m in json.loads(out)] == ["[them] and more"],
+              "and so does the CLI")
+    finally:
+        _end_sessions()
+        mcp._sent_ids.clear()
+
+
+def test_config_sets_at_once() -> None:
+    print("config commands run at the same time each keep their change:")
+    import subprocess
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    procs = [subprocess.Popen(
+        [sys.executable, "-c", "import sys; from discordinator import cli; "
+         "sys.exit(cli.main(sys.argv[1:]))", "config", "add-channel", f"ch{i}", str(1000 + i)],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for i in range(8)]
+    check(all(p.wait(60) == 0 for p in procs), "every command succeeds")
+    got = sorted(config.load_file().get("channels") or {})
+    check(got == [f"ch{i}" for i in range(8)], f"and every channel is there: {got}")
+
+
+def test_unreadable_room_isnt_empty() -> None:
+    print("a local room that can't be read is an error, never an empty room:")
+    client, r = LocalClient("x"), "unreadable"
+    client.send_message(r, "one", label="them")
+    client.send_message(r, "two", label="them")
+    real = Path.read_text
+
+    def locked(self: Path, *a: object, **kw: object) -> str:
+        if self.name == f"{r}.jsonl":
+            raise PermissionError(13, "in use", str(self))
+        return real(self, *a, **kw)
+    Path.read_text = locked  # type: ignore[method-assign]
+    try:
+        try:
+            client.read_messages(r, limit=10)
+            check(False, "a read raises")
+        except OSError:
+            check(True, "a read raises")
+        try:
+            got = chat.seed_cursor(client, r, "me:Seeder")
+            check(False, f"chat_begin's start isn't the room's beginning: {got}")
+        except OSError:
+            check(True, "chat_begin's start isn't the room's beginning")
+    finally:
+        Path.read_text = real  # type: ignore[method-assign]
+    check(len(client.read_messages(r, limit=10)) == 2, "readable again, nothing lost")
+
+
 def main() -> int:
+    test_cli_reads_for_itself()
+    test_config_sets_at_once()
+    test_unreadable_room_isnt_empty()
     test_mcp_purge_takes_everything()
     test_discord_purge_without_manage_messages()
     test_delete_own_messages()

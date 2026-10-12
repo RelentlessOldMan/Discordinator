@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from . import __version__, chat, config, events, use_system_certs
+from . import __version__, chat, config, events, handles, use_system_certs
 from .client_factory import make_client, purge, purge_room, purge_targets, read_new
 from .discord_client import DiscordClient, DiscordError, simplify_message
 from .local_client import local_dir
@@ -747,6 +747,15 @@ def cmd_version(args: argparse.Namespace) -> int:
 
 
 def cmd_config(args: argparse.Namespace) -> int:
+    if args.config_action in ("show", "path"):
+        return _config(args)
+    # Read, change and save under a lock: two commands at once (a setup script,
+    # an agent's parallel calls) each keep their change.
+    with config.FileLock(config.config_path()):
+        return _config(args)
+
+
+def _config(args: argparse.Namespace) -> int:
     action = args.config_action
     # `show` reports the effective settings; every set-* edits only the file
     # (never saving env/.env overrides into it).
@@ -800,12 +809,24 @@ def cmd_config(args: argparse.Namespace) -> int:
     elif action == "set-label":
         before = config.load_file().get("machine_label")
         cfg["machine_label"] = args.label
+        # (when: a turn to a session's new name from before then was another's)
+        cfg["machine_label_since"] = time.time()
         config.save(cfg)
         try:
             config.carry_label(before, args.label)  # (read positions keep up)
         except (OSError, config.LockTimeout):
             pass  # at worst a few messages are read twice
         print(f"machine label set to '{args.label}'")
+        try:
+            same = handles.own_label_names(args.label)
+        except OSError:
+            same = []
+        if same:
+            print(f"note: '{args.label}' is already the machine name a project here sets "
+                  f"as its own (DISCORDINATOR_LABEL), for {', '.join(same)}. A session "
+                  "of this machine with the same chat name now goes by the same full "
+                  "name - give one of them another name (config set-label, or the "
+                  "project's DISCORDINATOR_CHAT_HANDLE).")
     elif action == "set-ack":
         on = args.state.strip().lower() in ("on", "true", "1", "yes")
         cfg["ack_on_read"] = on

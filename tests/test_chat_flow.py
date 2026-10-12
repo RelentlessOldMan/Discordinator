@@ -341,6 +341,9 @@ def test_unknown_to_warns_now() -> None:
     check(time.monotonic() - t0 < 5 and "reply" not in out, "a full name is sent, without waiting")
     check("did you mean 'M:Beta'" in out["note"] and "Check `to`" in out["next"],
           "with a warning: suggests the close match and says what to do")
+    out = mcp.chat_say(text="hello", chatter="Alpha", channel=r, to="Elsewhere:Beta", wait=False)
+    check("did you mean 'M:Beta'" in out["note"],
+          f"the right name on the wrong machine suggests where it is: {out['note'][:90]}")
     ok = mcp.chat_say(text="hello", chatter="Alpha", channel=r, to="Beta", wait=False)
     check("note" not in ok, "a known peer gets no warning")
     live = mcp.chat_say(text="x", chatter="Alpha", channel=r, to="M:Gamma", wait=False)

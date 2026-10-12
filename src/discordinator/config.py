@@ -583,9 +583,18 @@ def update_state() -> Iterator[dict[str, Any]]:
     the machine shares this file (each with its own cursors), so an unlocked
     update could write a stale copy back over another session's fresh one."""
     with FileLock(state_path()):
-        state = load_state()
-        yield state
-        save_state(state)
+        bad = object()
+        data = read_json(state_path(), bad) if state_path().exists() else {}
+        if data is bad or not isinstance(data, dict):
+            # Damaged (it's written atomically, so not half-written): kept as
+            # state.json.bad for a look, not lost under the fresh one.
+            try:
+                _replace(str(state_path()), state_path().with_name("state.json.bad"))
+            except OSError:
+                pass
+            data = {}
+        yield data
+        save_state(data)
 
 
 # Each reader (a session's label) has its own position, so two sessions on one
@@ -744,9 +753,10 @@ def relay_reader(cfg: dict[str, Any], session: Optional[str] = None) -> Optional
     """Whose relay read position this is: the label, plus the session's chat
     handle (``session``, e.g. "CodeCarver/ui" or "CodeCarver-2") or else the
     project's - so sessions on one machine have their own position even if
-    they share a label."""
+    they share a label. A session with no project name reads as DefaultChatName,
+    never as the bare label: that's the CLI's own position (see cli.cmd_relay)."""
     label = cfg.get("machine_label")
-    handle = session or project_name(cfg)
+    handle = session or project_name(cfg) or DEFAULT_CHAT_NAME
     if label and handle:
         return f"{label}|{handle}"
     return label or (f"|{handle}" if handle else None)

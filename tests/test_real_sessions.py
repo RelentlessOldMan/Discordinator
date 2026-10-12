@@ -346,6 +346,7 @@ def _set_label(name: str) -> None:
     path = Path(os.environ["DISCORDINATOR_CONFIG"])
     cfg = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     cfg["machine_label"] = name
+    cfg["machine_label_since"] = time.time()
     path.write_text(json.dumps(cfg), encoding="utf-8")
 
 
