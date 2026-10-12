@@ -8,6 +8,16 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.52] - 2026-10-12
+Turns held and owed stay yours; no turns to yourself; local ids never repeat
+- chat_say refuses a turn addressed to yourself (nothing posted)
+- A turn held during a from_whom wait survives chat_begin and shows in chat_status (held_from)
+- A turn you haven't read, or were handed and haven't answered, stays yours past the 4-hour expiry
+- An unaddressed reply can't talk over someone else's floor; a first-word end ends only your own conversation; a long ask stays an ask
+- A machine's old name maps to a renamed session only when every post under it is that session's
+- Local message ids never repeat across rooms; local rooms are named like Discord channels
+- A role keeps its own relay read position; purge reaches the chat room by id; an unreadable handle registry is never overwritten; chat-guard reads UTF-8 input
+
 ## [1.0.51] - 2026-10-11
 Sessions renamed together keep talking; old-name turns read the same every time
 - Two sessions on a machine renamed mid-chat keep talking: posts and turns under their old names count as the sessions they are now, an unaddressed reply goes to the peer's current name, and chat state no longer lists a renamed session twice
