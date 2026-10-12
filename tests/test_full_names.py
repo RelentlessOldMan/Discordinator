@@ -233,6 +233,25 @@ def test_machine_renamed_mid_chat() -> None:
         os.environ["DISCORDINATOR_LABEL"] = "Home"
 
 
+def test_old_name_turn_behind_a_busy_room() -> None:
+    print("a turn to a renamed session's old name still reaches it after 500+ other messages:")
+    _fresh()
+    r, c = "renamed-busy", LocalClient()
+    mcp.chat_begin(chatter="Ab", channel=r)
+    mcp.chat_say(text="hi B", chatter="Ab", channel=r, to="Work:B", wait=False)
+    chat.send_chat(c, r, "Work:B", "over", "hello Ab", to="Home:Ab")
+    for n in range(260):
+        chat.send_chat(c, r, "Work:C", "over", f"c {n}", to="Work:D")
+        chat.send_chat(c, r, "Work:D", "over", f"d {n}", to="Work:C")
+    os.environ["DISCORDINATOR_LABEL"] = "Harbinger"
+    try:
+        got = wait(r, 0.5, chatter="Ab")
+        check(got.get("your_turn") and got.get("text") == "hello Ab",
+              f"handed over: {got.get('from')} {got.get('text')!r}")
+    finally:
+        os.environ["DISCORDINATOR_LABEL"] = "Home"
+
+
 def test_named_machine_leaves_the_placeholder_alone() -> None:
     print("once its machine is named, a session isn't sent after the other unnamed machine's turns:")
     _fresh()
@@ -738,6 +757,23 @@ def test_an_old_name_someone_else_now_has() -> None:
         os.environ["DISCORDINATOR_LABEL"] = "Home"
 
 
+def test_deleting_skips_own_other_names() -> None:
+    print("a deleted turn's note doesn't count this session's posts under another name:")
+    _fresh()
+    handles._SESSION_KEY = "id:dn"
+    r, c = "delete-own-names", LocalClient()
+    try:
+        mcp.chat_begin(chatter="Dx", channel=r)
+        first = mcp.chat_say(text="hi B", chatter="Dx", channel=r, to="Work:B", wait=False)
+        mcp.chat_say(text="me too", chatter="Dy", channel=r, status="ask", to="Work:B", wait=False)
+        chat.send_chat(c, r, "Work:B", "over", "hello", to="Home:Dx")
+        note = mcp.delete_messages(message_ids=first["message_ids"], channel=r).get("note", "")
+        check("Work:B posted since" in note and "Dy" not in note, f"only Work:B: {note[:60]}")
+    finally:
+        handles._SESSION_KEY = None
+        handles._full_used.clear()
+
+
 def test_deleting_counts_other_machines_readers() -> None:
     print("a deleted turn's note names an older version's or an unnamed machine's reader:")
     _fresh()
@@ -1046,6 +1082,7 @@ def main() -> int:
     test_older_names_are_their_own()
     test_a_project_with_its_own_machine_name()
     test_machine_renamed_mid_chat()
+    test_old_name_turn_behind_a_busy_room()
     test_named_machine_leaves_the_placeholder_alone()
     test_old_names_are_pointed_out_not_taken()
     test_short_names_checked_far_back()
@@ -1071,6 +1108,7 @@ def main() -> int:
     test_an_unnamed_machines_name_isnt_retired()
     test_relay_position_after_a_rename()
     test_an_old_name_someone_else_now_has()
+    test_deleting_skips_own_other_names()
     test_deleting_counts_other_machines_readers()
     test_an_unrelated_turn_isnt_an_answer()
     test_relay_position_label_unset()

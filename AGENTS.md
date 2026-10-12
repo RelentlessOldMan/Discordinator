@@ -452,7 +452,7 @@ returns the reply), other `chat_await`; then each side just keeps calling
 exact next step; follow it.** **Don't** have both `chat_await` first (deadlock).
 End is mutual: one `wrap`, the other `end`. **The human can type `stop` (or
 `[[STOP]]`) in the channel to halt** every chat in that room - a message that is just a stop word ("stop",
-"halt!", "end chat now"); a remark that merely starts with one ("Stop arguing and
+"halt!", "end chat now", "stop, please", "stop it"); a remark that merely starts with one ("Stop arguing and
 look at the test") is an ordinary remark. `chat_await` returns `ended` with
 `stop_reason="human"`, and a session that rejoins afterwards is told the chat was
 stopped (it isn't handed a turn). Any other human message comes back as

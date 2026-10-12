@@ -119,10 +119,25 @@ def test_working_hold_on_flow() -> None:
           "a LATER await still shows the working note (state-derived, not buffer)")
     _later(0.2, lambda: chat.send_chat(c, room, "B", "over", "all 17 suites pass"))
     r3 = chat.await_turn(c, room, "A", timeout=5, poll=0.05, nudge_after=0)
-    check(r3["from"] == "B" and r3["your_turn"] and "all 17 suites pass" in r3["text"],
-          "B's results wake A")
+    check(r3["from"] == "B" and r3["your_turn"] and r3["text"] == "all 17 suites pass",
+          f"B's results wake A, without the hold-on note: {r3['text']!r}")
     st = chat.compute_state(c, room, "A")
     check(st["progress"] == [], "progress cleared once B yields")
+
+
+def test_working_note_isnt_part_of_the_turn() -> None:
+    print("a working note (and a long one's pieces) is a note of its own, not the start of the next turn:")
+    c = LocalClient()
+    room = "holdon-whole"
+    chat.reset(room, "A", _latest(c, room), 20)
+    chat.send_chat(c, room, "B", "working", "w" * 3000)  # a long note: say + working
+    chat.send_chat(c, room, "B", "over", "done: " + "r" * 2500)  # a long turn: say + over
+    r = chat.await_turn(c, room, "A", timeout=2, poll=0.05, nudge_after=0)
+    check(r["your_turn"] and r["text"] == "done: " + "r" * 2500,
+          f"the turn is just the results: {r['text'][:20]!r}...")
+    got = chat.await_turn(c, room, "A", timeout=0.2, poll=0.05, nudge_after=0)
+    check(got.get("text") == "done: " + "r" * 2500,
+          f"handed back the same way: {(got.get('text') or '')[:20]!r}...")
 
 
 def test_stale_working_still_flagged() -> None:
@@ -731,6 +746,7 @@ def main() -> int:
     test_say_wait_timeout_says_keep_waiting()
     test_say_next_for_non_yields()
     test_working_hold_on_flow()
+    test_working_note_isnt_part_of_the_turn()
     test_stale_working_still_flagged()
     test_nudge_still_fires_without_working()
     test_already_received_turn_handed_back()

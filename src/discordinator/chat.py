@@ -613,6 +613,11 @@ def _means_me(client: DiscordClient, channel_id: str, to: Optional[str], me: str
         return False
     msgs, parsed = _room(client, channel_id, me)
     i = next((i for i, m in enumerate(msgs) if str(m["id"]) == str(message_id)), None)
+    if i is None and message_id is not None:
+        # More has come since than one read reaches back: read the room as it
+        # was up to that turn instead.
+        msgs, parsed = _room(client, channel_id, me, upto=message_id)
+        i = next((i for i, m in enumerate(msgs) if str(m["id"]) == str(message_id)), None)
     if i is not None and parsed[i] is not None:
         return same_handle(parsed[i]["to"], me)
     if own:
@@ -641,14 +646,14 @@ def bare_taken(client: DiscordClient, channel_id: str, me: str,
 
 
 _STOP_RE = re.compile(
-    r"(please\s+)?(stop|halt|end)(\s+((the|this)\s+)?chat)?(\s+(now|please|here))*[\s.!]*")
+    r"(please[\s,]+)?(stop|halt|end)(\s+(it|((the|this)\s+)?chat))?([\s,]+(now|please|here))*[\s.,!]*")
 
 
 def is_human_stop(text: str) -> bool:
     """A human's stop command: ``[[STOP]]`` anywhere, or a message that is ONLY
-    a stop word ("stop", "halt!", "end chat now", "please stop"). A remark that
-    merely starts with one ("Stop arguing and look at the test", "End users will
-    see this") is an ordinary remark, not a halt."""
+    a stop word ("stop", "halt!", "end chat now", "stop, please", "stop it").
+    A remark that merely starts with one ("Stop arguing and look at the test",
+    "End users will see this") is an ordinary remark, not a halt."""
     t = (text or "").strip().lower()
     return "[[stop]]" in t or bool(_STOP_RE.fullmatch(t))
 
@@ -1286,6 +1291,12 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
                 pending_by_sender.pop(sender, None)
                 continue
 
+            if status == "working":
+                # A note of its own (a long one's earlier pieces with it) -
+                # shown while I wait, not the start of the sender's next turn.
+                pending_by_sender.pop(sender, None)
+                continue
+
             buf = pending_by_sender.setdefault(sender, [])
             buf.append({
                 "id": m["id"], "from": sender, "to": to, "status": status,
@@ -1449,12 +1460,16 @@ def compute_state(
         if p["status"] in PROGRESS_STATUSES:
             progress[who] = {"from": who, "status": p["status"],
                              "text": (p["body"] or "")[:300], "ts": m["timestamp"]}
-            run_start.setdefault(who, i)
-            run_bodies.setdefault(who, []).append(p["body"] or "")
+            if p["status"] == "working":  # a note of its own, not part of the next turn
+                run_start.pop(who, None)
+                run_bodies.pop(who, None)
+            else:
+                run_start.setdefault(who, i)
+                run_bodies.setdefault(who, []).append(p["body"] or "")
             continue
         progress.pop(who, None)
-        # A long turn arrives as say/working pieces then its final message:
-        # the turn starts at the first piece and its text is all of them.
+        # A long turn arrives as say pieces then its final message: the turn
+        # starts at the first piece and its text is all of them.
         first = run_start.pop(who, i)
         bodies = run_bodies.pop(who, []) + [p["body"] or ""]
         last_significant[who] = {"status": p["status"], "i": i}
