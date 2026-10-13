@@ -275,10 +275,48 @@ def test_discord_download_error_maps() -> None:
         client.download_attachment("https://cdn.x/a/gone.png", _TMP / "gone.png")
         raise AssertionError("expected DiscordError for a 404 download")
     except DiscordError as e:
-        check("Not found" in str(e), "a 404 download surfaces as a DiscordError")
+        check("expired" in str(e) and "fresh url" in str(e),
+              "a 404 download surfaces as a DiscordError about the link, not the channel")
     finally:
         dc.time.sleep = _orig
         client.close()
+
+
+def test_discord_download_follows_redirects() -> None:
+    print("DiscordClient.download_attachment: a link that redirects is followed to the file:")
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.scheme == "http":
+            return httpx.Response(301, headers={"Location": "https://cdn.x/a/report.pdf"})
+        return httpx.Response(200, content=b"%PDF")
+    client = _mock_client(handler)
+    try:
+        got = client.download_attachment("http://cdn.x/a/report.pdf", _TMP / "redir.pdf")
+        check(got.read_bytes() == b"%PDF", "the file's bytes are saved, not the redirect's")
+    finally:
+        client.close()
+    client = _mock_client(lambda req: httpx.Response(204))
+    try:
+        client.download_attachment("https://cdn.x/a/empty.pdf", _TMP / "empty.pdf")
+        raise AssertionError("expected DiscordError for an answer with no file")
+    except DiscordError:
+        check(not (_TMP / "empty.pdf").exists(), "an answer with no file is an error, not an empty file")
+    finally:
+        client.close()
+
+
+def test_download_to_a_new_folder() -> None:
+    print("download_attachment to a folder that doesn't exist yet (trailing slash):")
+    client = _mock_client(lambda req: httpx.Response(200, content=b"img"))
+    try:
+        got = client.download_attachment("https://cdn.x/a/pic.png", str(_TMP / "inbox-d") + "/")
+        check(got == _TMP / "inbox-d" / "pic.png", f"Discord: into the folder, as pic.png: {got}")
+    finally:
+        client.close()
+    src = _TMP / "store" / "notes.txt"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(b"n")
+    got = LocalClient(label="demo").download_attachment(str(src), str(_TMP / "inbox-l") + os.sep)
+    check(got == _TMP / "inbox-l" / "notes.txt", f"local: into the folder, as notes.txt: {got}")
 
 
 # -- download: local transport (filesystem copy) ---------------------------
@@ -334,6 +372,8 @@ def main() -> int:
     test_discord_download_no_token_leak()
     test_discord_download_dir_collision()
     test_discord_download_error_maps()
+    test_discord_download_follows_redirects()
+    test_download_to_a_new_folder()
     test_local_download_copies_file()
     test_local_download_missing_source()
     test_surface_parity()

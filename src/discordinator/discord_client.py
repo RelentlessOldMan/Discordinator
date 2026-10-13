@@ -52,10 +52,11 @@ def chunk_content(content: str, limit: int = MAX_MESSAGE_LEN,
     """Split ``content`` into pieces that respect Discord's per-message limit,
     preferring to break on newline boundaries. ``prefixed``: each piece will be
     sent after a label (``[laptop] ...``), so it may start with whitespace.
-    A piece of nothing but whitespace (a long blank run with no label) is
-    dropped: Discord would refuse it as empty, failing the send midway."""
+    A piece of nothing but whitespace is dropped: Discord trims it to nothing -
+    an empty message it would refuse, failing the send midway, or (after a
+    label) a message of just the label."""
     pieces = [c for c, _sep in split_chunks(content, limit, prefixed)]
-    return [c for c in pieces if prefixed or c.strip()] or pieces[:1]
+    return [c for c in pieces if c.strip()] or pieces[:1]
 
 
 def split_chunks(content: str, limit: int = MAX_MESSAGE_LEN,
@@ -327,12 +328,21 @@ class DiscordClient:
         stashed url.
         """
         # Blank the bot token for the CDN host — the signed url needs no auth, and
-        # there's no reason to hand our token to a different origin.
-        resp = self._request("GET", url, headers={"Authorization": ""})
-        dest = Path(dest)
-        if dest.is_dir():
-            dest = _unique_in_dir(dest, _filename_from_url(url))
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        # there's no reason to hand our token to a different origin. (A link
+        # that redirects - http://, a media proxy - is followed to the file.)
+        try:
+            resp = self._request("GET", url, headers={"Authorization": ""},
+                                 follow_redirects=True)
+        except DiscordError as exc:
+            if "(404)" in str(exc) or "(403)" in str(exc):
+                raise DiscordError(
+                    f"The attachment at {url} is gone or its link has expired (Discord's "
+                    "links are signed and expire): read the message again and download "
+                    "from the fresh url.") from exc
+            raise
+        if resp.status_code != 200:
+            raise DiscordError(f"No file at {url} (Discord answered {resp.status_code}).")
+        dest = _dest_path(dest, _filename_from_url(url))
         dest.write_bytes(resp.content)
         return dest
 
@@ -413,6 +423,18 @@ def _filename_from_url(url: str) -> str:
     # final component so the file always lands inside the chosen directory.
     name = re.split(r"[/\\]", name)[-1].rsplit(":", 1)[-1].strip()
     return name if name not in ("", ".", "..") else "attachment"
+
+
+def _dest_path(dest: Union[str, Path], name: str) -> Path:
+    """Where a download to ``dest`` goes: in it as ``name`` if it's a folder -
+    one that exists, or one written with a trailing slash (made if need be) -
+    else ``dest`` itself, its folder made if need be."""
+    path = Path(dest)
+    if path.is_dir() or str(dest).endswith(("/", "\\")):
+        path.mkdir(parents=True, exist_ok=True)
+        return _unique_in_dir(path, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _unique_in_dir(directory: Path, name: str) -> Path:

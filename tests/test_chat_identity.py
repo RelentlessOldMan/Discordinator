@@ -241,6 +241,22 @@ def test_a_turn_still_owed_after_hours() -> None:
     check(not b["recovered_pending_turn"], "a session joining hours later isn't handed a dead turn")
 
 
+def test_long_work_answers_its_asker() -> None:
+    print("after work past 4 hours, the answer goes back to the asker, not a newcomer's opener:")
+    c, room = LocalClient(), "long-work"
+    for h in ("Ask", "Worker"):
+        mcp.chat_begin(chatter=h, channel=room)
+    _say(c, room, "M:Ask", "over", "please run the full suite", to="M:Worker")
+    got = mcp.chat_await(chatter="Worker", channel=room, timeout=0.5, poll=0.02, nudge_after=0)
+    check(got.get("from") == "M:Ask", "handed the job")
+    _age(c, room, [300])  # five hours of work
+    _say(c, room, "M:Newbie", "over", "anyone around to look at my PR?")
+    check(mcp.chat_status(chatter="Worker", channel=room)["pending_turn"]["from"] == "M:Ask",
+          "the newcomer's opener doesn't come into its chat")
+    out = mcp.chat_say(text="all tests pass", chatter="Worker", channel=room, wait=False)
+    check(out.get("to") == "M:Ask", f"its answer goes to the asker: {out.get('to')}")
+
+
 def main() -> int:
     test_case_insensitive_handles()
     test_await_skips_own_message_any_case()
@@ -253,6 +269,7 @@ def main() -> int:
     test_configured_handle()
     test_footer_label()
     test_a_turn_still_owed_after_hours()
+    test_long_work_answers_its_asker()
     print(f"\nALL {_passed} CHAT-IDENTITY CHECKS PASSED")
     return 0
 

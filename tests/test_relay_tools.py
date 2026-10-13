@@ -686,10 +686,12 @@ def test_a_role_reads_for_itself() -> None:
         handles._resolved.clear()
         handles._last_chatter = None
         handles._current = None
-    check(config._reader_keys("me|Code-Carver") == ["me|Code-Carver", "me"],
+    check(config._reader_keys("me|Code-Carver") == ["me|Code-Carver"],
           "a hyphen in a project's name doesn't make it another project's")
-    check(config._reader_keys("me|Code-2/ui") == ["me|Code-2/ui", "me|Code-2", "me|Code", "me"],
+    check(config._reader_keys("me|Code-2/ui") == ["me|Code-2/ui", "me|Code-2", "me|Code"],
           "a renamed session's role still starts from its project's")
+    check(config._reader_keys("me|>cli") == ["me|>cli", "me"],
+          "the CLI starts from its position of before v1.0.55; no session does")
 
 
 def test_cli_reads_for_itself() -> None:
@@ -718,6 +720,77 @@ def test_cli_reads_for_itself() -> None:
     finally:
         _end_sessions()
         mcp._sent_ids.clear()
+
+
+def test_cli_reading_first_takes_nothing() -> None:
+    print("the CLI reading first doesn't use up a session's messages, then or later:")
+    from discordinator import handles
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Firsts"
+    r = "cli-first"
+    try:
+        _new_server("firsts")
+        LocalClient("x").send_message(r, "earlier", label="them")
+        LocalClient("x").send_message(r, "handoff", label="them")
+        rc, out = _run(["relay", "-c", r, "--json"])
+        check(len(json.loads(out)) == 2, "the CLI reads both")
+        got = [m["content"] for m in mcp.get_new_messages(channel=r)]
+        check(got == ["[them] earlier", "[them] handoff"],
+              f"and a session reading after it gets them too: {got}")
+        for i in range(2):
+            LocalClient("x").send_message(r, f"more {i}", label="them")
+            _run(["relay", "-c", r])
+            got = [m["content"] for m in mcp.get_new_messages(channel=r)]
+            check(got == [f"[them] more {i}"], f"every time: {got}")
+        # A role whose first read finds nothing new starts from its project's
+        # position - and keeps its own from then on.
+        handles._resolved.clear()
+        mcp.chat_begin(chatter="ui", channel="cli-first-chat")
+        check(mcp.get_new_messages(channel=r) == [], "a new role: nothing new")
+        _new_server("firsts-plain")
+        LocalClient("x").send_message(r, "for the role", label="them")
+        check(len(mcp.get_new_messages(channel=r)) == 1, "the project reads on")
+        _new_server("firsts")
+        mcp.chat_begin(chatter="ui", channel="cli-first-chat")
+        got = [m["content"] for m in mcp.get_new_messages(channel=r)]
+        check(got == ["[them] for the role"], f"and the role still gets it: {got}")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE", None)
+        _end_sessions()
+        mcp._sent_ids.clear()
+
+
+def test_unnamed_cli_relay_skips_its_own() -> None:
+    print("on an unnamed machine, the CLI's relay still skips this machine's own sends:")
+    saved = os.environ.pop("DISCORDINATOR_LABEL")
+    try:
+        r = "cli-unnamed"
+        _run(["send", "-c", r, "from my shell"])
+        LocalClient("x").send_message(r, "from them", label="them")
+        rc, out = _run(["relay", "-c", r, "--json"])
+        got = [m["content"] for m in json.loads(out)]
+        check(got == ["[them] from them"], f"only theirs: {got}")
+    finally:
+        os.environ["DISCORDINATOR_LABEL"] = saved
+
+
+def test_a_bad_byte_spoils_one_line() -> None:
+    print("a byte in a room that isn't UTF-8 spoils that line, not the room:")
+    client, r = LocalClient("x"), "bad-byte"
+    client.send_message(r, "before", label="them")
+    path = local_dir() / f"{r}.jsonl"
+    with open(path, "ab") as fh:
+        fh.write('{"id": "1", "content": "torn \u2014'.encode("utf-8")[:-1] + b"\n")
+    client.send_message(r, "after", label="them")
+    got = [m["content"] for m in client.read_messages(r, limit=10)]
+    check(got == ["[them] after", "[them] before"], f"the room reads: {got}")
+    old = LocalClient("x", retention_days=1)
+    lines = path.read_bytes().splitlines()
+    first = json.loads(lines[0])
+    first["timestamp"] = "2000-01-01T00:00:00+00:00"
+    path.write_bytes(b"\n".join([json.dumps(first).encode()] + lines[1:]) + b"\n")
+    old.send_message(r, "and on", label="them")  # prunes on the way
+    got = [m["content"] for m in client.read_messages(r, limit=10)]
+    check(got == ["[them] and on", "[them] after"], f"posting (and pruning) works: {got}")
 
 
 def test_config_sets_at_once() -> None:
@@ -763,6 +836,9 @@ def test_unreadable_room_isnt_empty() -> None:
 
 def main() -> int:
     test_cli_reads_for_itself()
+    test_cli_reading_first_takes_nothing()
+    test_unnamed_cli_relay_skips_its_own()
+    test_a_bad_byte_spoils_one_line()
     test_config_sets_at_once()
     test_unreadable_room_isnt_empty()
     test_mcp_purge_takes_everything()

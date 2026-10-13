@@ -561,7 +561,7 @@ def test_machine_names_are_cleaned() -> None:
     r = "cli-own"
     LocalClient("x").send_message(r, "from me", label="LabDesk2:Proj")
     LocalClient("x").send_message(r, "from them", label="Work:Proj")
-    out = cli._relay_poll(LocalClient("x"), r, "Lab/Desk:2", False, 50)
+    out = cli._relay_poll(LocalClient("x"), r, {"machine_label": "Lab/Desk:2"}, False, 50)
     check([m["content"] for m in out] == ["[Work:Proj] from them"],
           "the CLI relay skips this machine's own posts though its label was cleaned")
 
@@ -961,8 +961,9 @@ def test_set_label_carries_every_read_position() -> None:
         got = mcp.get_new_messages(channel=r)
         check(got == [], f"a new session isn't handed it again: {[m['content'] for m in got]}")
         ch = config.resolve_channel(config.load(), r)
-        check(config.get_cursor(ch, "Lab") is not None
-              and config.get_cursor(ch, "Lab") == config.get_cursor(ch, "Home"), "nor the CLI")
+        lab, home = (config.cli_reader({"machine_label": x}) for x in ("Lab", "Home"))
+        check(config.get_cursor(ch, lab) is not None
+              and config.get_cursor(ch, lab) == config.get_cursor(ch, home), "nor the CLI")
     finally:
         config.save({**config.load_file(), "machine_label": None})
         os.environ["DISCORDINATOR_LABEL"] = label
@@ -1122,6 +1123,73 @@ def test_renamed_into_a_projects_own_machine_name() -> None:
         _fresh()
 
 
+def test_a_renamed_session_keeps_its_name_mid_chat() -> None:
+    print("a session renamed to -2 that chat_begins again mid-chat keeps that name (and its turn):")
+    import subprocess
+    _fresh()
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "CodeCarver"
+    room, peer = "minus2-chat", LocalClient("peer")
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        path = handles.registry_path()
+        reg = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        reg["home:codecarver/ui"] = {
+            "handle": "CodeCarver/ui", "pid": other.pid, "ts": time.time(), "since": time.time(),
+            "started": handles.process_started(other.pid), "machine": "Home",
+            "own_label": handles._own_label(), "session": "id:the-other"}
+        path.write_text(json.dumps(reg), encoding="utf-8")
+        b = mcp.chat_begin(chatter="ui", channel=room)
+        check(b["chatter"] == "Home:CodeCarver/ui-2", f"renamed: {b['chatter']}")
+        chat.send_chat(peer, room, "Work:Peer", "over", "hello?")
+        wait(room, chatter="ui")
+        mcp.chat_say("a question for you", chatter="ui", channel=room, wait=False)
+        other.kill()
+        other.wait()
+        chat.send_chat(peer, room, "Work:Peer", "over", "the answer", to="Home:CodeCarver/ui-2")
+        b = mcp.chat_begin(chatter="ui", channel=room)
+        check(b["chatter"] == "Home:CodeCarver/ui-2", f"it keeps the name: {b['chatter']}")
+        got = wait(room, chatter="ui")
+        check(got.get("text") == "the answer" and got.get("your_turn"), f"and gets its turn: {got}")
+        mcp.chat_say("thanks", chatter="ui", channel=room, status="end", wait=False)
+        b = mcp.chat_begin(chatter="ui", channel=room)
+        check(b["chatter"] == "Home:CodeCarver/ui", f"its chat over, it takes its name back: {b['chatter']}")
+    finally:
+        other.kill()
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        _fresh()
+
+
+def test_set_label_again_renames_nobody() -> None:
+    print("`config set-label` with the name the machine already has hides no turn:")
+    from discordinator import cli, config
+    _fresh()
+    room, peer = "relabel-same", LocalClient("peer")
+    label = os.environ.pop("DISCORDINATOR_LABEL")
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Relabel"
+    try:
+        config.save({**config.load_file(), "machine_label": "Home"})
+        mcp.chat_begin(channel=room)
+        chat.send_chat(peer, room, "Work:Peer", "over", "hi", to="Home:Relabel")
+        wait(room)
+        cli.main(["config", "set-label", "Lab"])
+        since = config.load_file().get("machine_label_since")
+        mcp.chat_say("hello Peer", channel=room, wait=False)
+        time.sleep(0.05)
+        chat.send_chat(peer, room, "Work:Peer", "over", "the answer", to="Lab:Relabel")
+        time.sleep(0.05)
+        cli.main(["config", "set-label", "lab"])
+        check(config.load_file().get("machine_label_since") == since,
+              "the same name again (any case) isn't a rename")
+        got = wait(room)
+        check(got.get("text") == "the answer" and got.get("your_turn"), f"the turn is its: {got}")
+    finally:
+        config.save({**config.load_file(), "machine_label": None, "machine_label_since": None})
+        os.environ["DISCORDINATOR_LABEL"] = label
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        handles.last_label = None
+        _fresh()
+
+
 def main() -> int:
     test_one_name_everywhere()
     test_same_project_on_two_machines()
@@ -1171,6 +1239,8 @@ def main() -> int:
     test_another_machine_now_has_a_renamed_sessions_old_name()
     test_renamed_session_leaves_anothers_state_alone()
     test_answered_in_one_room_stays_answered()
+    test_a_renamed_session_keeps_its_name_mid_chat()
+    test_set_label_again_renames_nobody()
     print(f"\nALL {_passed} CHECKS PASSED")
     return 0
 

@@ -32,6 +32,7 @@ from typing import Any, Optional, Union
 from . import config
 from .discord_client import (
     MAX_MESSAGE_LEN,
+    _dest_path,
     _unique_in_dir,
     attachment_info,
     chunk_content,
@@ -157,7 +158,9 @@ class LocalClient:
             return []
         for attempt in range(10):  # a prune/delete may be swapping the file in right now
             try:
-                text = path.read_text(encoding="utf-8")
+                # (a byte that isn't UTF-8 - a line torn mid-character, an
+                # edit saved in another encoding - spoils that line, not the room)
+                text = path.read_text(encoding="utf-8", errors="replace")
                 break
             except FileNotFoundError:
                 return []
@@ -254,7 +257,7 @@ class LocalClient:
         now = datetime.now(timezone.utc)
         window = timedelta(days=self._retention_days)
         try:
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
                 first = fh.readline()
         except OSError:
             return 0
@@ -469,10 +472,7 @@ class LocalClient:
         src = Path(url)
         if not src.exists():
             raise FileNotFoundError(f"Local attachment not found: {url}")
-        dest = Path(dest)
-        if dest.is_dir():
-            dest = _unique_in_dir(dest, src.name)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest = _dest_path(dest, src.name)
         shutil.copyfile(src, dest)
         return dest
 

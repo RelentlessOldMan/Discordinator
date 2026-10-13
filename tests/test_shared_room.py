@@ -544,6 +544,77 @@ def test_a_turn_to_yourself_is_refused() -> None:
         check("is you" in str(e) and "Nothing was posted" in str(e), f"refused: {str(e)[:40]}")
 
 
+def test_a_superseded_turn_isnt_handed_over() -> None:
+    print("a turn whose sender has since handed the turn to someone else isn't handed over:")
+    c, r = LocalClient(), "moved-on"
+    for h in "ABC":
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "M:B", "over", "A, what do you think?", to="M:A")
+    chat.send_chat(c, r, "M:B", "over", "C, and you?", to="M:C")
+    got = wait("A", r, 0.3)
+    st = mcp.chat_status(chatter="A", channel=r)
+    check(not got.get("your_turn") and not st["your_turn"],
+          f"chat_await and chat_status agree: not A's turn ({got.get('text')!r})")
+    check(wait("C", r, 0.3).get("text") == "C, and you?", "C's is handed to C")
+
+
+def test_suggest_next_is_never_me() -> None:
+    print("after a turn to all, suggest_next is never the session it's suggested to:")
+    c, r = LocalClient(), "suggest-me"
+    for h in "ABC":
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "M:A", "over", "B?", to="M:B")
+    chat.send_chat(c, r, "M:B", "over", "C?", to="M:C")
+    chat.send_chat(c, r, "M:C", "over", "A?", to="M:A")
+    chat.send_chat(c, r, "M:A", "over", "B first", to="M:B")
+    chat.send_chat(c, r, "M:B", "over", "anyone?", to="all")
+    for h in "CA":
+        mcp.chat_begin(chatter=h, channel=r)
+    got = wait("C", r)
+    check(got.get("your_turn") and got.get("suggest_next") not in (None, "M:C"),
+          f"C is told someone else: {got.get('suggest_next')}")
+    out = mcp.chat_say(text="hi", chatter="C", channel=r, to=got["suggest_next"], wait=False)
+    check(out.get("to") == got["suggest_next"] and out.get("message_ids"), f"and addressing it works: {out}")
+
+
+def test_side_note_stays_out_of_the_next_turn() -> None:
+    print("say pieces to one peer aren't part of the same sender's next turn to another:")
+    c, r = LocalClient(), "side-note"
+    for h in "ABC":
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "M:A", "over", "B?", to="M:B")
+    chat.send_chat(c, r, "M:C", "say", "(side note while B thinks)", to="M:B")
+    chat.send_chat(c, r, "M:B", "over", "C, yours", to="M:C")
+    chat.send_chat(c, r, "M:C", "over", "A: real answer", to="M:A")
+    check(mcp.chat_status(chatter="A", channel=r)["your_turn"], "A's turn")
+    got = wait("A", r)
+    check(got.get("text") == "A: real answer", f"chat_await: just the turn: {got.get('text')!r}")
+    b = mcp.chat_begin(chatter="A", channel=r)
+    got = wait("A", r)
+    check(got.get("text") == "A: real answer", f"handed over again: {got.get('text')!r}")
+
+
+def test_an_old_stop_isnt_a_newcomers() -> None:
+    print("a stop that others have chatted since doesn't tell a newcomer the room is stopped:")
+    c, r = LocalClient(), "old-stop"
+    for h in "ABCD":
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "M:A", "over", "hi", to="M:B")
+    c.post_human(r, "stop")
+    chat.send_chat(c, r, "M:C", "over", "D?", to="M:D")
+    chat.send_chat(c, r, "M:D", "over", "C!", to="M:C")
+    b = mcp.chat_begin(chatter="E", channel=r)
+    check(not b["state"]["ended"] and b["state"].get("stop_reason") is None,
+          f"not stopped: {b['state'].get('stop_reason')}")
+    r2 = "new-stop"
+    for h in "AB":
+        mcp.chat_begin(chatter=h, channel=r2)
+    chat.send_chat(c, r2, "M:A", "over", "hi", to="M:B")
+    c.post_human(r2, "stop")
+    b = mcp.chat_begin(chatter="E", channel=r2)
+    check(b["state"]["stop_reason"] == "human", "one with nothing since still is")
+
+
 def main() -> int:
     test_held_turn_survives_chat_begin()
     test_no_unaddressed_reply_over_the_floor()
@@ -567,6 +638,10 @@ def main() -> int:
     test_opener_after_a_dropped_chat()
     test_dead_role_not_taken_back()
     test_disconnect_lets_a_post_finish()
+    test_a_superseded_turn_isnt_handed_over()
+    test_suggest_next_is_never_me()
+    test_side_note_stays_out_of_the_next_turn()
+    test_an_old_stop_isnt_a_newcomers()
     print(f"\nALL {_passed} SHARED-ROOM CHECKS PASSED")
     return 0
 

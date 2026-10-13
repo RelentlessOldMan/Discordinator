@@ -599,7 +599,8 @@ def purge_messages(
         channel: Configured channel name or raw id. Defaults to the default channel.
         dry_run: If true (default), report but do not delete.
         older_than_days: Only messages older than this many days (0 = all, default).
-        scan_limit: Only the newest this many messages (default: all of them).
+        scan_limit: At most this many messages: the newest that match (with
+            older_than_days, the newest old enough - however far back). Default: all.
 
     Returns a summary: how many would be / were deleted, and anything left.
     """
@@ -695,7 +696,8 @@ def _chatter(chatter: Optional[str], cfg: dict[str, Any],
     before = _reader(cfg)
     role = _lost_role(chatter, cfg, channel)
     if role is None:
-        me, note = handles.resolve(chatter, cfg, fresh=fresh and chatter not in (None, ""))
+        fresh = fresh and chatter not in (None, "") and not _chatting_as_other(chatter, cfg, channel)
+        me, note = handles.resolve(chatter, cfg, fresh=fresh)
     else:
         me, note = handles.resolve(role, cfg)
         back = (f"'{config.full_name(cfg, me)}' has a chat going in this room that no "
@@ -805,6 +807,25 @@ def _unnamed(note: Optional[str], me: Optional[str]) -> Optional[str]:
     if not warn:
         return note
     return " ".join(([note] if note else []) + warn)
+
+
+def _chatting_as_other(chatter: str, cfg: dict[str, Any], channel: Optional[str]) -> bool:
+    """Is this session in a chat in the room under the name it was given
+    instead of the one it asks for (``CodeCarver/ui-2``)? Then chat_begin
+    keeps that name rather than taking the asked-for one back now it's free:
+    the turns sent to it are this session's. (Can't tell: it keeps it too.)"""
+    try:
+        held = handles.current(chatter, cfg)
+        if held is None or chat.same_handle(held, handles.compose(chatter, cfg.get("chat_handle"))):
+            return False
+        full = config.full_name(cfg, held)
+        channel_id = config.resolve_chat_channel(cfg, channel)
+        with _client("chat") as client:
+            st = chat.compute_state(client, channel_id, full)
+    except Exception:
+        return True
+    return bool(st.get("your_turn")) or bool(st.get("session_active")) and any(
+        chat.same_handle(p, full) for p in st.get("participants") or ())
 
 
 def _lost_role(chatter: Optional[str], cfg: dict[str, Any],
