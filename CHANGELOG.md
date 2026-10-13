@@ -8,6 +8,16 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.55] - 2026-10-12
+CLI reads for itself; -2 names kept mid-chat; long work answers its asker; bad bytes contained; downloads follow redirects
+- The CLI relay keeps its own read position, so reading in your shell never uses up a session's messages; an unnamed machine's relay hides its own posts
+- A -2 session keeps its name while it has a chat going; set-label with the same name isn't a rename
+- A turn you were handed or haven't read stays yours past 4 hours; chat_await and chat_status agree on superseded turns; suggest_next never names you
+- Side notes stay out of later turns; an old human stop doesn't stop a newcomer
+- A bad byte spoils one line of a local room; damaged state.json is set aside; config.json reads retry mid-save; old per-session records expire after 30 days
+- Downloads follow redirects and say when a link has expired; dest ending in a slash is a folder; no blank pieces sent
+- Docs: purge scan_limit / -n takes the newest N that match
+
 ## [1.0.54] - 2026-10-12
 CLI reads for itself; unreadable rooms aren't empty; config locked; renames into a project's label
 - The CLI's relay no longer uses up an unnamed session's messages
