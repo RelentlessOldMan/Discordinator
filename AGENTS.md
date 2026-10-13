@@ -121,7 +121,9 @@ chat.
 
 The role shows once the session has used it in a chat call (`send_message`
 takes no `chatter`), and stays after a restart. A session renamed because its
-name was taken (`Home:CodeCarver-2`) goes by that name. `label=` on
+name was taken (`Home:CodeCarver-2`) goes by that name (a later `chat_begin`
+takes the name it asked for back once that's free - but not while it has a
+chat going under the `-2`, whose turns are its). `label=` on
 `send_message` (or `--label` on the CLI) replaces the whole tag for that one
 message. The CLI runs in your shell, which never sees a project's
 `.mcp.json`: a CLI `send` is tagged `[<machine>:DefaultChatName]` unless the
@@ -279,7 +281,9 @@ Confirm inside Claude Code with `/mcp`.
   channel: delete every message in it, whoever posted it (any machine, a human,
   interjections), any chat in it included. `dry_run=True` (default) only
   reports; call again with `dry_run=False`. `older_than_days` / `scan_limit`
-  narrow it (default: all). On Discord, messages people typed need Manage
+  narrow it (default: all): `scan_limit=N` takes at most N messages, the newest
+  that match - with `older_than_days`, the newest N old enough, however far
+  back they are. On Discord, messages people typed need Manage
   Messages; without it they're left and the result says so. (With it, messages
   under 14 days old go 100 at a time - much faster.) With relay and chat on
   different transports, naming the chat room (or a room only the chat transport
@@ -710,6 +714,8 @@ python release.py "one-line summary" --bullet "detail" --bullet "detail"
   Never commit it. `.env`, `config.json`, `state.json` are git-ignored.
 - **A damaged `state.json`** (read positions, chat state) is set aside as
   `state.json.bad` and started afresh: at worst some messages are read again.
+  What a session keeps there about its own posts is dropped 30 days after it
+  last posted, so sessions long gone don't pile up.
 - **`.env` auto-load** — only this repo's own `.env`, and only when run from
   inside the repo (a dev convenience). Another project's `.env` is never read,
   so its `DISCORD_BOT_TOKEN` can't replace yours.

@@ -164,17 +164,19 @@ def cmd_read(args: argparse.Namespace) -> int:
 def _relay_poll(
     client: DiscordClient,
     channel_id: str,
-    own_label: Optional[str],
+    cfg: dict[str, Any],
     include_self: bool,
     backfill_limit: int,
 ) -> list[dict[str, Any]]:
-    """Fetch messages newer than the stored cursor, advance the cursor, and
+    """Fetch messages newer than the CLI's own read position, advance it, and
     return the ones worth showing (others' messages, unless include_self)."""
-    messages = read_new(client, channel_id, own_label, backfill_limit)
-    if not include_self and own_label:
-        machine = config.machine_name({"machine_label": own_label})
-        # This machine's full names, and the older [label] and [label/project] tags.
-        mine = (f"[{machine}:", f"[{own_label}]", f"[{own_label}/")
+    messages = read_new(client, channel_id, config.cli_reader(cfg), backfill_limit)
+    if not include_self:
+        own_label = cfg.get("machine_label")
+        # This machine's full names (DefaultMachineName: too, unnamed), and the
+        # older [label] and [label/project] tags.
+        mine = (f"[{config.machine_name(cfg)}:",) + (
+            (f"[{own_label}]", f"[{own_label}/") if own_label else ())
         messages = [m for m in messages if not m["content"].startswith(mine)]
     return messages
 
@@ -182,16 +184,15 @@ def _relay_poll(
 def cmd_relay(args: argparse.Namespace) -> int:
     cfg = config.load()
     channel_id = config.resolve_channel(cfg, args.channel)
-    own_label = cfg.get("machine_label")
     label_name = args.channel or cfg.get("default_channel") or channel_id
     do_ack = _resolve_ack(args, cfg)
 
     if args.reset:
-        config.clear_cursor(channel_id, own_label)
+        config.clear_cursor(channel_id, config.cli_reader(cfg))
 
     with make_client(cfg, "relay") as client:
         if not args.watch:
-            messages = _relay_poll(client, channel_id, own_label, args.include_self, args.limit)
+            messages = _relay_poll(client, channel_id, cfg, args.include_self, args.limit)
             if do_ack:
                 _ack_newest(client, channel_id, messages)
             if args.json:
@@ -205,12 +206,12 @@ def cmd_relay(args: argparse.Namespace) -> int:
         print(
             f"relay watching '{label_name}' every {args.interval}s "
             f"(filtering out this machine's own [{config.machine_name(cfg)}:...] posts — Ctrl+C to stop)"
-            if own_label and not args.include_self
+            if not args.include_self
             else f"relay watching '{label_name}' every {args.interval}s (Ctrl+C to stop)"
         )
         try:
             while True:
-                messages = _relay_poll(client, channel_id, own_label, args.include_self, args.limit)
+                messages = _relay_poll(client, channel_id, cfg, args.include_self, args.limit)
                 if messages:
                     if do_ack:
                         _ack_newest(client, channel_id, messages)
@@ -809,8 +810,11 @@ def _config(args: argparse.Namespace) -> int:
     elif action == "set-label":
         before = config.load_file().get("machine_label")
         cfg["machine_label"] = args.label
-        # (when: a turn to a session's new name from before then was another's)
-        cfg["machine_label_since"] = time.time()
+        # (when: a turn to a session's new name from before then was another's -
+        # so only when the name changes: the same one again renames nobody)
+        if (config.machine_name({"machine_label": before}).casefold()
+                != config.machine_name(cfg).casefold()):
+            cfg["machine_label_since"] = time.time()
         config.save(cfg)
         try:
             config.carry_label(before, args.label)  # (read positions keep up)
@@ -940,7 +944,7 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("-c", "--channel", help="channel name (from config) or raw id")
     pp.add_argument("--older-than", help="only delete messages older than this (e.g. 7d, 24h, 30m)")
     pp.add_argument("--all", action="store_true", help=argparse.SUPPRESS)  # always all now
-    pp.add_argument("-n", "--limit", type=int, default=None, help="only the newest N messages (default: all)")
+    pp.add_argument("-n", "--limit", type=int, default=None, help="at most N messages: the newest that match (with --older-than, the newest old enough) (default: all)")
     pp.add_argument("--dry-run", action="store_true", help="show what would be deleted without deleting")
     pp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     pp.set_defaults(func=cmd_purge)

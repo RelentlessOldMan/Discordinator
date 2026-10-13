@@ -290,12 +290,77 @@ def test_stalled_holder_loses_nothing() -> None:
           "both updates are there")
 
 
+def test_state_not_utf8_recovers() -> None:
+    print("a state or config file that isn't UTF-8 is handled like one that isn't JSON:")
+    config.state_path().write_bytes(b'{"x": "\x97"}')  # an ANSI-saved dash
+    check(config.load_state() == {}, "state reads as empty")
+    chat.set_cursor("bytes", "A", "1")
+    check(chat.get_cursor("bytes", "A") == "1", "the next write works")
+    bad = config.state_path().with_name("state.json.bad")
+    check(bad.read_bytes() == b'{"x": "\x97"}', "and the damaged file is set aside")
+    real = config.config_path().read_bytes() if config.config_path().exists() else None
+    try:
+        config.config_path().write_bytes(b'{"machine_label": "Caf\xe9"}')
+        try:
+            config.load_file()
+            check(False, "a config file that isn't UTF-8 is a config error")
+        except config.ConfigError as e:
+            check("not valid JSON" in str(e), "a config file that isn't UTF-8 is a config error")
+    finally:
+        if real is None:
+            config.config_path().unlink(missing_ok=True)
+        else:
+            config.config_path().write_bytes(real)
+
+
+def test_config_read_retries_sharing_violation() -> None:
+    print("reading config.json retries while `config set-*` is swapping it in:")
+    config.save({**config.load_file(), "machine_label": "Retry"})
+    real = Path.read_text
+    fails = {"n": 3}
+
+    def flaky(self, *a, **k):
+        if self.name == "config.json" and fails["n"] > 0:
+            fails["n"] -= 1
+            raise PermissionError("[WinError 5] Access is denied")
+        return real(self, *a, **k)
+
+    Path.read_text = flaky
+    try:
+        got = config.load().get("machine_label")
+    finally:
+        Path.read_text = real
+    check(fails["n"] == 0 and got == "Retry", "read after 3 refusals")
+
+
+def test_gone_sessions_records_expire() -> None:
+    print("the records of sessions long gone don't pile up in state.json:")
+    with config.update_state() as state:
+        state["posts"] = {"gone": [{"id": "1"}], "older": [{"id": "2"}]}
+        state["relay_sent"] = {"gone": ["1"]}
+        state["told"] = {"gone": {"x": {}}}
+        state["session_seen"] = {"gone": time.time() - 31 * 86400}  # "older": from before
+    config.note_posts("live", [{"id": "3"}])
+    st = config.load_state()
+    check("gone" not in st["posts"] and "gone" not in st["relay_sent"]
+          and "gone" not in st["told"], "a session idle 30+ days is dropped")
+    check(st["posts"].get("older") and st["posts"].get("live"),
+          "one from before they were dated is kept (for now), and the new one")
+    with config.update_state() as state:
+        state["session_seen"]["older"] = time.time() - 31 * 86400
+    config.note_sent("live", ["4"])
+    check("older" not in config.load_state()["posts"], "and dropped once it's been 30 days")
+
+
 def main() -> int:
     test_concurrent_sessions_keep_their_cursors()
     test_lock_follows_its_holder()
     test_stalled_holder_loses_nothing()
     test_unreadable_state_is_not_empty()
     test_corrupt_state_recovers()
+    test_state_not_utf8_recovers()
+    test_config_read_retries_sharing_violation()
+    test_gone_sessions_records_expire()
     test_replace_retries_sharing_violation()
     test_lock_held_by_live_process_times_out()
     test_many_processes_lose_no_update()

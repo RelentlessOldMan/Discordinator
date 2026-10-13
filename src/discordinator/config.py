@@ -41,20 +41,31 @@ def read_json(path: Path, default: Any) -> Any:
     are atomic, so that means it's corrupt, not half-written). A file that stays
     unreadable raises - never mistaken for "empty", which a later save would
     then write back over everything in it."""
-    for attempt in range(_IO_RETRIES):
-        try:
-            text = path.read_text(encoding="utf-8")
-            break
-        except FileNotFoundError:
-            return default
-        except OSError:
-            if attempt == _IO_RETRIES - 1:
-                raise
-            time.sleep(_IO_PAUSE)
+    try:
+        text = _read_text(path)
+    except FileNotFoundError:
+        return default
+    except UnicodeDecodeError:
+        return default  # (not UTF-8 at all: as corrupt as bad JSON)
     try:
         return json.loads(text)
     except ValueError:
         return default
+
+
+def _read_text(path: Path) -> str:
+    """A file's text, retrying while another process is swapping it in (on
+    Windows a read then fails with "access denied")."""
+    for attempt in range(_IO_RETRIES):
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise
+        except OSError:
+            if attempt == _IO_RETRIES - 1:
+                raise
+            time.sleep(_IO_PAUSE)
+    raise AssertionError("unreachable")
 
 
 class LockTimeout(OSError):
@@ -364,11 +375,11 @@ def load_file() -> dict[str, Any]:
     What `config set-*` edits and saves, so a setting meant for one shell or
     session (an env var) is never written into the shared file."""
     path = config_path()
-    if not path.exists():
-        return {}
     try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        loaded = json.loads(_read_text(path))  # (`config set-*` may be saving it)
+    except FileNotFoundError:
+        return {}
+    except ValueError as exc:  # (bad JSON, or not UTF-8)
         raise ConfigError(f"Config file at {path} is not valid JSON: {exc}") from exc
     if not isinstance(loaded, dict):
         raise ConfigError(f"Config file at {path} must contain a JSON object.")
@@ -598,23 +609,43 @@ def update_state() -> Iterator[dict[str, Any]]:
 
 
 # Each reader (a session's label) has its own position, so two sessions on one
-# machine relaying to each other don't consume each other's messages. A reader
-# with no position of its own yet starts from the old shared one ("cursors").
+# machine relaying to each other don't consume each other's messages.
+
+# The CLI's own read position ("<label>|>cli"): ">" is never in a chat name,
+# so no session reads under it - or falls back on it.
+CLI_READER = ">cli"
+
+
+def cli_reader(cfg: dict[str, Any]) -> str:
+    """Whose relay read position the CLI's ``relay`` is: its own, apart from
+    every session's, so reading in a shell never uses up a session's messages."""
+    return f"{cfg.get('machine_label') or ''}|{CLI_READER}"
 
 
 def _reader_keys(reader: str) -> list[str]:
-    """"label|project/role" (one session), then "label|project", then "label":
-    a session's first read starts where its project (or machine) left off."""
+    """"label|project/role" (one session), then "label|project": a session's
+    first read starts where its project left off. Never the bare label or the
+    old shared position - the CLI read there (before v1.0.55), and a session
+    starting from where a shell got to would never see what the shell read.
+    The CLI's own position starts from those."""
     label, _, handle = reader.partition("|")
     keys = [reader]
+    if handle == CLI_READER:
+        return keys + [label] if label else keys
     if "/" in handle:
         handle = handle.split("/")[0]
         keys.append(f"{label}|{handle}")
     base, cut, n = handle.rpartition("-")
     if cut and base and n.isdigit():  # "CodeCarver-2" (not "Code-Carver": a project of its own)
         keys.append(f"{label}|{base}")
-    keys.append(label)
     return keys
+
+
+def has_own_cursor(channel_id: str, reader: str) -> bool:
+    """Has ``reader`` a read position of its own here (not one it falls back on)?"""
+    rc = load_state().get("relay_cursors")
+    mine = rc.get(str(channel_id)) if isinstance(rc, dict) else None
+    return isinstance(mine, dict) and reader in mine
 
 
 def get_cursor(channel_id: str, reader: Optional[str] = None) -> Optional[str]:
@@ -628,6 +659,8 @@ def _cursor_in(state: dict[str, Any], channel_id: str, reader: Optional[str]) ->
         for key in _reader_keys(reader):
             if key in mine:
                 return mine[key] or None  # None: reset, read from scratch
+        if not reader.endswith("|" + CLI_READER):
+            return None
     shared = state.get("cursors")
     return shared.get(channel_id) if isinstance(shared, dict) else None
 
@@ -754,7 +787,7 @@ def relay_reader(cfg: dict[str, Any], session: Optional[str] = None) -> Optional
     handle (``session``, e.g. "CodeCarver/ui" or "CodeCarver-2") or else the
     project's - so sessions on one machine have their own position even if
     they share a label. A session with no project name reads as DefaultChatName,
-    never as the bare label: that's the CLI's own position (see cli.cmd_relay)."""
+    never as the bare label (see cli_reader)."""
     label = cfg.get("machine_label")
     handle = session or project_name(cfg) or DEFAULT_CHAT_NAME
     if label and handle:
@@ -780,6 +813,32 @@ def set_cursor(channel_id: str, message_id: str, reader: Optional[str] = None) -
 
 
 SENT_KEEP = 500  # per reader: plenty for any backlog a read returns
+# A session's own records (relay_sent, posts, told) are kept this long after it
+# last added to them: every new session (Claude Code process) has its own, and
+# the ones of sessions long gone would otherwise pile up in state.json for good.
+SESSION_STATE_DAYS = 30
+
+
+def _touch_session(state: dict[str, Any], session: str) -> None:
+    """Note that ``session`` is adding to its records now, and drop the
+    records of sessions that haven't for SESSION_STATE_DAYS (ones from before
+    this was kept are given until then)."""
+    now = time.time()
+    seen = state.get("session_seen")
+    if not isinstance(seen, dict):
+        seen = state["session_seen"] = {}
+    seen[session] = now
+    cutoff = now - SESSION_STATE_DAYS * 86400
+    for name in ("relay_sent", "posts", "told"):
+        records = state.get(name)
+        if not isinstance(records, dict):
+            continue
+        for key in list(records):
+            t = seen.setdefault(key, now)
+            if not isinstance(t, (int, float)) or t < cutoff:
+                del records[key]
+    for key in [k for k, t in seen.items() if not isinstance(t, (int, float)) or t < cutoff]:
+        del seen[key]
 
 
 def note_sent(session: str, ids: list[str]) -> None:
@@ -788,6 +847,7 @@ def note_sent(session: str, ids: list[str]) -> None:
     if not ids:
         return
     with update_state() as state:
+        _touch_session(state, session)
         sent = state.setdefault("relay_sent", {})
         kept = [i for i in sent.get(session) or [] if i not in ids] + list(ids)
         sent[session] = kept[-SENT_KEEP:]
@@ -802,6 +862,7 @@ def note_posts(session: str, entries: list[dict[str, Any]]) -> None:
     if not entries:
         return
     with update_state() as state:
+        _touch_session(state, session)
         posts = state.setdefault("posts", {})
         posts[session] = (list(posts.get(session) or []) + entries)[-POSTS_KEEP:]
 
@@ -823,6 +884,7 @@ def note_told(session: str, entries: dict[str, dict[str, str]]) -> None:
     """Record which turn to an earlier name of a session it was told about
     (see mcp_server._told), so a restart doesn't tell it again once answered."""
     with update_state() as state:
+        _touch_session(state, session)
         told = state.setdefault("told", {})
         mine = told.get(session) if isinstance(told.get(session), dict) else {}
         told[session] = {**mine, **entries}

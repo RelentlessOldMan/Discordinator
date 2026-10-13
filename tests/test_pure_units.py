@@ -79,6 +79,14 @@ def test_chunk_content() -> None:
     check(len(chunks) == 2 and all(len(c) <= 2000 for c in chunks),
           "newline at index 0 does not stall the splitter (progress guaranteed)")
 
+    # Just over the limit with a label, ending in blank lines: no message of
+    # just the label.
+    for tail in ("\n", "\n\n", " \n "):
+        limit = 2000 - len("[tag] ")
+        text = "x" * (limit + 1 - len(tail)) + tail
+        chunks = chunk_content(text, limit=limit, prefixed=True)
+        check(all(c.strip() for c in chunks), f"no blank piece after a label ({tail!r})")
+
 
 def test_simplify_message() -> None:
     print("simplify_message (runs on every read):")

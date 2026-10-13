@@ -83,6 +83,10 @@ def read_new(client: Client, channel_id: str, reader: Optional[str],
     messages.reverse()  # chronological
     if messages:
         config.set_cursor(channel_id, messages[-1]["id"], reader)
+    elif cursor and reader and not config.has_own_cursor(channel_id, reader):
+        # Started from its project's position: from here on it's its own, so
+        # the project reading on doesn't take what this reader hasn't seen.
+        config.set_cursor(channel_id, cursor, reader)
     return messages
 
 
@@ -120,7 +124,8 @@ def purge_targets(client: Client, channel_id: str, older_than: Optional[float] =
                   limit: Optional[int] = None) -> list[dict[str, Any]]:
     """Every message in the channel - whoever posted it (any machine, a human,
     an interjection) - optionally only those older than ``older_than`` seconds,
-    and at most the newest ``limit``. Simplified, newest first."""
+    and at most ``limit`` of them: the newest that match, however far back
+    that goes. Simplified, newest first."""
     from datetime import datetime, timedelta, timezone
 
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=older_than)
