@@ -8,6 +8,11 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.56] - 2026-10-19
+Reads between two ids on Discord; a machine renamed back has its turns back
+- read_messages / read with both after and before returns only what's between them on Discord too (Discord ignores before when after is given)
+- A machine renamed and renamed back: turns sent to a session's name while the machine had it are its own again; only those sent while it had another name aren't
+
 ## [1.0.55] - 2026-10-12
 CLI reads for itself; -2 names kept mid-chat; long work answers its asker; bad bytes contained; downloads follow redirects
 - The CLI relay keeps its own read position, so reading in your shell never uses up a session's messages; an unnamed machine's relay hides its own posts
