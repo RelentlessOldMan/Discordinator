@@ -46,9 +46,10 @@ errors (with the exact fix) rather than guessing:
   `~/.discordinator/local/`. Two sessions on the **same machine** relay/chat with
   **no token, no network, no channel setup**. Great for a locked-down work laptop
   or offline dev; it cannot reach another machine. Local rooms are for sessions
-  chatting *now*, not an archive: messages older than **7 days** are dropped
-  (with their stored attachments) the next time the room is written to —
-  sessions never need to clean up. Change it with
+  chatting *now*, not an archive: messages are dropped (with their stored
+  attachments) once they're about **7 days** old — checked when the room is
+  written to, so one may last up to a tenth longer (~7.7 days) — and sessions
+  never need to clean up. Change it with
   `discordinator config set-local-retention <days>` (`0` = keep forever; env
   `DISCORDINATOR_LOCAL_RETENTION_DAYS`). To wipe a room immediately, delete its
   `.jsonl` file while no session is mid-chat there.
@@ -211,7 +212,7 @@ right-click a channel → Copy Channel ID.
 ```powershell
 discordinator whoami                # prints the bot identity
 discordinator send "hello from <label>"
-discordinator relay                 # shows messages from the OTHER side only
+discordinator relay                 # shows what's new, minus this machine's own posts
 discordinator version               # version + file paths + git revision
 ```
 

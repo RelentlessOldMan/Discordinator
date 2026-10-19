@@ -282,6 +282,19 @@ def test_discord_download_error_maps() -> None:
         client.close()
 
 
+def test_discord_download_401_is_the_link() -> None:
+    print("DiscordClient.download_attachment: a 401 is the link, never the token:")
+    client = _mock_client(lambda req: httpx.Response(401, json={}))
+    try:
+        client.download_attachment("https://cdn.x/a/old.png", _TMP / "old.png")
+        raise AssertionError("expected DiscordError for a 401 download")
+    except DiscordError as e:
+        check("expired" in str(e) and "token" not in str(e),
+              f"a 401 download says the link expired, not the token: {e}")
+    finally:
+        client.close()
+
+
 def test_discord_download_follows_redirects() -> None:
     print("DiscordClient.download_attachment: a link that redirects is followed to the file:")
     def handler(req: httpx.Request) -> httpx.Response:
@@ -374,6 +387,7 @@ def main() -> int:
     test_discord_download_error_maps()
     test_discord_download_follows_redirects()
     test_download_to_a_new_folder()
+    test_discord_download_401_is_the_link()
     test_local_download_copies_file()
     test_local_download_missing_source()
     test_surface_parity()

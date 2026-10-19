@@ -1019,6 +1019,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return args.func(args)
     except (config.ConfigError, DiscordError) as exc:
         return _err(str(exc))
+    except (OSError, ValueError) as exc:  # a missing file, a lock held, a bad value
+        return _err(str(exc))
 
 
 if __name__ == "__main__":

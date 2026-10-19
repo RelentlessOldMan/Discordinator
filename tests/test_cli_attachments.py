@@ -115,6 +115,16 @@ def test_image_alias_shares_file_list() -> None:
     check(names == {"pic.png", "a.txt"}, "both --image and --file items are attached")
 
 
+def test_missing_file_is_an_error_not_a_traceback() -> None:
+    print("a missing --file is a one-line error, not a traceback:")
+    import contextlib, io
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = cli.main(["send", "x", "--channel", ROOM, "--file", str(_TMP / "nope.txt")])
+    check(rc != 0 and "nope.txt" in err.getvalue() and "Traceback" not in err.getvalue(),
+          f"exit {rc}, says which file: {err.getvalue().strip()}")
+
+
 def main() -> int:
     test_send_file_gated_then_succeeds()
     test_read_download_gated_then_succeeds()
@@ -122,6 +132,7 @@ def main() -> int:
     test_read_download_json()
     test_flags_persisted()
     test_image_alias_shares_file_list()
+    test_missing_file_is_an_error_not_a_traceback()
     print(f"\nALL {_passed} CLI-ATTACHMENT CHECKS PASSED")
     return 0
 

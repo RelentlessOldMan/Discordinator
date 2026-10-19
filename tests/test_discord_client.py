@@ -215,6 +215,28 @@ def test_read_between_two_ids() -> None:
         client.close()
 
 
+def test_retry_on_server_error() -> None:
+    print("Discord briefly down (5xx): retried, and only then an error:")
+    codes = [502, 503, 200]
+
+    def handler(req):
+        return httpx.Response(codes.pop(0), json={"id": "bot"})
+
+    client = _client(handler)
+    try:
+        check(client.whoami()["id"] == "bot", "502 then 503 then 200: the call succeeds")
+    finally:
+        client.close()
+    client = _client(lambda req: httpx.Response(500, text="boom"))
+    try:
+        client.whoami()
+        raise AssertionError("expected DiscordError for a persistent 500")
+    except DiscordError as e:
+        check("500" in str(e) and "try again" in str(e), f"a persistent 500 says so: {e}")
+    finally:
+        client.close()
+
+
 def main() -> int:
     try:
         test_error_mapping()
@@ -226,6 +248,7 @@ def main() -> int:
         test_rate_limit_persistent()
         test_send_message_chunks_and_labels()
         test_read_between_two_ids()
+        test_retry_on_server_error()
     finally:
         dc.time.sleep = _orig_sleep  # restore, don't leak the patch
     print(f"\nALL {_passed} DISCORD-CLIENT CHECKS PASSED")

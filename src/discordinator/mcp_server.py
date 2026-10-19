@@ -538,11 +538,12 @@ def delete_messages(message_ids: Optional[Union[str, list[str]]] = None,
     groups: dict[tuple[str, str], list[str]] = {}
     for e in doomed:
         groups.setdefault((e["mode"], e["channel"]), []).append(str(e["id"]))
-    deleted, notes = 0, []
+    deleted, notes, done = 0, [], set()
     for (mode, channel_id), ids in groups.items():
         with _client(mode) as client:
             if hasattr(client, "delete_messages"):
                 deleted += client.delete_messages(channel_id, ids)
+                done.update(ids)
             else:
                 for i in ids:
                     try:
@@ -550,7 +551,13 @@ def delete_messages(message_ids: Optional[Union[str, list[str]]] = None,
                         deleted += 1
                     except DiscordError as e:
                         if "(404)" not in str(e):  # already gone is fine
-                            raise
+                            if done:  # (those are gone: never offered again)
+                                _forget_deleted(done)
+                            raise DiscordError(
+                                f"{e} - {len(done)} of the {len(doomed)} pieces were "
+                                "deleted before that; call delete_messages again "
+                                "to delete the rest.") from e
+                    done.add(i)
             if mode == "chat":
                 since = [simplify_message(m) for m in
                          client.read_messages(channel_id, limit=100, after=max(ids, key=int))]
@@ -569,16 +576,21 @@ def delete_messages(message_ids: Optional[Union[str, list[str]]] = None,
                     "post a correction as your next turn." if others else
                     "Nobody had replied to it - post the corrected version now.")
     gone = {str(e["id"]) for e in doomed}
+    _forget_deleted(gone)
+    out: dict[str, Any] = {"deleted": deleted, "message_ids": sorted(gone, key=int)}
+    if notes:
+        out["note"] = " ".join(notes)
+    return out
+
+
+def _forget_deleted(gone: set[str]) -> None:
+    """This session's posts ``gone`` were deleted: never offered again."""
     # (kept, marked deleted: whom it went to under an earlier name still counts)
     _my_posts[:] = [{**e, "deleted": True} if str(e.get("id")) in gone else e
                     for e in _my_posts]
     session = handles.session_key()
     if session is not None:
         config.forget_posts(session, gone)
-    out: dict[str, Any] = {"deleted": deleted, "message_ids": sorted(gone, key=int)}
-    if notes:
-        out["note"] = " ".join(notes)
-    return out
 
 
 @_tool()

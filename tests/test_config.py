@@ -211,6 +211,22 @@ def test_cursor_state() -> None:
     check(True, "clearing an already-absent cursor is a safe no-op")
 
 
+def test_misshapen_read_positions() -> None:
+    print("read positions of the wrong shape (a hand edit) don't crash a rename:")
+    config.state_path().write_text(json.dumps(
+        {"relay_cursors": {"chan-a": "123", "chan-b": {"Old": "50"}}, "cursors": []}),
+        encoding="utf-8")
+    config.carry_cursors("Old", "New")
+    state = config.load_state()
+    check(state["relay_cursors"].get("chan-b", {}).get("New") == "50",
+          "the well-formed position carries over")
+    check("chan-a" not in state["relay_cursors"], "the misshapen one is dropped")
+    config.carry_label("Old", "New")
+    config.set_cursor("chan-c", "7")
+    check(config.get_cursor("chan-c") == "7", "and reads keep working")
+    config.state_path().unlink()
+
+
 def test_client_factory() -> None:
     print("client_factory.make_client (backend selection seam):")
     from discordinator.client_factory import make_client
@@ -243,6 +259,7 @@ def main() -> int:
     test_dotenv_parsing()
     test_other_projects_dotenv_is_ignored()
     test_cursor_state()
+    test_misshapen_read_positions()
     test_client_factory()
     print(f"\nALL {_passed} CONFIG CHECKS PASSED")
     return 0

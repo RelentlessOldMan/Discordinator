@@ -581,7 +581,23 @@ def state_path() -> Path:
 
 def load_state() -> dict[str, Any]:
     data = read_json(state_path(), {})
-    return data if isinstance(data, dict) else {}
+    return _tidy_state(data) if isinstance(data, dict) else {}
+
+
+def _tidy_state(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop read positions of the wrong shape (a hand edit, say): valid JSON
+    that isn't a channel -> reader -> id table would crash whatever reads it.
+    At worst those readers read a few messages again."""
+    rc = data.get("relay_cursors")
+    if rc is not None:
+        if isinstance(rc, dict):
+            for ch in [ch for ch, v in rc.items() if not isinstance(v, dict)]:
+                del rc[ch]
+        else:
+            del data["relay_cursors"]
+    if "cursors" in data and not isinstance(data["cursors"], dict):
+        del data["cursors"]
+    return data
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -604,7 +620,7 @@ def update_state() -> Iterator[dict[str, Any]]:
             except OSError:
                 pass
             data = {}
-        yield data
+        yield _tidy_state(data)
         save_state(data)
 
 

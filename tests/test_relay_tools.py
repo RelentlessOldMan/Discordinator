@@ -239,6 +239,37 @@ def test_partly_failed_send_can_be_deleted() -> None:
     check(res["deleted"] == 2 and _contents("part-sent") == [], "and delete_messages removes both")
 
 
+def test_delete_failing_partway() -> None:
+    print("delete_messages failing partway says how far it got, and a retry finishes:")
+    from discordinator import handles
+    handles._SESSION_KEY = "id:part-deleter"
+    mcp.send_message("z" * 4500, channel="part-del")  # three pieces
+    check(len(_contents("part-del")) == 3, "three pieces are in the room")
+    bulk, one = LocalClient.delete_messages, LocalClient.delete_message
+    n = [0]
+
+    def flaky(self, ch, mid):  # as on Discord: one at a time, the second fails
+        n[0] += 1
+        if n[0] == 2:
+            raise DiscordError("500 DELETE: Discord down")
+        bulk(self, ch, [mid])
+
+    del LocalClient.delete_messages
+    LocalClient.delete_message = flaky
+    try:
+        mcp.delete_messages(channel="part-del")
+        check(False, "the delete should fail")
+    except DiscordError as e:
+        check("1 of the 3 pieces were deleted" in str(e) and "again" in str(e),
+              f"the error says how far it got: {e}")
+    finally:
+        LocalClient.delete_messages, LocalClient.delete_message = bulk, one
+    check(len(_contents("part-del")) == 2, "one piece went")
+    res = mcp.delete_messages(channel="part-del")
+    check(res["deleted"] == 2 and _contents("part-del") == [],
+          f"called again, it deletes the rest ({res})")
+
+
 def test_purge_reaches_the_chat_room() -> None:
     print("with relay and chat on different transports, purge finds the chat room:")
     from discordinator.client_factory import purge_room
@@ -845,6 +876,7 @@ def main() -> int:
     test_discord_purge_without_manage_messages()
     test_delete_own_messages()
     test_deleted_turn_never_delivered()
+    test_delete_failing_partway()
     test_partly_failed_send_can_be_deleted()
     test_purge_reaches_the_chat_room()
     test_discord_purge_bulk()

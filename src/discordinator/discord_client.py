@@ -144,6 +144,7 @@ class DiscordClient:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         last_exc: Optional[Exception] = None
+        last_5xx: Optional[httpx.Response] = None
         for _ in range(4):
             try:
                 resp = self._client.request(method, path, **kwargs)
@@ -159,6 +160,12 @@ class DiscordClient:
                 except Exception:
                     pass
                 time.sleep(min(retry_after, 30.0))
+                continue
+            if resp.status_code in (500, 502, 503, 504):
+                # Discord briefly down: safe to try again (a message POST
+                # carries a nonce, so a retry never posts it twice).
+                last_5xx, last_exc = resp, None
+                time.sleep(1.0)
                 continue
 
             if resp.status_code == 401:
@@ -188,6 +195,9 @@ class DiscordClient:
 
         if last_exc is not None:
             raise DiscordError(f"Network error contacting Discord: {last_exc}")
+        if last_5xx is not None:
+            raise DiscordError(f"{last_5xx.status_code} {method} {path} (Discord kept "
+                               f"failing; try again shortly): {last_5xx.text[:200]}")
         raise DiscordError("Rate limited by Discord repeatedly; try again shortly.")
 
     # -- API surface -------------------------------------------------------
@@ -341,7 +351,7 @@ class DiscordClient:
             resp = self._request("GET", url, headers={"Authorization": ""},
                                  follow_redirects=True)
         except DiscordError as exc:
-            if "(404)" in str(exc) or "(403)" in str(exc):
+            if any(f"({c})" in str(exc) for c in (401, 403, 404)):
                 raise DiscordError(
                     f"The attachment at {url} is gone or its link has expired (Discord's "
                     "links are signed and expire): read the message again and download "
