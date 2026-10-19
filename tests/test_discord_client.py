@@ -191,6 +191,30 @@ def test_send_message_chunks_and_labels() -> None:
         client.close()
 
 
+def test_read_between_two_ids() -> None:
+    print("a read with both after and before gets only what's between them:")
+    msgs = [{"id": str(i), "content": f"m{i}"} for i in range(10, 0, -1)]
+
+    def handler(req):  # as Discord does: given after, it ignores before
+        p = req.url.params
+        lim = int(p.get("limit", 50))
+        if "after" in p:
+            newer = [m for m in msgs if int(m["id"]) > int(p["after"])]
+            return httpx.Response(200, json=newer[-lim:])
+        if "before" in p:
+            return httpx.Response(200, json=[m for m in msgs if int(m["id"]) < int(p["before"])][:lim])
+        return httpx.Response(200, json=msgs[:lim])
+
+    client = _client(handler)
+    try:
+        got = [m["id"] for m in client.read_messages("c", limit=100, after="2", before="6")]
+        check(got == ["5", "4", "3"], f"ids 3-5, newest first ({got})")
+        got = [m["id"] for m in client.read_messages("c", limit=2, after="2", before="6")]
+        check(got == ["5", "4"], f"limit takes the newest of them ({got})")
+    finally:
+        client.close()
+
+
 def main() -> int:
     try:
         test_error_mapping()
@@ -201,6 +225,7 @@ def main() -> int:
         test_rate_limit_backoff_then_success()
         test_rate_limit_persistent()
         test_send_message_chunks_and_labels()
+        test_read_between_two_ids()
     finally:
         dc.time.sleep = _orig_sleep  # restore, don't leak the patch
     print(f"\nALL {_passed} DISCORD-CLIENT CHECKS PASSED")

@@ -300,19 +300,36 @@ def full_names_used() -> list[str]:
     return list(_full_used)
 
 
-def renamed_since(full: Optional[str]) -> Optional[float]:
-    """When this session, renamed with its machine, took the full name ``full``:
-    when `config set-label` renamed the machine (unix time). None if it went by
-    no other machine's name before, or runs under a project's own. A turn to
-    ``full`` from before then was another session's: a project here with that
-    machine name as its own (DISCORDINATOR_LABEL) may go by the same name."""
+def renamed_away(full: Optional[str]) -> Optional[list[tuple[float, float]]]:
+    """For a session renamed with its machine (`config set-label`): the times
+    (unix, start to end) this machine went by another name than ``full``'s.
+    A turn to ``full`` sent then was another session's: a project here with
+    that machine name as its own (DISCORDINATOR_LABEL) may go by the same
+    name. One sent while the machine had that name was this session's - a
+    machine renamed back has its old name's turns back. None if the session
+    went by no other machine's name, or runs under a project's own."""
     if not full or _own_label() or not any(
             chat.same_handle(chat.local_name(h), chat.local_name(full))
             and not chat.same_handle(h, full) and chat.machine_of(h) is not None
             for h in _full_used):
         return None
-    t = config.load_file().get("machine_label_since")
-    return float(t) if isinstance(t, (int, float)) else None
+    cfg = config.load_file()
+    renames = [r for r in cfg.get("machine_renames") or []
+               if isinstance(r, dict) and isinstance(r.get("at"), (int, float))]
+    if not renames:  # (renamed by an older version: only when, not from what)
+        t = cfg.get("machine_label_since")
+        return [(float("-inf"), float(t))] if isinstance(t, (int, float)) else None
+    renames.sort(key=lambda r: r["at"])
+    mine, away = chat.machine_of(full) or "", []
+    start, name = float("-inf"), None
+    for r in renames + [{"at": float("inf"), "from": None}]:
+        # (it had a name of its own then if the renames either side agree on
+        # it - one changed some other way, by hand say, leaves it unknown)
+        if not (chat.same_handle(r.get("from") if name is None else name, mine)
+                and (r.get("from") is None or chat.same_handle(r.get("from"), mine))):
+            away.append((start, float(r["at"])))
+        start, name = float(r["at"]), r.get("to") or ""
+    return away
 
 
 def own_label_names(label: str) -> list[str]:

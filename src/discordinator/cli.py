@@ -812,9 +812,15 @@ def _config(args: argparse.Namespace) -> int:
         cfg["machine_label"] = args.label
         # (when: a turn to a session's new name from before then was another's -
         # so only when the name changes: the same one again renames nobody)
-        if (config.machine_name({"machine_label": before}).casefold()
-                != config.machine_name(cfg).casefold()):
-            cfg["machine_label_since"] = time.time()
+        old_name = config.machine_name({"machine_label": before})
+        if old_name.casefold() != config.machine_name(cfg).casefold():
+            now = time.time()
+            cfg["machine_label_since"] = now
+            # (and every rename: a name it had before is its own again for
+            # turns sent back then - only the time in between was another's)
+            past = [r for r in cfg.get("machine_renames") or [] if isinstance(r, dict)]
+            cfg["machine_renames"] = (past + [{"at": now, "from": old_name,
+                                               "to": config.machine_name(cfg)}])[-50:]
         config.save(cfg)
         try:
             config.carry_label(before, args.label)  # (read positions keep up)

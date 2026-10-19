@@ -307,15 +307,22 @@ class DiscordClient:
         after: Optional[str] = None,
         before: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Fetch messages (Discord returns newest-first)."""
+        """Fetch messages (Discord returns newest-first).
+
+        With both ``after`` and ``before``, the newest ``limit`` between them
+        (as on local): Discord takes one of the two and ignores the other, so
+        only ``before`` is sent and anything not after ``after`` is dropped."""
         params: dict[str, Any] = {"limit": max(1, min(int(limit), 100))}
-        if after:
+        if after and not before:
             params["after"] = after
         if before:
             params["before"] = before
-        return self._request(
+        msgs = self._request(
             "GET", f"/channels/{channel_id}/messages", params=params
         ).json()
+        if after and before:
+            msgs = [m for m in msgs if int(m["id"]) > int(after)]
+        return msgs
 
     def download_attachment(self, url: str, dest: Union[str, Path]) -> Path:
         """Download an attachment ``url`` to ``dest`` and return the written path.

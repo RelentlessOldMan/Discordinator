@@ -117,7 +117,8 @@ Sessions here under different machine names (a project's own
 (`config set-label Lab`) makes those names one - `set-label` says so. A
 session renamed that way is never handed a turn sent to its new name before
 it had it (that was the project's), nor takes over the project's place in a
-chat.
+chat. Renamed back to a name it had, the turns sent to it under that name
+are its own again (only those sent while the machine had another name aren't).
 
 The role shows once the session has used it in a chat call (`send_message`
 takes no `chatter`), and stays after a restart. A session renamed because its

@@ -965,7 +965,7 @@ def test_set_label_carries_every_read_position() -> None:
         check(config.get_cursor(ch, lab) is not None
               and config.get_cursor(ch, lab) == config.get_cursor(ch, home), "nor the CLI")
     finally:
-        config.save({**config.load_file(), "machine_label": None})
+        config.save({**config.load_file(), "machine_label": None, "machine_renames": None})
         os.environ["DISCORDINATOR_LABEL"] = label
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
         handles.last_label = None
@@ -1113,7 +1113,7 @@ def test_renamed_into_a_projects_own_machine_name() -> None:
         check(got.get("your_turn") and got["text"] == "hello Lab Yp",
               "a turn to its new name since then is its own")
     finally:
-        config.save({**config.load_file(), "machine_label": None, "machine_label_since": None})
+        config.save({**config.load_file(), "machine_label": None, "machine_label_since": None, "machine_renames": None})
         os.environ["DISCORDINATOR_LABEL"] = label
         handles.last_label = None
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -1159,6 +1159,36 @@ def test_a_renamed_session_keeps_its_name_mid_chat() -> None:
         _fresh()
 
 
+def test_renamed_back_has_its_turns_back() -> None:
+    print("a machine renamed and then renamed back: a turn sent under its first name is its own:")
+    from discordinator import cli, config
+    _fresh()
+    room, peer = "relabel-back", LocalClient("peer")
+    label = os.environ.pop("DISCORDINATOR_LABEL")
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Back"
+    try:
+        config.save({**config.load_file(), "machine_label": "Home"})
+        mcp.chat_begin(channel=room)
+        chat.send_chat(peer, room, "Work:Peer", "over", "the question", to="Home:Back")
+        time.sleep(0.05)
+        cli.main(["config", "set-label", "Lab"])
+        got = wait(room, 0.3)
+        check(not got.get("your_turn"), f"as Lab:Back it isn't handed it: {got.get('text')!r}")
+        time.sleep(0.05)
+        cli.main(["config", "set-label", "Home"])
+        st = mcp.chat_status(channel=room)
+        check(st["your_turn"], f"the question sent before the renames is its turn: {st.get('pending_turn')}")
+        got = wait(room)
+        check(got.get("text") == "the question" and got.get("your_turn"), f"and chat_await hands it over: {got}")
+    finally:
+        config.save({**config.load_file(), "machine_label": None, "machine_label_since": None, "machine_renames": None})
+        os.environ["DISCORDINATOR_LABEL"] = label
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        handles.last_label = None
+        handles._full_used.clear()
+        _fresh()
+
+
 def test_set_label_again_renames_nobody() -> None:
     print("`config set-label` with the name the machine already has hides no turn:")
     from discordinator import cli, config
@@ -1183,7 +1213,7 @@ def test_set_label_again_renames_nobody() -> None:
         got = wait(room)
         check(got.get("text") == "the answer" and got.get("your_turn"), f"the turn is its: {got}")
     finally:
-        config.save({**config.load_file(), "machine_label": None, "machine_label_since": None})
+        config.save({**config.load_file(), "machine_label": None, "machine_label_since": None, "machine_renames": None})
         os.environ["DISCORDINATOR_LABEL"] = label
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
         handles.last_label = None
@@ -1241,6 +1271,7 @@ def main() -> int:
     test_answered_in_one_room_stays_answered()
     test_a_renamed_session_keeps_its_name_mid_chat()
     test_set_label_again_renames_nobody()
+    test_renamed_back_has_its_turns_back()
     print(f"\nALL {_passed} CHECKS PASSED")
     return 0
 

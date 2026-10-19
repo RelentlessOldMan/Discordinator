@@ -43,7 +43,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from . import config
 from .discord_client import (
@@ -1945,23 +1945,25 @@ def _before_mine(m: dict[str, Any], to: Optional[str], me: str) -> bool:
     _named_since)? Then it was another session's."""
     if not same_handle(to, me):
         return False
-    took = _named_since(me)
-    ts = _parse_ts(m.get("timestamp"))
-    return took is not None and (ts is None or ts < took)
+    not_mine = _named_since(me)
+    return not_mine is not None and not_mine(_parse_ts(m.get("timestamp")))
 
 
-def _named_since(me: str) -> Optional[datetime]:
-    """For a session going by the placeholder name (no chat name set up): when
-    it took that name. Every unnamed session goes by it, so a turn sent to it
-    before then was another one's. Likewise for a session renamed with its
-    machine: when it took its new full name (see handles.renamed_since). None
-    for any other name."""
+def _named_since(me: str) -> Optional[Callable[[Optional[datetime]], bool]]:
+    """Was a turn to ``me`` sent then another session's? For a session going
+    by the placeholder name (no chat name set up): one from before it took
+    that name - every unnamed session goes by it. Likewise for a session
+    renamed with its machine: one from while the machine had another name
+    (see handles.renamed_away). None for any other name (always its own)."""
     from . import handles  # (imports this module)
     if not config.is_default_chat_name(local_name(me)):
-        t = handles.renamed_since(me)
-        return datetime.fromtimestamp(t, timezone.utc) if t is not None else None
+        away = handles.renamed_away(me)
+        if away is None:
+            return None
+        return lambda ts: ts is None or any(a <= ts.timestamp() < b for a, b in away)
     t = handles.held_since(local_name(me))
-    return datetime.fromtimestamp(t if t is not None else time.time(), timezone.utc)
+    took = datetime.fromtimestamp(t if t is not None else time.time(), timezone.utc)
+    return lambda ts: ts is None or ts < took
 
 
 def _after(message_id: Any, read_to: Optional[str]) -> bool:
@@ -1973,7 +1975,7 @@ def _after(message_id: Any, read_to: Optional[str]) -> bool:
 
 
 def _owed_to(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
-             not_before: Optional[datetime] = None,
+             not_mine: Optional[Callable[[Optional[datetime]], bool]] = None,
              read_to: Optional[str] = None,
              handed_by: Optional[str] = None) -> Optional[dict[str, Any]]:
     """The turn owed to ``me``: the latest yield that targets me, that I haven't
@@ -1981,7 +1983,7 @@ def _owed_to(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
     moved on (it's still their latest turn). Worked out per caller, so two
     conversations sharing one room don't hide each other's owed turns. An
     unaddressed turn counts as answered once anyone else replies to it.
-    A turn addressed to ``me`` before ``not_before`` isn't (see _named_since).
+    A turn addressed to ``me`` when ``not_mine`` says so isn't (see _named_since).
     One older than OWED_EXPIRY isn't either - a session joining days later
     isn't handed a dead conversation's turn - unless ``me`` was in this chat:
     the turn came after ``read_to`` (where it has read the room to - not
@@ -1997,8 +1999,7 @@ def _owed_to(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
         if (ts is not None and ts < horizon and not _after(t.get("id"), read_to)
                 and not (handed_by and same_handle(t["from"], handed_by))):
             return None  # long dead: nothing older is owed either
-        if (not_before is not None and not _is_broadcast(t["to"])
-                and (ts is None or ts < not_before)
+        if (not_mine is not None and not _is_broadcast(t["to"]) and not_mine(ts)
                 # (renamed: one to its old name is still its own)
                 and not t.get("readdressed")):
             continue  # sent to this name before this session had it
