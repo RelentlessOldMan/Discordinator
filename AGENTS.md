@@ -378,7 +378,9 @@ new unaddressed opener (except a member that still owes the last turn an answer:
 a reply after a long piece of work goes back to whoever asked), and a turn owed to you expires after **4 hours** (a
 session joining days later isn't handed a dead conversation's turn) - unless
 you were in that chat: one you haven't read yet, or were handed and haven't
-answered, stays yours however long it took. A session
+answered, stays yours however long it took. Handed is read from the room: a
+turn that answers you, or an unaddressed opener after an `end` from the peer
+you had been chatting with (it's for you). A session
 waiting in a room where others chat without addressing it is told how to join
 (`status="ask"`). The ranked list of non-floor
 participants (`waiting` in results, shown as **others** in the viewers) is a

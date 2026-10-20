@@ -710,6 +710,53 @@ def test_an_empty_room_points_at_the_one_in_use() -> None:
     check("did you mean" not in (out.get("note") or ""),
           f"a room nobody has used for days isn't suggested: {out.get('note')!r}")
 
+
+def test_an_opener_to_my_last_peer_stays_mine() -> None:
+    print("an opener unaddressed after an end stays its sender's last peer's, however old:")
+    r, c = "reopen-room", LocalClient()
+    for h in ("A", "B"):
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "M:B", "over", "build it?", to="M:A")
+    chat.send_chat(c, r, "M:A", "wrap", "will do, nothing else", to="M:B")
+    chat.send_chat(c, r, "M:B", "end", "ending", to="M:A")
+    opener = chat.send_chat(c, r, "M:B", "over", "carve done, go ahead and build", to=None)
+    _backdate(r, 13 * 60)
+    # An older version's chat_begin moved A past the turn and dropped whom
+    # it replies to - all the state that said the turn was A's.
+    chat.reset(r, "M:A", str(opener[-1]["id"]), 20)
+    st = mcp.chat_status(chatter="A", channel=r)
+    check(st["your_turn"] and st["floor"] == "M:A",
+          f"13h on, A is still owed B's opener, as the floor says: {st['your_turn']}, {st['floor']}")
+    check(mcp.chat_begin(chatter="A", channel=r)["recovered_pending_turn"],
+          "and chat_begin hands it back")
+    check(not mcp.chat_status(chatter="C", channel=r)["your_turn"],
+          "a session that wasn't in that chat isn't handed the old opener")
+
+
+def test_my_own_turn_isnt_owed_to_my_old_name() -> None:
+    print("my own unaddressed turn isn't pointed out as owed to my old name:")
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Carver9"
+    handles._resolved.clear()
+    handles._since.clear()
+    handles._last_chatter = None
+    try:
+        r, c = "own-old-name", LocalClient()
+        # An older version's turns: names without a machine.
+        chat.send_chat(c, r, "Convex9", "over", "hi", to="Carver9")
+        chat.send_chat(c, r, "Carver9", "over", "hello back", to="Convex9")
+        _backdate(r, 120)  # (a chat long over)
+        mcp.chat_begin(chatter="carver", channel=r)
+        chat.send_chat(c, r, "M:Carver9/carver", "over", "re-carve done", to=None)
+        st = mcp.chat_status(chatter="carver", channel=r)
+        note = (st.get("note") or "") + (st.get("handle_note") or "")
+        check("re-carve done" not in note,
+              f"it isn't told it owes its own turn an answer: {note!r}")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        handles._resolved.clear()
+        handles._since.clear()
+        handles._last_chatter = None
+
 def main() -> int:
     test_held_turn_survives_chat_begin()
     test_no_unaddressed_reply_over_the_floor()
@@ -738,6 +785,8 @@ def main() -> int:
     test_side_note_stays_out_of_the_next_turn()
     test_an_old_stop_isnt_a_newcomers()
     test_an_empty_room_points_at_the_one_in_use()
+    test_an_opener_to_my_last_peer_stays_mine()
+    test_my_own_turn_isnt_owed_to_my_old_name()
     test_an_answered_broadcast_isnt_owed()
     test_a_turn_handed_on_doesnt_block_a_post()
     test_answering_one_asker_leaves_the_other_owed()

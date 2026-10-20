@@ -965,10 +965,12 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any],
                                                or _here(cfg, h) is None):
             continue
         st = chat.compute_state(client, channel_id, h)
-        if st.get("your_turn"):
+        # (a turn I sent isn't one I owe: an older name of mine that an
+        # unaddressed turn of mine would reach doesn't owe me an answer)
+        owed = [t for t in st.get("_owed") or [] if not chat.same_handle(t["from"], me)]
+        if owed:
             out.append(h)
-            owed = st.get("_owed_turn") or {}
-            _lost_turn[chat.handle_key(h)] = (owed.get("from"), st.get("_owed_text") or "")
+            _lost_turn[chat.handle_key(h)] = (owed[0]["from"], owed[0].get("text") or "")
     if tell and out:  # (the caller shows them: see _told)
         _note_told({f"{channel_id}|{chat.handle_key(h)}": {"turn": newest.get(chat.handle_key(h), ""),
                                          "after": str(msgs[-1]["id"]) if msgs else ""}

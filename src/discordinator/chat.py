@@ -43,7 +43,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from . import config
 from .discord_client import (
@@ -1387,6 +1387,10 @@ def compute_state(
             break
         if p is not None:
             chat_after = True
+    # Who posted before this chat (the one it follows on from): an opener
+    # unaddressed after an `end` answers the sender's peer there (_owed_turns).
+    prior = [(p["participant"], p["to"]) for p in parsed_list[:start]
+             if p is not None and p["status"] in YIELD_STATUSES + TERMINAL_STATUSES]
     scope = [i for i in scope if i >= start]
 
     # Handles are case-insensitive identities; each is shown with the spelling
@@ -1565,7 +1569,8 @@ def compute_state(
     owed: list[dict[str, Any]] = []
     if me_norm is not None and not ended:
         owed = _owed_turns(turns, me_norm, last_turn_index_by, _named_since(me_norm),
-                           get_cursor(channel_id, me_norm), get_reply_to(channel_id, me_norm))
+                           get_cursor(channel_id, me_norm), get_reply_to(channel_id, me_norm),
+                           prior)
     # Whom my latest yield went to (they owe me the answer).
     asked = next((t["to"] for t in reversed(turns) if same_handle(t["from"], me_norm)
                   and t["status"] in YIELD_STATUSES), None) if me_norm is not None else None
@@ -1929,7 +1934,8 @@ def _answers(u: dict[str, Any], t: dict[str, Any]) -> bool:
 def _owed_turns(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
                 not_mine: Optional[Callable[[Optional[datetime]], bool]] = None,
                 read_to: Optional[str] = None,
-                handed_by: Optional[str] = None) -> list[dict[str, Any]]:
+                handed_by: Optional[str] = None,
+                prior: Sequence[tuple[str, Optional[str]]] = ()) -> list[dict[str, Any]]:
     """The turns owed to ``me``, oldest first: from each peer, its yield that
     targets me if it's still that peer's latest turn (it hasn't handed the
     turn on since) and I haven't answered it (see _answers). Worked out per
@@ -1941,18 +1947,36 @@ def _owed_turns(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
     isn't handed a dead conversation's turn - unless ``me`` was in this chat:
     the turn came after ``read_to`` (where it has read the room to - not
     read yet, chat_await would hand it over), or was handed to it and not
-    answered yet (it's from ``handed_by``, whom its reply goes back to - a
-    chat_begin starts that afresh)."""
+    answered yet: it's from ``handed_by``, whom its reply goes back to (a
+    chat_begin starts that afresh), or the room shows it: it answers ``me``
+    (I'm the last one but its sender to have posted before it in this chat;
+    for its opener, I'm whom its sender's last turn before this chat was to,
+    or from - ``prior`` is the room's turns before it, as (from, to)), so a
+    lost read position or reply_to (an older version's chat_begin) can't
+    leave a turn the floor says is mine not mine."""
     horizon = datetime.now(timezone.utc) - OWED_EXPIRY
+
+    def answers_me(n: int, t: dict[str, Any]) -> bool:
+        for u in reversed(turns[:n]):
+            if not same_handle(u["from"], t["from"]):
+                return same_handle(u["from"], me)
+        for who, to in reversed(prior):
+            if same_handle(who, t["from"]) and to and not _is_broadcast(to):
+                return same_handle(to, me)
+            if same_handle(to, t["from"]):
+                return same_handle(who, me)
+        return False
+
     out = []
-    for t in turns:
+    for n, t in enumerate(turns):
         if same_handle(t["from"], me) or t["status"] not in YIELD_STATUSES:
             continue
         if not _targets(t["to"], me) or last_by.get(t["from"]) != t["i"]:
             continue
         ts = _parse_ts(t.get("ts"))
         if (ts is not None and ts < horizon and not _after(t.get("id"), read_to)
-                and not (handed_by and same_handle(t["from"], handed_by))):
+                and not (handed_by and same_handle(t["from"], handed_by))
+                and not answers_me(n, t)):
             continue  # long dead
         if (not_mine is not None and not _is_broadcast(t["to"]) and not_mine(ts)
                 # (renamed: one to its old name is still its own)
