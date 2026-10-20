@@ -8,6 +8,15 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.57] - 2026-10-19
+Chat: two askers each get an answer; answered and handed-on turns aren't yours; working seen by its asker; broad-review fixes
+- A question to all that someone else already answered isn't handed to a third session.
+- A turn its sender has since handed to someone else no longer blocks chat_say as unread.
+- Answering one of two askers leaves the other's turn yours; chat_status lists who is owed in owed_from (replaces held_from). A turn kept back by from_whom stays yours until answered.
+- A 'working' sent to the peer you owe is seen by that peer, and your chat_await tells you to finish the turn, even when the room's floor is elsewhere.
+- chat_await settles possible turns once per batch instead of re-reading the room per message.
+- Broad-review fixes: CLI errors, retries on 5xx, download 401, partial deletes, misshapen state.
+
 ## [1.0.56] - 2026-10-19
 Reads between two ids on Discord; a machine renamed back has its turns back
 - read_messages / read with both after and before returns only what's between them on Discord too (Discord ignores before when after is given)
