@@ -1084,10 +1084,9 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         # spoke again) is re-delivered by chat_await - recovery instead of a
         # silent stall; a long turn in progress arrives whole.
         cursor = chat.seed_cursor(client, channel_id, me)
-        held = chat.held_from(client, channel_id, me)
     chat.reset(channel_id, me, cursor, turn_cap)
     chat.note_room(channel_id, config.is_local(cfg, "chat"))
-    owed = bool(st.get("your_turn") or held)
+    owed = bool(st.get("your_turn"))
     out = {
         "channel": channel_id, "chatter": me, "turn_cap": turn_cap,
         "recovered_pending_turn": owed,
@@ -1336,7 +1335,7 @@ def _check_turn(client: Client, channel_id: str, me: str, status: str,
     mid_turn = any(chat.same_handle(x["from"], me) for x in st.get("progress", []))
     # (Finishing my own say/working turn is never blocked: I hold the floor,
     # and chat_await would only tell me to finish it first.)
-    unread = [] if mid_turn else chat.unread_for_me(client, channel_id, me)
+    unread = [] if mid_turn else chat.unread_for_me(client, channel_id, me, st)
     if unread:
         m = unread[0]
         p = chat.parse_msg(m)
@@ -1670,9 +1669,10 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
         sessions actually blocked in chat_await.
       - suggest_next: the fair next addressee in a multiparty room (an
         outstanding request, else the most-starved non-speaker), or null
-      - your_turn: True if the pending turn is owed to you — it's addressed to you (or broadcast) and isn't your own.
-        Also True when a turn to you came while you waited for someone else
-        (chat_await from_whom) - `held_from` says whom from; chat_await hands it over.
+      - your_turn: True if a turn is owed to you — addressed to you (or
+        broadcast), not answered yet, and its sender hasn't handed the turn
+        to someone else since. Two peers can each be owed an answer:
+        `owed_from` says whom from (oldest first); chat_await hands them over.
 
     If your_turn is True: call `chat_begin` (it repositions you to receive the
     pending turn) then `chat_await`, or `chat_say` if already in the session.
@@ -1695,16 +1695,14 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
         st = chat.compute_state(client, channel_id, me)
         lost = (_lost_turns(client, channel_id, me, cfg)
                 if me and not st.get("your_turn") else [])
-        held = chat.held_from(client, channel_id, me) if me else []
     public = {k: v for k, v in st.items() if not k.startswith("_")}
     public["channel"] = channel_id
-    if held:
-        # Turns that came while it waited for someone else (from_whom): owed
-        # to it all the same, and its next chat_await hands them over.
-        public["your_turn"] = True
-        public["held_from"] = held
-        public["note"] = (f"A turn to you from {', '.join(dict.fromkeys(held))} came while you "
-                          "waited for someone else - call chat_await to receive it.")
+    owed_from = list(dict.fromkeys(t["from"] for t in st.get("_owed") or []))
+    if owed_from:
+        public["owed_from"] = owed_from
+    if len(owed_from) > 1:
+        public["note"] = (f"Turns to you from {', '.join(owed_from)} are each waiting for "
+                          "an answer - call chat_await to receive them, oldest first.")
     if role is not None:
         public["chatter"] = me
         public["note"] = ((f"A turn here is owed to '{me}'" if st.get("your_turn") else
@@ -1712,7 +1710,7 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
                           + ", and no running session holds that name - you, before a "
                           "restart. Your next chat call takes that name back.")
     elif lost:
-        public["note"] = (f"{public['note']} " if held else "") + _lost_note(lost, cfg)
+        public["note"] = (f"{public['note']} " if public.get("note") else "") + _lost_note(lost, cfg)
     note = _unnamed(public.get("note"), me)
     if note:
         public["note"] = note

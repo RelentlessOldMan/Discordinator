@@ -438,9 +438,11 @@ fairness order for `suggest_next`, not a list of sessions actually blocked in
   floor comes to you in a multiparty room). A turn addressed to a *different* peer
   doesn't wake you — you hold until the floor is yours. `from_whom` narrows waking to
   one peer (a name without its machine means whom `to=` would); a turn for
-  you from anyone else meanwhile is kept, and your next `chat_await` hands it
-  over (`chat_status` shows it as `your_turn`, with `held_from`; a
-  `chat_begin` keeps it). **If `timed_out` and not `ended`, call it again** — the other side is
+  you from anyone else meanwhile stays owed, and your next `chat_await` hands it
+  over (`chat_status` shows it as `your_turn`, with `owed_from`). Two peers
+  asking you at once are each owed an answer: answering one leaves the
+  other's turn yours, and a turn its sender has since handed to someone else
+  isn't. **If `timed_out` and not `ended`, call it again** — the other side is
   still busy, and waiting a long time is fine; the timeout `note` shows what they
   said they're working on. (A session that owes a reply and sends it with
   `send_message` to the chat room has it posted as its chat turn to that peer. Any

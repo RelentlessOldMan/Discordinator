@@ -95,7 +95,11 @@ def test_from_whom_keeps_other_turns() -> None:
     check(a["from"] == "M:C" and a["your_turn"] and a["text"] == "A, a question from C",
           f"the next wait delivers C's turn: {a.get('from')} {a.get('text')!r}")
     a = wait("A", r, 0.3)
-    check(a["timed_out"], "and only once")
+    check(a.get("already_received") and a["from"] == "M:C",
+          "until A answers it, it's still A's turn")
+    mcp.chat_say(text="C: here you go", chatter="A", channel=r, to="C", wait=False)
+    a = wait("A", r, 0.3)
+    check(a["timed_out"], "and once answered, it's gone")
 
 
 def test_shutdown_keeps_read_pieces() -> None:

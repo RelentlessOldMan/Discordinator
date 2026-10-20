@@ -668,7 +668,7 @@ def _slot(state: dict[str, Any], channel_id: str, me: str) -> dict[str, Any]:
 
 def carry_slots(earlier: list[str], me: str, over: Any = ()) -> None:
     """Give ``me`` this session's chat state (read position, who to reply to,
-    held turns...) in each room from the first of its ``earlier`` names that
+    pieces of turns...) in each room from the first of its ``earlier`` names that
     has some there, where ``me`` has none yet - a session whose machine was
     renamed, or that ran an older version (state kept by its name without a
     machine), carries on where it was. State under one of its ``over`` names
@@ -693,18 +693,12 @@ def carry_slots(earlier: list[str], me: str, over: Any = ()) -> None:
 
 
 def reset(channel_id: str, me: str, cursor: str, cap: int) -> None:
-    """A fresh start in the room (chat_begin) - keeping the turns held for my
-    next wait (see _Position): they're still waiting on me."""
+    """A fresh start in the room (chat_begin). (Turns still owed to me are
+    worked out from the room, so the cursor - placed before them - is all
+    they need.)"""
     with config.update_state() as state:
         room = state.setdefault("chat", {}).setdefault(channel_id, {})
-        before = room.get(handle_key(me))
-        held = before.get("held") if isinstance(before, dict) else None
-        room[handle_key(me)] = {
-            "cursor": cursor,
-            "turns": 0,
-            "cap": cap,
-            **({"held": held} if held else {}),
-        }
+        room[handle_key(me)] = {"cursor": cursor, "turns": 0, "cap": cap}
 
 
 def get_cursor(channel_id: str, me: str) -> Optional[str]:
@@ -797,10 +791,7 @@ def _posted(channel_id: str, me: str, status: str, sent: list[dict[str, Any]],
             if status in YIELD_STATUSES + TERMINAL_STATUSES:
                 slot.pop("waiting_since", None)
                 slot.pop("nudged", None)
-                if slot.get("held") and to and not _is_broadcast(to):
-                    # Answered: a held turn from them is no longer waiting on me.
-                    slot["held"] = [h for h in slot["held"] if not same_handle(
-                        (h.get("result") or {}).get("from"), to)]
+                slot.pop("held", None)  # (kept by versions before 1.0.57)
     except (OSError, config.LockTimeout):
         pass  # bookkeeping only: never fail a post that went out
 
@@ -860,22 +851,39 @@ def seed_cursor(client: DiscordClient, channel_id: str, me: str) -> str:
     return latest[0]["id"] if latest else "0"
 
 
-def unread_for_me(client: DiscordClient, channel_id: str, me: str) -> list[dict[str, Any]]:
+def unread_for_me(client: DiscordClient, channel_id: str, me: str,
+                  st: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     """Messages after my cursor that I'd be woken for and haven't read: a human
-    remark, the end of my chat, or a yielded turn for me. (Not my own posts, a
+    remark, the end of my chat, or a turn owed to me (see _owed_turns - one
+    its sender has since handed to someone else isn't). Not my own posts, a
     plain bot message, a reminder, someone's say/working/ask, or another
-    conversation's turns.)"""
+    conversation's turns. ``st``: compute_state for me, if already read."""
     cursor = get_cursor(channel_id, me)
     if not cursor:
         return []
+    raw = client.read_messages(channel_id, limit=100, after=cursor)
+    if not raw:
+        return []
+    owed: Optional[set[str]] = None
     out = []
-    for raw in client.read_messages(channel_id, limit=100, after=cursor):
-        m = simplify_message(raw)
-        if parse_msg(m) is None and m.get("bot"):
+    for m in (simplify_message(r) for r in reversed(raw)):
+        p = _parse_own(m, me)
+        if p is None:
+            if not m.get("bot") and not (m.get("content") or "").lstrip().startswith(NUDGE_MARK):
+                out.append(m)  # a human
             continue
-        if _wakes(client, channel_id, m, me):
-            out.append(m)
-    return list(reversed(out))
+        if same_handle(p["participant"], me):
+            continue
+        if p["status"] in TERMINAL_STATUSES:
+            if _ends_mine(client, channel_id, me, p, m["id"]):
+                out.append(m)
+        elif p["status"] in YIELD_STATUSES:
+            if owed is None:
+                st = st if st is not None else compute_state(client, channel_id, me)
+                owed = {str(t["id"]) for t in st.get("_owed") or []}
+            if str(m["id"]) in owed:
+                out.append(m)
+    return out
 
 
 def note_room(channel_id: str, local: bool) -> None:
@@ -1027,32 +1035,17 @@ def await_turn(
         # old turns happen to be in the room.
         cursor0 = seed_cursor(client, channel_id, me)
         set_cursor(channel_id, me, cursor0)
-    held = _take_held(channel_id, me, from_whom)
-    try:
-        while held is not None and not _held_still_open(client, channel_id, me, held):
-            held = _take_held(channel_id, me, from_whom)  # ended or deleted since: drop it
-        if held is not None:
-            result = dict(held.get("result") or {})
-            result["note"] = ("This turn came in while you were waiting for someone else - "
-                              "it's your turn to answer it.")
-            if result.get("from"):
-                set_reply_to(channel_id, me, result["from"])
-            result.update(_floor_context(client, channel_id, me))
-            return _finish(channel_id, me, result)
-    except BaseException:
-        if held is not None:
-            try:
-                _hold(channel_id, me, [held])  # not delivered: the next wait gets it
-            except Exception:
-                pass
-        raise
-    fresh = any(
-        _wakes(client, channel_id, simplify_message(m), me, from_whom)
+    st0 = compute_state(client, channel_id, me)
+    owed = [t for t in st0.get("_owed") or []
+            if from_whom is None or name_matches(from_whom, t["from"])]
+    # Something I haven't read yet that wakes me (a turn owed to me, a human,
+    # the end of my chat) comes first: the loop below delivers it.
+    fresh = any(_after(t["id"], cursor0) for t in owed) or any(
+        _wakes_me(client, channel_id, simplify_message(m), me)
         for m in client.read_messages(channel_id, limit=50, after=cursor0))
-    st0 = {} if fresh else compute_state(client, channel_id, me)
     # My own turn isn't finished (I sent `say`/`working` and never yielded)?
     # Then everyone is waiting on ME - waiting here too would deadlock the chat.
-    mine = [x for x in st0.get("progress", []) if same_handle(x["from"], me)]
+    mine = [] if fresh else [x for x in st0.get("progress", []) if same_handle(x["from"], me)]
     if mine:
         x = mine[-1]
         result = _result(me, channel_id, sender=None, status=None, text="",
@@ -1071,18 +1064,19 @@ def await_turn(
                 "chat_say(<message>, status='over') to hand over.")
         return _finish(channel_id, me, result)
 
-    owed = st0.get("_owed_turn")
-    if (owed and int(owed["id"]) <= int(cursor0)
-            and (from_whom is None or name_matches(from_whom, owed["from"]))):
+    if owed and not fresh:
+        # Owed to me, but I've read past it (handed over earlier, or it came
+        # while I waited for someone else): hand it back, oldest first.
+        t = owed[0]
         result = _result(
-            me, channel_id, sender=owed["from"], status=owed["status"],
-            text=st0.get("_owed_text") or "", messages=[], ended=False,
-            stop_reason=None, your_turn=True, addressed_to=owed.get("to"))
+            me, channel_id, sender=t["from"], status=t["status"], text=t["text"],
+            messages=[], ended=False, stop_reason=None, your_turn=True,
+            addressed_to=t.get("to"))
         result["already_received"] = True
-        result["note"] = ("This turn was already delivered to you earlier - it's YOUR "
-                          "turn now. Reply with chat_say; don't call chat_await until "
-                          "you have.")
-        set_reply_to(channel_id, me, owed["from"])
+        result["note"] = ("This turn reached you earlier and is still unanswered - it's "
+                          "YOUR turn now. Reply with chat_say; don't call chat_await "
+                          "until you have.")
+        set_reply_to(channel_id, me, t["from"])
         result.update(_floor_context(client, channel_id, me))
         return _finish(channel_id, me, result)
 
@@ -1138,13 +1132,11 @@ def await_turn(
 class _Position:
     """My read position during one wait: moved in memory per message, and
     written to the shared state once per batch and on return (a locked write
-    per message made a wait in a busy room slow). Turns for me that came while
-    I was waiting for someone else (``from_whom``) are held for my next wait."""
+    per message made a wait in a busy room slow)."""
 
     def __init__(self, channel_id: str, me: str) -> None:
         self.channel_id, self.me = channel_id, me
         self.at = self.saved = get_cursor(channel_id, me)
-        self.held: list[dict[str, Any]] = []
 
     def move(self, message_id: str) -> None:
         self.at = message_id
@@ -1153,41 +1145,6 @@ class _Position:
         if self.at != self.saved:
             set_cursor(self.channel_id, self.me, self.at)
             self.saved = self.at
-        if self.held:
-            _hold(self.channel_id, self.me, self.held)
-            self.held = []
-
-
-HELD_MAX = 20
-
-
-def _hold(channel_id: str, me: str, items: list[dict[str, Any]]) -> None:
-    with config.update_state() as state:
-        slot = _slot(state, channel_id, me)
-        slot["held"] = (list(slot.get("held") or []) + items)[-HELD_MAX:]
-
-
-def held_from(client: DiscordClient, channel_id: str, me: str) -> list[str]:
-    """Who the turns held for my next wait (still waiting on me) are from."""
-    held = _slot(config.load_state(), channel_id, me).get("held") or []
-    return [str((h.get("result") or {}).get("from")) for h in held
-            if isinstance(h, dict) and _held_still_open(client, channel_id, me, h)]
-
-
-def _take_held(channel_id: str, me: str, from_whom: Optional[str]) -> Optional[dict[str, Any]]:
-    """The oldest held turn (from ``from_whom``, if given), removed from the slot."""
-    if not _slot(config.load_state(), channel_id, me).get("held"):
-        return None  # the usual case: no locked write
-    with config.update_state() as state:
-        slot = _slot(state, channel_id, me)
-        held = list(slot.get("held") or [])
-        i = next((i for i, h in enumerate(held) if from_whom is None
-                  or name_matches(from_whom, (h.get("result") or {}).get("from"))), None)
-        if i is None:
-            return None
-        item = held.pop(i)
-        slot["held"] = held
-    return item
 
 
 def _present(client: DiscordClient, channel_id: str, ids: set[str]) -> set[str]:
@@ -1209,31 +1166,6 @@ def _present(client: DiscordClient, channel_id: str, ids: set[str]) -> set[str]:
         after = str(newest)
 
 
-def _held_still_open(client: DiscordClient, channel_id: str, me: str,
-                     item: dict[str, Any]) -> bool:
-    """Is a held turn still waiting on me - its chat not ended since (by its
-    sender, by an ending addressed to me, or by a human stop)?"""
-    sender = (item.get("result") or {}).get("from")
-    after = (item.get("message") or {}).get("id")
-    if not after:
-        return True
-    ids = {str(after)} | {str(x["id"]) for x in (item.get("result") or {}).get("messages") or []
-                          if isinstance(x, dict) and x.get("id")}
-    if _present(client, channel_id, ids) != ids:
-        return False  # deleted (or purged) since: it never reaches me
-    for raw in client.read_messages(channel_id, limit=100, after=str(after)):
-        m = simplify_message(raw)
-        if not m.get("bot") and is_human_stop(m.get("content") or ""):
-            return False
-        p = _parse_own(m, me)
-        if p is not None and p["status"] in TERMINAL_STATUSES and (
-                same_handle(p["participant"], sender) or same_handle(p["to"], me)
-                or (handle_key(p["to"]) in _own_names  # (an earlier name of mine)
-                    and _means_me(client, channel_id, p["to"], me, m["id"]))):
-            return False
-    return True
-
-
 def _other_peer(a: Optional[str], b: Optional[str]) -> bool:
     """Are ``a`` and ``b`` two different addressees? (A piece with none - a
     long turn split by hand, its address left to the last piece - goes with
@@ -1241,17 +1173,33 @@ def _other_peer(a: Optional[str], b: Optional[str]) -> bool:
     return a is not None and b is not None and handle_key(a) != handle_key(b)
 
 
-def _yield_from(m: dict[str, Any], sender: str, me: str) -> bool:
-    """Is ``m`` a turn ``sender`` yielded (over/wrap)?"""
-    p = _parse_own(m, me)
-    return (p is not None and p["status"] in YIELD_STATUSES
-            and same_handle(p["participant"], sender))
-
-
 def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float,
                 poll: float, nudge_after: float, want: Optional[str],
                 pending_by_sender: dict[str, list[dict[str, Any]]], done: Any,
                 since: float, nudged: bool, pos: _Position) -> dict[str, Any]:
+    # Turns that may be for me, read in order: whether one is (and is still
+    # owed - not answered by someone else, nor handed on by its sender since)
+    # is settled once per batch by compute_state, the same as chat_status.
+    # Each keeps where the read was, so the turns after it are read again.
+    maybe: list[tuple[str, dict[str, Any], dict[str, list[dict[str, Any]]]]] = []
+
+    def settle(upto: Optional[str]) -> Optional[dict[str, Any]]:
+        if not maybe:
+            return None
+        owed = {str(t["id"]) for t in compute_state(
+            client, channel_id, me, upto=upto).get("_owed") or []}
+        found = next((x for x in maybe if x[0] in owed
+                      and (want is None or name_matches(want, x[1]["from"]))), None)
+        maybe.clear()
+        if found is None:
+            return None
+        mid, result, buffers = found
+        pos.move(mid)
+        pending_by_sender.clear()
+        pending_by_sender.update(buffers)
+        result.update(_floor_context(client, channel_id, me))
+        return done(result)
+
     while True:
         if SHUTDOWN.is_set():
             # Keep the pieces already read: the next server delivers the turn whole.
@@ -1261,9 +1209,15 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
         raw = client.read_messages(channel_id, limit=100, after=pos.at)
         messages = list(reversed([simplify_message(m) for m in raw]))
 
-        for idx, m in enumerate(messages):
-            pos.move(m["id"])
+        for m in messages:
             parsed = _parse_own(m, me)
+            if maybe and (parsed is None and not m.get("bot")
+                          or parsed is not None and parsed["status"] in TERMINAL_STATUSES):
+                # A human or an ending: a turn for me before it comes first.
+                got = settle(pos.at)
+                if got is not None:
+                    return got
+            pos.move(m["id"])
 
             if parsed is None:
                 text = m["content"]
@@ -1343,27 +1297,17 @@ def _await_loop(client: DiscordClient, channel_id: str, me: str, deadline: float
                     messages=_lean(pieces), ended=True, stop_reason=stop_reason,
                     your_turn=False, addressed_to=to, attachments=atts))
 
-            # A yielded turn (over/wrap). Does the floor actually come to me?
-            if not _targets(to, me) and not _means_me(client, channel_id, to, me, m["id"]):
-                continue  # addressed to another peer — keep holding the wait
-            if _before_mine(m, to, me):
-                continue  # sent to my name before I had it: another session's
-            if _is_broadcast(to) and not _broadcast_for_me(client, channel_id, me, m["id"]):
-                continue  # open to all - but in a conversation I'm not part of
-            if any(_yield_from(x, sender, me) for x in messages[idx + 1:]):
-                continue  # its sender has handed the turn on since (as _owed_to)
+            # A yielded turn (over/wrap) that may be mine: settled with the batch.
+            if _may_be_mine(to, me):
+                maybe.append((str(m["id"]), _result(
+                    me, channel_id, sender=sender, status=status, text=text,
+                    messages=_lean(pieces), ended=False, stop_reason=None,
+                    your_turn=True, addressed_to=to, attachments=atts),
+                    {k: list(v) for k, v in pending_by_sender.items()}))
 
-            result = _result(
-                me, channel_id, sender=sender, status=status, text=text,
-                messages=_lean(pieces), ended=False, stop_reason=None,
-                your_turn=True, addressed_to=to, attachments=atts)
-            if want is not None and not name_matches(want, sender):
-                # For me, but I'm waiting for someone else: my next wait gets it.
-                pos.held.append({"message": m, "result": result})
-                continue
-            result.update(_floor_context(client, channel_id, me))
-            return done(result)
-
+        got = settle(pos.at)
+        if got is not None:
+            return got
         if time.monotonic() >= deadline:
             waited = time.time() - since
             st = compute_state(client, channel_id, me)
@@ -1413,9 +1357,10 @@ def compute_state(
     (participants ranked most-starved first), suggest_next (the fair next
     addressee in a multiparty room), and — if `me` is given — your_turn.
     last_turn/pending_turn carry `to` (the addressee, or None). `your_turn` is
-    worked out for `me` alone (the turn owed to me, which in a shared room need
-    not be the room's latest); `_owed_turn`/`_owed_text`/`_owed_predecessor`
-    describe it (the last is a cursor that re-reads all of it).
+    worked out for `me` alone (the turns owed to me, which in a shared room
+    need not be the room's latest - see _owed_turns): `_owed` lists them,
+    oldest first; `_owed_turn`/`_owed_text` describe the one to answer first
+    and `_owed_predecessor` is a cursor that re-reads them all.
 
     With `me`, everything is about `me`'s own conversation: the room is shared,
     so other pairs chatting there (their turns, their ending, their members)
@@ -1617,6 +1562,27 @@ def compute_state(
             cands = [p for p in waiting if p != last_speaker and not same_handle(p, me_norm)]
             suggest_next = cands[0] if cands else None
 
+    owed: list[dict[str, Any]] = []
+    if me_norm is not None and not ended:
+        owed = _owed_turns(turns, me_norm, last_turn_index_by, _named_since(me_norm),
+                           get_cursor(channel_id, me_norm), get_reply_to(channel_id, me_norm))
+    # Whom my latest yield went to (they owe me the answer).
+    asked = next((t["to"] for t in reversed(turns) if same_handle(t["from"], me_norm)
+                  and t["status"] in YIELD_STATUSES), None) if me_norm is not None else None
+
+    def busy(k: str) -> bool:
+        """Is k's say/working a turn in progress - for me? From whoever may
+        speak now (in a 3+ room a non-holder posting `working` doesn't hold
+        anyone up), and in any case from the peer I'm waiting on, and mine
+        while I owe someone an answer."""
+        if k not in participants:
+            return False
+        if floor is None or k == floor:
+            return True
+        if me_norm is None:
+            return False
+        return (same_handle(k, asked) if k != me_norm else bool(owed))
+
     state: dict[str, Any] = {
         "session_active": bool(last_turn) and not ended,
         "ended": ended,
@@ -1628,10 +1594,7 @@ def compute_state(
         "floor_requests": floor_requests,
         "waiting": waiting,
         "suggest_next": suggest_next,
-        # A say/working is a turn in progress only from whoever may speak now: in
-        # a 3+ room, a non-holder posting `working` doesn't hold anyone up.
-        "progress": [v for k, v in progress.items()
-                     if k in participants and (floor is None or k == floor)],
+        "progress": [v for k, v in progress.items() if busy(k)],
         "_posters": posters,
         # Everyone who has posted in the room, and who is chatting in it now
         # outside my conversation.
@@ -1645,15 +1608,17 @@ def compute_state(
             if ended and last_turn else None),
     }
     if me_norm is not None:
-        owed = None if ended else _owed_to(turns, me_norm, last_turn_index_by,
-                                           _named_since(me_norm),
-                                           get_cursor(channel_id, me_norm),
-                                           get_reply_to(channel_id, me_norm))
-        state["your_turn"] = owed is not None
+        handed_by = get_reply_to(channel_id, me_norm)
+        first = next((t for t in owed if same_handle(t["from"], handed_by)),
+                     owed[0] if owed else None)
+        state["your_turn"] = bool(owed)
+        state["_owed"] = [{k: t[k] for k in ("from", "to", "status", "id", "ts", "text")}
+                          for t in owed]
         state["_owed_turn"] = (
-            {k: owed[k] for k in ("from", "to", "status", "id", "ts")} if owed else None)
-        state["_owed_text"] = owed["text"] if owed else None
-        state["_owed_predecessor"] = _before(msgs, owed["first"]) if owed else None
+            {k: first[k] for k in ("from", "to", "status", "id", "ts")} if first else None)
+        state["_owed_text"] = first["text"] if first else None
+        state["_owed_predecessor"] = (
+            _before(msgs, min(t["first"] for t in owed)) if owed else None)
     return state
 
 
@@ -1866,7 +1831,7 @@ def _owes_reply(msgs: list[dict[str, Any]], parsed_list: list[Optional[dict[str,
                 handed_by: Optional[str] = None) -> bool:
     """Is the latest turn addressed to ``my`` (handle key) from my conversation
     still unanswered - nothing completed by me since? Not one past OWED_EXPIRY,
-    unless (as in _owed_to) I haven't read it yet (it's past ``read_to``) or
+    unless (as in _owed_turns) I haven't read it yet (it's past ``read_to``) or
     was handed it (it's from ``handed_by``): that stays mine however long the
     work took."""
     horizon = datetime.now(timezone.utc) - OWED_EXPIRY
@@ -1914,39 +1879,16 @@ def _ends_mine(client: DiscordClient, channel_id: str, me: str,
     return False
 
 
-def _broadcast_for_me(client: DiscordClient, channel_id: str, me: str,
-                      message_id: str) -> bool:
-    """Is this unaddressed turn one I'm meant to answer (my conversation's, or
-    an opener while I'm in none) rather than another conversation's?"""
-    owed = compute_state(client, channel_id, me, upto=message_id).get("_owed_turn")
-    return bool(owed) and str(owed["id"]) == str(message_id)
-
-
-def _wakes(client: DiscordClient, channel_id: str, m: dict[str, Any], me: str,
-           from_whom: Optional[str] = None) -> bool:
-    """_would_wake, plus the checks that need the room: an ending or an
-    unaddressed turn only counts if it's from my conversation."""
-    if not _would_wake(m, me, from_whom):
+def _wakes_me(client: DiscordClient, channel_id: str, m: dict[str, Any], me: str) -> bool:
+    """Is ``m`` a human's post, or an ending of my chat? (A turn owed to me
+    wakes me too - see _owed_turns.)"""
+    if (m.get("content") or "").lstrip().startswith(NUDGE_MARK):
         return False
     p = _parse_own(m, me)
     if p is None:
         return not m.get("bot")  # a human; relay traffic never wakes anyone
-    if p["status"] in TERMINAL_STATUSES:
-        return _ends_mine(client, channel_id, me, p, m["id"])
-    if _is_broadcast(p["to"]):
-        return _broadcast_for_me(client, channel_id, me, m["id"])
-    if _before_mine(m, p["to"], me):
-        return False
-    return _means_me(client, channel_id, p["to"], me, m["id"])
-
-
-def _before_mine(m: dict[str, Any], to: Optional[str], me: str) -> bool:
-    """Was ``m``, addressed ``to`` my name, sent before I had it (see
-    _named_since)? Then it was another session's."""
-    if not same_handle(to, me):
-        return False
-    not_mine = _named_since(me)
-    return not_mine is not None and not_mine(_parse_ts(m.get("timestamp")))
+    return (p["status"] in TERMINAL_STATUSES and not same_handle(p["participant"], me)
+            and _ends_mine(client, channel_id, me, p, m["id"]))
 
 
 def _named_since(me: str) -> Optional[Callable[[Optional[datetime]], bool]]:
@@ -1974,14 +1916,25 @@ def _after(message_id: Any, read_to: Optional[str]) -> bool:
         return False
 
 
-def _owed_to(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
-             not_mine: Optional[Callable[[Optional[datetime]], bool]] = None,
-             read_to: Optional[str] = None,
-             handed_by: Optional[str] = None) -> Optional[dict[str, Any]]:
-    """The turn owed to ``me``: the latest yield that targets me, that I haven't
-    answered since (no completed turn of mine after it), and whose sender hasn't
-    moved on (it's still their latest turn). Worked out per caller, so two
-    conversations sharing one room don't hide each other's owed turns. An
+def _answers(u: dict[str, Any], t: dict[str, Any]) -> bool:
+    """Does my completed turn ``u`` answer the turn ``t`` owed to me? One back
+    to its sender does, and so does one to all, an unaddressed one, or an
+    ending - one to someone else doesn't: its sender is still waiting on me."""
+    to = u["to"]
+    if _is_broadcast(to) or u["status"] in TERMINAL_STATUSES:
+        return True
+    return name_matches(to, t["from"]) or same_handle(to, _project_of(t["from"]))
+
+
+def _owed_turns(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
+                not_mine: Optional[Callable[[Optional[datetime]], bool]] = None,
+                read_to: Optional[str] = None,
+                handed_by: Optional[str] = None) -> list[dict[str, Any]]:
+    """The turns owed to ``me``, oldest first: from each peer, its yield that
+    targets me if it's still that peer's latest turn (it hasn't handed the
+    turn on since) and I haven't answered it (see _answers). Worked out per
+    caller, so two conversations sharing one room don't hide each other's
+    owed turns, and two peers asking me at once are each owed an answer. An
     unaddressed turn counts as answered once anyone else replies to it.
     A turn addressed to ``me`` when ``not_mine`` says so isn't (see _named_since).
     One older than OWED_EXPIRY isn't either - a session joining days later
@@ -1990,28 +1943,29 @@ def _owed_to(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
     read yet, chat_await would hand it over), or was handed to it and not
     answered yet (it's from ``handed_by``, whom its reply goes back to - a
     chat_begin starts that afresh)."""
-    mine = last_by.get(me, -1)
     horizon = datetime.now(timezone.utc) - OWED_EXPIRY
-    for t in reversed(turns):
-        if t["i"] <= mine:
-            return None
-        ts = _parse_ts(t.get("ts"))
-        if (ts is not None and ts < horizon and not _after(t.get("id"), read_to)
-                and not (handed_by and same_handle(t["from"], handed_by))):
-            return None  # long dead: nothing older is owed either
-        if (not_mine is not None and not _is_broadcast(t["to"]) and not_mine(ts)
-                # (renamed: one to its old name is still its own)
-                and not t.get("readdressed")):
-            continue  # sent to this name before this session had it
+    out = []
+    for t in turns:
         if same_handle(t["from"], me) or t["status"] not in YIELD_STATUSES:
             continue
         if not _targets(t["to"], me) or last_by.get(t["from"]) != t["i"]:
             continue
-        if _is_broadcast(t["to"]) and any(
-                u["i"] > t["i"] and not same_handle(u["from"], t["from"]) for u in turns):
+        ts = _parse_ts(t.get("ts"))
+        if (ts is not None and ts < horizon and not _after(t.get("id"), read_to)
+                and not (handed_by and same_handle(t["from"], handed_by))):
+            continue  # long dead
+        if (not_mine is not None and not _is_broadcast(t["to"]) and not_mine(ts)
+                # (renamed: one to its old name is still its own)
+                and not t.get("readdressed")):
+            continue  # sent to this name before this session had it
+        later = [u for u in turns if u["i"] > t["i"]]
+        if _is_broadcast(t["to"]):
+            if any(not same_handle(u["from"], t["from"]) for u in later):
+                continue
+        elif any(same_handle(u["from"], me) and _answers(u, t) for u in later):
             continue
-        return t
-    return None
+        out.append(t)
+    return out
 
 
 def _before(msgs: list[dict[str, Any]], i: int) -> Optional[str]:
@@ -2033,24 +1987,12 @@ def _recently_working(st: dict[str, Any], me: str) -> bool:
     return False
 
 
-def _would_wake(m: dict[str, Any], me: str, from_whom: Optional[str] = None) -> bool:
-    """Would the await loop deliver this message to ``me``? (A human's
-    post, an ending, or a yielded turn that targets me - not my own posts, a
-    reminder, or someone's say/working/ask, which wake nobody.)"""
-    content = m.get("content") or ""
-    if content.lstrip().startswith(NUDGE_MARK):
-        return False
-    p = _parse_own(m, me)
-    if p is None:
-        return not m.get("bot")  # a human, not relay traffic
-    if same_handle(p["participant"], me) or p["status"] in PROGRESS_STATUSES + ("ask",):
-        return False
-    if p["status"] in TERMINAL_STATUSES:
-        return True
-    if from_whom is not None and not name_matches(from_whom, p["participant"]):
-        return False
-    return (_targets(p["to"], me) or _could_mean(p["to"], me)  # _wakes checks the room
-            or (handle_key(p["to"]) in _own_names and same_handle(me, _own_earlier_by[0])))
+def _may_be_mine(to: Optional[str], me: str) -> bool:
+    """Could a turn addressed ``to`` be for me - to me, to all, to my
+    project's bare name, or to an earlier name of mine? (compute_state says
+    whether it is.)"""
+    return (_targets(to, me) or _could_mean(to, me)
+            or (handle_key(to) in _own_names and same_handle(me, _own_earlier_by[0])))
 
 
 def _working_note(st: dict[str, Any], me: str) -> Optional[str]:

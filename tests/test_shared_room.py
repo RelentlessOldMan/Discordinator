@@ -474,7 +474,7 @@ def test_held_turn_survives_chat_begin() -> None:
     check(got.get("from") == "M:C", f"it waits for C: {got.get('from')}")
     mcp.chat_say(text="to C", chatter="A", channel=r, wait=False)
     st = mcp.chat_status(chatter="A", channel=r)
-    check(st["your_turn"] and st.get("held_from") == ["M:B"], f"chat_status says B's is owed: {st.get('held_from')}")
+    check(st["your_turn"] and st.get("owed_from") == ["M:B"], f"chat_status says B's is owed: {st.get('owed_from')}")
     b = mcp.chat_begin(chatter="A", channel=r)
     check(b["recovered_pending_turn"], "chat_begin says a turn is owed")
     got = wait("A", r)
@@ -615,6 +615,74 @@ def test_an_old_stop_isnt_a_newcomers() -> None:
     check(b["state"]["stop_reason"] == "human", "one with nothing since still is")
 
 
+def test_an_answered_broadcast_isnt_owed() -> None:
+    print("a question to all that someone else already answered isn't handed to a third:")
+    c, r = LocalClient(), "answered-all"
+    for h in "ABC":
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "M:A", "over", "anyone know X?", to="all")
+    chat.send_chat(c, r, "M:B", "over", "yes, X is Y", to="M:A")
+    check(not mcp.chat_status(chatter="C", channel=r)["your_turn"], "chat_status: not C's turn")
+    got = wait("C", r, 0.5)
+    check(got.get("timed_out") and not got.get("your_turn"), f"chat_await: C keeps waiting: {got.get('text')}")
+
+
+def test_a_turn_handed_on_doesnt_block_a_post() -> None:
+    print("a turn its sender has since handed to someone else doesn't hold up my post:")
+    c, r = LocalClient(), "handed-on"
+    for h in "ABC":
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "M:B", "over", "A, what do you think?", to="M:A")
+    chat.send_chat(c, r, "M:B", "over", "never mind, C?", to="M:C")
+    check(not mcp.chat_status(chatter="A", channel=r)["your_turn"], "chat_status: not A's turn")
+    try:
+        out = mcp.chat_say(text="B, about that", chatter="A", channel=r, to="M:B", wait=False)
+        check(bool(out.get("message_ids")), "A's turn to B goes out")
+    except Exception as e:
+        check(False, f"A's turn was refused: {str(e)[:80]}")
+    got = wait("A", r, 0.5)
+    check(got.get("timed_out"), "chat_await: nothing for A")
+
+
+def test_answering_one_asker_leaves_the_other_owed() -> None:
+    print("two peers ask me; answering one still leaves the other's turn owed:")
+    c = LocalClient()
+    for r, first, second in (("two-askers", "M:B", "M:C"), ("two-askers-2", "M:C", "M:B")):
+        for h in "ABC":
+            mcp.chat_begin(chatter=h, channel=r)
+        chat.send_chat(c, r, first, "over", f"{first} asks A", to="M:A")
+        chat.send_chat(c, r, second, "over", f"{second} asks A", to="M:A")
+        got = [wait("A", r).get("from"), wait("A", r).get("from")]
+        check(sorted(got) == ["M:B", "M:C"], f"A is handed both: {got}")
+        mcp.chat_say(text="answer for B", chatter="A", channel=r, to="M:B", wait=False)
+        st = mcp.chat_status(chatter="A", channel=r)
+        check(st["your_turn"] and st.get("owed_from") == ["M:C"],
+              f"chat_status: C's turn is still owed: {st.get('owed_from')}")
+        check(mcp.chat_begin(chatter="A", channel=r)["recovered_pending_turn"], "chat_begin says so")
+        got = wait("A", r)
+        check(got.get("from") == "M:C" and got.get("your_turn"), f"chat_await hands it over: {got.get('from')}")
+        mcp.chat_say(text="answer for C", chatter="A", channel=r, to="M:C", wait=False)
+        check(not mcp.chat_status(chatter="A", channel=r)["your_turn"], "answered both: nothing owed")
+
+
+def test_working_seen_by_its_asker() -> None:
+    print("my 'working' to the peer I owe is seen by them, though the room's floor is elsewhere:")
+    c, r = LocalClient(), "working-asker"
+    for h in "ABCD":
+        mcp.chat_begin(chatter=h, channel=r)
+    chat.send_chat(c, r, "M:A", "over", "C, D: join us", to="M:C")
+    chat.send_chat(c, r, "M:C", "over", "D?", to="M:D")
+    chat.send_chat(c, r, "M:B", "over", "A, please run the tests", to="M:A")
+    chat.send_chat(c, r, "M:D", "over", "C, sure", to="M:C")
+    got = wait("A", r)
+    check(got.get("from") == "M:B" and got.get("your_turn"), f"A has B's turn: {got.get('from')}")
+    mcp.chat_say(text="running the tests", chatter="A", channel=r, status="working", wait=False)
+    st = chat.compute_state(c, r, "M:B")
+    check(chat._recently_working(st, "M:B"), f"B sees A working: {[x['from'] for x in st['progress']]}")
+    a = wait("A", r)
+    check(a.get("unfinished_turn") and not a.get("already_received"), "A is told to finish its turn")
+
+
 def main() -> int:
     test_held_turn_survives_chat_begin()
     test_no_unaddressed_reply_over_the_floor()
@@ -642,6 +710,10 @@ def main() -> int:
     test_suggest_next_is_never_me()
     test_side_note_stays_out_of_the_next_turn()
     test_an_old_stop_isnt_a_newcomers()
+    test_an_answered_broadcast_isnt_owed()
+    test_a_turn_handed_on_doesnt_block_a_post()
+    test_answering_one_asker_leaves_the_other_owed()
+    test_working_seen_by_its_asker()
     print(f"\nALL {_passed} SHARED-ROOM CHECKS PASSED")
     return 0
 
