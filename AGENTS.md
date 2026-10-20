@@ -148,7 +148,11 @@ from and what it says - so the session can answer it.
 For a mode on `local`, skip steps 2–3 for it (no bot/token/channels): relay
 defaults to room `relay`, chat to room `chat`; pass any `channel="..."` for
 another room (named like a Discord channel: `Ops Team` and `ops-team` are one
-room). The rest of this doc's tool usage is identical on both transports.
+room). Any name makes a room, so a slip makes an empty one nobody else is in:
+when `chat_begin` joins a local room nobody has posted in and a chat is going
+on in one with a close name (or in the configured chat room), its `note` asks
+whether you meant that one. The rest of this doc's tool usage is identical on
+both transports.
 
 **The two modes are independent**, so one session can relay over Discord to
 reach another machine while chatting locally with a sibling session on the same

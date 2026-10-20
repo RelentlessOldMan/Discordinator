@@ -1084,6 +1084,8 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         # spoke again) is re-delivered by chat_await - recovery instead of a
         # silent stall; a long turn in progress arrives whole.
         cursor = chat.seed_cursor(client, channel_id, me)
+        empty = (_empty_room_note(client, channel_id, config.resolve_chat_channel(cfg, None))
+                 if config.is_local(cfg, "chat") else None)
     chat.reset(channel_id, me, cursor, turn_cap)
     chat.note_room(channel_id, config.is_local(cfg, "chat"))
     owed = bool(st.get("your_turn"))
@@ -1105,6 +1107,8 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         busy = (f"Another chat is going on in this room ({', '.join(others)}). Address "
                 "your opener (to='<your peer>') so it reaches the right session.")
         note = f"{note} {busy}" if note else busy
+    if empty:
+        note = f"{note} {empty}" if note else empty
     shown = _unnamed(note, me)
     if shown:
         out["note"] = shown
@@ -1113,6 +1117,43 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         events.record("renamed" if not lost else "lost_turn", handle=me, room=channel_id,
                       note=note[:200])
     return out
+
+
+ROOM_IN_USE = 24 * 3600  # seconds: a local room posted in this recently is "in use"
+
+
+def _empty_room_note(client: Client, channel_id: str, configured: str) -> Optional[str]:
+    """On local, a room nobody has posted in is a new, empty room: any name
+    makes one. If it looks like a slip - a chat room in use has a close name,
+    or the configured chat room is in use - say which room it may have meant:
+    a peer won't find a session in the wrong room, and nothing else tells it.
+    A new room with a name of its own says nothing (it may well be meant)."""
+    try:
+        if client.read_messages(channel_id, limit=1):
+            return None
+        now = datetime.now(timezone.utc)
+        used: list[tuple[datetime, str]] = []
+        for room in client.list_guild_channels():
+            if room["id"] == channel_id:
+                continue
+            # A chat room (not a relay mailbox): its latest chat turn is recent.
+            turn = next((m for m in (simplify_message(x) for x in
+                                     client.read_messages(room["id"], limit=20))
+                         if chat.parse_msg(m)), None)
+            ts = chat._parse_ts(turn.get("timestamp")) if turn else None
+            if ts is not None and (now - ts).total_seconds() <= ROOM_IN_USE:
+                used.append((ts, room["id"]))
+    except Exception:  # noqa: BLE001 - only a hint; never fails chat_begin
+        return None
+    names = [r for _, r in sorted(used, reverse=True)]
+    close = difflib.get_close_matches(channel_id, names, n=1, cutoff=0.8)
+    pick = close[0] if close else configured if configured in names else None
+    if pick is None:
+        return None
+    return (f"Nobody has chatted in local room '{channel_id}' yet - did you mean "
+            f"'{pick}', where a chat is going on? A peer is only reached in the room "
+            f"it's in: pass channel='{pick}', or leave channel out for the configured "
+            "chat room.")
 
 
 @_tool()

@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="discordinator-shared-"))
@@ -37,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
 from discordinator import chat, cli, config, handles  # noqa: E402
-from discordinator.local_client import LocalClient  # noqa: E402
+from discordinator.local_client import LocalClient, local_dir  # noqa: E402
 
 _passed = 0
 
@@ -683,6 +684,32 @@ def test_working_seen_by_its_asker() -> None:
     check(a.get("unfinished_turn") and not a.get("already_received"), "A is told to finish its turn")
 
 
+
+def test_an_empty_room_points_at_the_one_in_use() -> None:
+    print("joining a local room nobody has chatted in names the one in use:")
+    c = LocalClient()
+    mcp.chat_begin(chatter="A", channel="busy-room")
+    chat.send_chat(c, "busy-room", "M:A", "over", "anyone?", to=None)
+    mcp.send_message(text="a relay note", channel="busy-room-relay")
+    out = mcp.chat_begin(chatter="B", channel="busy-room-2")
+    check("busy-room-relay" not in (out.get("note") or ""),
+          f"a relay room isn't a chat room in use: {out.get('note')!r}")
+    check("did you mean 'busy-room'" in (out.get("note") or ""),
+          f"a misnamed room says which one is in use: {out.get('note')!r}")
+    out = mcp.chat_begin(chatter="B", channel="busy-room")
+    check("did you mean" not in (out.get("note") or ""), "the room in use says nothing of it")
+    out = mcp.chat_begin(chatter="B", channel="planning")
+    check("did you mean" not in (out.get("note") or ""),
+          f"a new room with a name of its own says nothing: {out.get('note')!r}")
+    path = local_dir() / "busy-room.jsonl"
+    old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    path.write_text("".join(json.dumps({**json.loads(x), "timestamp": old}) + "\n"
+                            for x in path.read_text(encoding="utf-8").splitlines()),
+                    encoding="utf-8")
+    out = mcp.chat_begin(chatter="B", channel="busy-room-3")
+    check("did you mean" not in (out.get("note") or ""),
+          f"a room nobody has used for days isn't suggested: {out.get('note')!r}")
+
 def main() -> int:
     test_held_turn_survives_chat_begin()
     test_no_unaddressed_reply_over_the_floor()
@@ -710,6 +737,7 @@ def main() -> int:
     test_suggest_next_is_never_me()
     test_side_note_stays_out_of_the_next_turn()
     test_an_old_stop_isnt_a_newcomers()
+    test_an_empty_room_points_at_the_one_in_use()
     test_an_answered_broadcast_isnt_owed()
     test_a_turn_handed_on_doesnt_block_a_post()
     test_answering_one_asker_leaves_the_other_owed()
