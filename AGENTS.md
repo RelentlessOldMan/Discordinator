@@ -150,8 +150,8 @@ defaults to room `relay`, chat to room `chat`; pass any `channel="..."` for
 another room (named like a Discord channel: `Ops Team` and `ops-team` are one
 room). Any name makes a room, so a slip makes an empty one nobody else is in:
 when `chat_begin` joins a local room nobody has posted in and a chat is going
-on in one with a close name (or in the configured chat room), its `note` asks
-whether you meant that one. The rest of this doc's tool usage is identical on
+on in one with a close name (a chat that hasn't ended, with a turn in the
+last day), its `note` asks whether you meant that one. The rest of this doc's tool usage is identical on
 both transports.
 
 **The two modes are independent**, so one session can relay over Discord to
@@ -378,9 +378,13 @@ new unaddressed opener (except a member that still owes the last turn an answer:
 a reply after a long piece of work goes back to whoever asked), and a turn owed to you expires after **4 hours** (a
 session joining days later isn't handed a dead conversation's turn) - unless
 you were in that chat: one you haven't read yet, or were handed and haven't
-answered, stays yours however long it took. Handed is read from the room: a
-turn that answers you, or an unaddressed opener after an `end` from the peer
-you had been chatting with (it's for you). A session
+answered, stays yours however long it took. Handed is read from the room,
+when your own session posted your last turn before it (not another session
+that went by your name then): a turn addressed to you, one that answers you,
+or an unaddressed opener after an `end` from the peer you had last been
+chatting with (it's for you). A turn you sent under another name of yours
+(your project's bare name before you took a role, or before your machine was
+renamed) is never one you owe. A session
 waiting in a room where others chat without addressing it is told how to join
 (`status="ask"`). The ranked list of non-floor
 participants (`waiting` in results, shown as **others** in the viewers) is a

@@ -200,9 +200,11 @@ def test_configured_handle() -> None:
         check(out["chatter"] == "M:CodeCarver/ui", "an explicit chatter becomes a role suffix")
         st = mcp.chat_status(channel=room)
         check("your_turn" in st, "chat_status computes your_turn from the configured handle")
+        # (its own turn as plain CodeCarver isn't one it owes as ui)
+        chat.send_chat(LocalClient(), room, "M:Peer", "over", "ui, yours", to="M:CodeCarver/ui")
         res = mcp.chat_await(channel=room, timeout=0.2, poll=0.05, nudge_after=0)
-        check(res["from"] == "M:CodeCarver" and res["your_turn"] is True,
-              "omitting chatter keeps the role this session chose (ui gets CodeCarver's turn)")
+        check(res["from"] == "M:Peer" and res["your_turn"] is True,
+              "omitting chatter keeps the role this session chose (ui gets a turn to ui)")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
 

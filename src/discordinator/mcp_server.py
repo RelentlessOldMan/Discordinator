@@ -800,6 +800,22 @@ def _own_earlier(full: str) -> None:
                                  if e.get("mode") == "chat"
                                  and chat.handle_key(e.get("handle")) in keys], names))
     chat.set_local_earlier(others, held)
+    posts = [e for e in _all_my_posts() if e.get("mode") == "chat"]
+    chat.set_own_posts((e.get("id") for e in posts), (
+        e.get("id") for e in posts if e.get("handle") and _other_name_of(e["handle"], full)))
+
+
+def _other_name_of(name: str, full: str) -> bool:
+    """Is ``name`` (a name this session posted under) another name for the
+    session ``full`` is: the same name on a machine named otherwise, its
+    project's bare handle or a role of it, or it with a -2 on the end?"""
+    if chat.same_handle(name, full):
+        return False
+    a, b = (chat.handle_key(chat.local_name(h)) for h in (name, full))
+
+    def plain(k: str) -> str:
+        return re.sub(r"-\d+$", "", k)
+    return (plain(a) == plain(b) or b.startswith(a + "/") or a.startswith(b + "/"))
 
 
 def _unnamed(note: Optional[str], me: Optional[str]) -> Optional[str]:
@@ -966,8 +982,10 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any],
             continue
         st = chat.compute_state(client, channel_id, h)
         # (a turn I sent isn't one I owe: an older name of mine that an
-        # unaddressed turn of mine would reach doesn't owe me an answer)
-        owed = [t for t in st.get("_owed") or [] if not chat.same_handle(t["from"], me)]
+        # unaddressed turn of mine would reach doesn't owe me an answer -
+        # nor one I sent under another name, before my machine was renamed)
+        owed = [t for t in st.get("_owed") or [] if not chat.same_handle(t["from"], me)
+                and str(t.get("id")) not in chat._own_self]
         if owed:
             out.append(h)
             _lost_turn[chat.handle_key(h)] = (owed[0]["from"], owed[0].get("text") or "")
@@ -1126,36 +1144,46 @@ ROOM_IN_USE = 24 * 3600  # seconds: a local room posted in this recently is "in 
 
 def _empty_room_note(client: Client, channel_id: str, configured: str) -> Optional[str]:
     """On local, a room nobody has posted in is a new, empty room: any name
-    makes one. If it looks like a slip - a chat room in use has a close name,
-    or the configured chat room is in use - say which room it may have meant:
-    a peer won't find a session in the wrong room, and nothing else tells it.
-    A new room with a name of its own says nothing (it may well be meant)."""
+    makes one. If it looks like a slip - a chat is going on in a room with a
+    close name - say which room it may have meant: a peer won't find a
+    session in the wrong room, and nothing else tells it. A new room with a
+    name of its own says nothing (it may well be meant)."""
     try:
         if client.read_messages(channel_id, limit=1):
             return None
-        now = datetime.now(timezone.utc)
-        used: list[tuple[datetime, str]] = []
-        for room in client.list_guild_channels():
-            if room["id"] == channel_id:
-                continue
-            # A chat room (not a relay mailbox): its latest chat turn is recent.
-            turn = next((m for m in (simplify_message(x) for x in
-                                     client.read_messages(room["id"], limit=20))
-                         if chat.parse_msg(m)), None)
-            ts = chat._parse_ts(turn.get("timestamp")) if turn else None
-            if ts is not None and (now - ts).total_seconds() <= ROOM_IN_USE:
-                used.append((ts, room["id"]))
+        rooms = [r["id"] for r in client.list_guild_channels() if r["id"] != channel_id]
     except Exception:  # noqa: BLE001 - only a hint; never fails chat_begin
         return None
-    names = [r for _, r in sorted(used, reverse=True)]
-    close = difflib.get_close_matches(channel_id, names, n=1, cutoff=0.8)
-    pick = close[0] if close else configured if configured in names else None
-    if pick is None:
+    now = datetime.now(timezone.utc)
+    used: list[tuple[datetime, str]] = []
+    for room in difflib.get_close_matches(channel_id, rooms, n=5, cutoff=0.8):
+        try:
+            path = client._room_path(room)
+            if now.timestamp() - path.stat().st_mtime > ROOM_IN_USE:
+                continue  # (not written to in a day: nothing going on)
+            # A chat going on (not a relay mailbox, nor a chat that ended):
+            # its latest chat turn is recent and doesn't end it.
+            for m in (simplify_message(x) for x in client.read_messages(room, limit=100)):
+                p = chat.parse_msg(m)
+                if p is None:
+                    if not m.get("bot") and chat.is_human_stop(m.get("content") or ""):
+                        break
+                    continue
+                ts = chat._parse_ts(m.get("timestamp"))
+                if (p["status"] not in chat.TERMINAL_STATUSES and ts is not None
+                        and (now - ts).total_seconds() <= ROOM_IN_USE):
+                    used.append((ts, room))
+                break
+        except Exception:  # noqa: BLE001 - a room it can't read isn't a hint
+            continue
+    if not used:
         return None
+    pick = max(used)[1]
+    how = (f"pass channel='{pick}'" + (", or leave channel out (it's the configured chat room)"
+                                       if pick == configured else ""))
     return (f"Nobody has chatted in local room '{channel_id}' yet - did you mean "
             f"'{pick}', where a chat is going on? A peer is only reached in the room "
-            f"it's in: pass channel='{pick}', or leave channel out for the configured "
-            "chat room.")
+            f"it's in: {how}.")
 
 
 @_tool()

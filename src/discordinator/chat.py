@@ -232,6 +232,20 @@ _own_earlier_by: list[Optional[str]] = [None]
 # for that one (they were renamed together).
 _locals: list[tuple[str, set[str], set[str]]] = []
 _here_now: set[str] = set()
+# Ids of this session's own chat posts (the MCP server sets them on each chat
+# call): all of them, and those under another name of it - its project's bare
+# handle, say, before it took a role. A turn it posted is never one it owes,
+# and only a chat it posted in itself (not one by its name before it had it)
+# keeps a long-unanswered turn its own (see _owed_turns).
+_own_posts: set[str] = set()
+_own_self: set[str] = set()
+
+
+def set_own_posts(ids: Any, other_names: Any = ()) -> None:
+    _own_posts.clear()
+    _own_posts.update(str(i) for i in ids)
+    _own_self.clear()
+    _own_self.update(str(i) for i in other_names)
 
 
 def set_own_earlier(owner: str, ids: Any, names: Any = (), peers: Any = ()) -> None:
@@ -1387,10 +1401,11 @@ def compute_state(
             break
         if p is not None:
             chat_after = True
-    # Who posted before this chat (the one it follows on from): an opener
-    # unaddressed after an `end` answers the sender's peer there (_owed_turns).
-    prior = [(p["participant"], p["to"]) for p in parsed_list[:start]
-             if p is not None and p["status"] in YIELD_STATUSES + TERMINAL_STATUSES]
+    # Every turn in the room, this chat's and those before it (_owed_turns:
+    # whom an opener unaddressed after an `end` answers).
+    room = [{"from": p["participant"], "to": p["to"], "i": i, "id": str(msgs[i]["id"])}
+            for i, p in enumerate(parsed_list)
+            if p is not None and p["status"] in YIELD_STATUSES + TERMINAL_STATUSES]
     scope = [i for i in scope if i >= start]
 
     # Handles are case-insensitive identities; each is shown with the spelling
@@ -1568,9 +1583,12 @@ def compute_state(
 
     owed: list[dict[str, Any]] = []
     if me_norm is not None and not ended:
+        # (a turn I sent under another name of mine isn't one I owe - but
+        # isn't one I'm owed, either: for anyone else it's a turn like any)
+        own = same_handle(me_norm, _own_earlier_by[0])
         owed = _owed_turns(turns, me_norm, last_turn_index_by, _named_since(me_norm),
                            get_cursor(channel_id, me_norm), get_reply_to(channel_id, me_norm),
-                           prior)
+                           room, _own_posts, _own_self if own else set())
     # Whom my latest yield went to (they owe me the answer).
     asked = next((t["to"] for t in reversed(turns) if same_handle(t["from"], me_norm)
                   and t["status"] in YIELD_STATUSES), None) if me_norm is not None else None
@@ -1935,41 +1953,54 @@ def _owed_turns(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
                 not_mine: Optional[Callable[[Optional[datetime]], bool]] = None,
                 read_to: Optional[str] = None,
                 handed_by: Optional[str] = None,
-                prior: Sequence[tuple[str, Optional[str]]] = ()) -> list[dict[str, Any]]:
+                room: Sequence[dict[str, Any]] = (),
+                own: Optional[set[str]] = None,
+                own_self: set[str] = frozenset()) -> list[dict[str, Any]]:  # type: ignore[assignment]
     """The turns owed to ``me``, oldest first: from each peer, its yield that
     targets me if it's still that peer's latest turn (it hasn't handed the
     turn on since) and I haven't answered it (see _answers). Worked out per
     caller, so two conversations sharing one room don't hide each other's
     owed turns, and two peers asking me at once are each owed an answer. An
     unaddressed turn counts as answered once anyone else replies to it.
-    A turn addressed to ``me`` when ``not_mine`` says so isn't (see _named_since).
+    A turn addressed to ``me`` when ``not_mine`` says so isn't (see _named_since),
+    nor one this session posted itself under another name (``own_self``).
     One older than OWED_EXPIRY isn't either - a session joining days later
     isn't handed a dead conversation's turn - unless ``me`` was in this chat:
     the turn came after ``read_to`` (where it has read the room to - not
     read yet, chat_await would hand it over), or was handed to it and not
     answered yet: it's from ``handed_by``, whom its reply goes back to (a
-    chat_begin starts that afresh), or the room shows it: it answers ``me``
-    (I'm the last one but its sender to have posted before it in this chat;
-    for its opener, I'm whom its sender's last turn before this chat was to,
-    or from - ``prior`` is the room's turns before it, as (from, to)), so a
-    lost read position or reply_to (an older version's chat_begin) can't
-    leave a turn the floor says is mine not mine."""
+    chat_begin starts that afresh), or the room shows it - so a lost read
+    position or reply_to (an older version's chat_begin) can't leave a turn
+    the floor says is mine not mine. The room shows it when this session
+    itself (``own``: its posts' ids) posted my last turn before it there,
+    and the turn is addressed to me, or answers me: I'm the last one but its
+    sender to have posted before it in this chat, or, for its opener, the
+    one its sender last chatted with (``room``: every turn in the room).
+    A session that only goes by the name now (another went by it then)
+    wasn't in that chat."""
     horizon = datetime.now(timezone.utc) - OWED_EXPIRY
 
     def answers_me(n: int, t: dict[str, Any]) -> bool:
+        before = [u for u in room if u["i"] < t["i"]]
+        mine = [u for u in before if same_handle(u["from"], me)]
+        if own is None or not mine or mine[-1]["id"] not in own:
+            return False
+        if t["to"] is not None and not _is_broadcast(t["to"]):
+            return True
         for u in reversed(turns[:n]):
             if not same_handle(u["from"], t["from"]):
                 return same_handle(u["from"], me)
-        for who, to in reversed(prior):
-            if same_handle(who, t["from"]) and to and not _is_broadcast(to):
-                return same_handle(to, me)
-            if same_handle(to, t["from"]):
-                return same_handle(who, me)
+        for u in reversed(before):
+            if same_handle(u["from"], t["from"]) and u["to"] and not _is_broadcast(u["to"]):
+                return same_handle(u["to"], me)
+            if same_handle(u["to"], t["from"]):
+                return same_handle(u["from"], me)
         return False
 
     out = []
     for n, t in enumerate(turns):
-        if same_handle(t["from"], me) or t["status"] not in YIELD_STATUSES:
+        if (same_handle(t["from"], me) or str(t.get("id")) in own_self
+                or t["status"] not in YIELD_STATUSES):
             continue
         if not _targets(t["to"], me) or last_by.get(t["from"]) != t["i"]:
             continue

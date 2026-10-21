@@ -20,10 +20,21 @@ from discordinator.discord_client import simplify_message  # noqa: E402
 from discordinator.local_client import LocalClient, local_dir  # noqa: E402
 
 
+def _about(line: str, cid: str) -> bool:
+    """Is this event log line about room ``cid``?"""
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return False
+    return isinstance(e, dict) and e.get("room") == cid
+
+
 def main() -> int:
+    # (redirected to a file, Windows would write the console's code page)
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     room = sys.argv[1] if len(sys.argv) > 1 else "chat"
     c = LocalClient()
-    cid = room
+    cid = config.room_name(room)  # ("Ops Team" is room ops-team)
     print(f"discordinator {__version__}, room {room!r} ({cid}), dir {local_dir()}")
     print("\n== messages (oldest first) ==")
     msgs = list(reversed(c.read_messages(cid, limit=100)))
@@ -40,12 +51,13 @@ def main() -> int:
     st = config.load_state()
     print(json.dumps((st.get("chat") or {}).get(cid), indent=1, default=str))
     print("\n== session events about the room (last 60) ==")
-    ev = config.config_path().parent / "events.jsonl"
-    if ev.exists():
-        lines = [x for x in ev.read_text(encoding="utf-8", errors="replace").splitlines()
-                 if room in x or cid in x]
-        for x in lines[-60:]:
-            print(x[:300])
+    lines = []
+    for name in ("events.1.jsonl", "events.jsonl"):  # (the older log first)
+        ev = config.config_path().parent / name
+        if ev.exists():
+            lines += ev.read_text(encoding="utf-8", errors="replace").splitlines()
+    for x in [x for x in lines if _about(x, cid)][-60:]:
+        print(x[:300])
     print("\n== compute_state per name ==")
     for who in names:
         try:
