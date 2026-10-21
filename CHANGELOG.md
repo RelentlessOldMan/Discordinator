@@ -8,6 +8,13 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.58] - 2026-10-21
+Chat: a turn handed to you is read from the room; did-you-mean for an empty local room; chat_diag tool
+- A turn owed to you is read from the room: an old turn is yours only when your own session asked it, and a turn you sent under another name of yours is never one you owe.
+- A reply to a name your session used before is pointed out however old.
+- chat_begin on an empty local room asks 'did you mean' a room with a close name where a chat is going on.
+- tools/chat_diag.py: a read-only dump of a local chat room's state and session events, for debugging.
+
 ## [1.0.57] - 2026-10-19
 Chat: two askers each get an answer; answered and handed-on turns aren't yours; working seen by its asker; broad-review fixes
 - A question to all that someone else already answered isn't handed to a third session.
