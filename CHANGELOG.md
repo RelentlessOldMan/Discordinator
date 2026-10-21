@@ -8,6 +8,13 @@ exactly what a machine has and whether it needs updating.
 Versioning: `1.0.x` — the patch number bumps with each release. (The `0.x`
 entries below are the pre-1.0 development history.)
 
+## [1.0.59] - 2026-10-21
+Chat: one session one name; old turns only for the session that was there; chat_diag fixes
+- A session goes by one name at a time: taking another (a role, or its own name back from -2) frees the old one, and a turn it sent under any name it went by is never one it owes.
+- A chat turn over 4 hours old is handed over only when this same session was in that chat; a resumed or new session is told of it (who, what, how to answer) by chat_begin, chat_status and a timed-out chat_await. Relay is unchanged.
+- The empty-room 'did you mean' hint knows configured channel names, finds a chat under many relay notes, skips idle rooms, and isn't fooled by a bot's 'stop'.
+- tools/chat_diag.py picks the room like discordinator watch, survives damaged lines, and shows events about no room.
+
 ## [1.0.58] - 2026-10-21
 Chat: a turn handed to you is read from the room; did-you-mean for an empty local room; chat_diag tool
 - A turn over 4 hours old stays yours when you hadn't read it yet, were handed it, or the room shows it's for you (your own session posted your last turn before it there); a turn you sent under another name of yours is never one you owe.
