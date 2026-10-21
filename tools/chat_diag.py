@@ -1,9 +1,12 @@
 """Dump what a stuck local chat room looks like to discordinator (read-only).
 
 Run on the machine the room lives on, with the same Python that runs the MCP
-server:  python tools/chat_diag.py <room> > chat-diag.txt
-It prints the room's messages (tag and first 100 characters of each), the
-chat state kept for the room, the session events about it, and the state
+server:  python tools/chat_diag.py [room] > chat-diag.txt
+The room is named as for `discordinator watch`: a room or configured channel
+name; left out, the local room this machine's chat sessions last used.
+It prints the room's last 100 messages (tag and first 100 characters of
+each), the chat state kept for the room, the session events about it (and
+those about no room: servers connecting, disconnecting...), and the state
 compute_state works out for every name that has posted there.
 """
 
@@ -15,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from discordinator import __version__, chat, config  # noqa: E402
+from discordinator import __version__, chat, cli, config  # noqa: E402
 from discordinator.discord_client import simplify_message  # noqa: E402
 from discordinator.local_client import LocalClient, local_dir  # noqa: E402
 
@@ -26,24 +29,29 @@ def _about(line: str, cid: str) -> bool:
         e = json.loads(line)
     except ValueError:
         return False
-    return isinstance(e, dict) and e.get("room") == cid
+    return isinstance(e, dict) and e.get("room") in (cid, None)
 
 
 def main() -> int:
     # (redirected to a file, Windows would write the console's code page)
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    room = sys.argv[1] if len(sys.argv) > 1 else "chat"
+    room = sys.argv[1] if len(sys.argv) > 1 else None
     c = LocalClient()
-    cid = config.room_name(room)  # ("Ops Team" is room ops-team)
+    cid = cli._chat_room(cli._local_cfg(), room)  # (as `discordinator watch` picks it)
     print(f"discordinator {__version__}, room {room!r} ({cid}), dir {local_dir()}")
     print("\n== messages (oldest first) ==")
     msgs = list(reversed(c.read_messages(cid, limit=100)))
     names = []
     for m in msgs:
-        s = simplify_message(m)
-        text = (s.get("content") or "").replace("\n", " ")
-        print(f"{s.get('timestamp', '')[:19]} {s.get('id')} bot={s.get('bot')} {text[:100]}")
-        p = chat.parse_msg(s)
+        try:
+            s = simplify_message(m)
+            text = str(s.get("content") or "").replace("\n", " ")
+            print(f"{str(s.get('timestamp') or '')[:19]} {s.get('id')} bot={s.get('bot')} "
+                  f"{text[:100]}")
+            p = chat.parse_msg(s)
+        except Exception as e:  # noqa: BLE001 - a damaged line: show it, go on
+            print(f"(unreadable line: {e!r}) {str(m)[:100]}")
+            continue
         who = (p or {}).get("participant")
         if who and who not in names:
             names.append(who)
@@ -59,6 +67,8 @@ def main() -> int:
     for x in [x for x in lines if _about(x, cid)][-60:]:
         print(x[:300])
     print("\n== compute_state per name ==")
+    print("(worked out from here, not inside each session: a session's own posts"
+          " under another name of its own may show as owed to it here)")
     for who in names:
         try:
             s = chat.compute_state(c, cid, who)

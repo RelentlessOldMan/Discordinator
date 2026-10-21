@@ -116,10 +116,16 @@ def test_append_lock_released_on_exit() -> None:
         check(lk.fd is not None, "acquired")
     lockpath = Path(str(target) + ".flock")
     check(lockpath.exists(), "the lock file stays (it only holds the last pid)")
-    t0 = time.monotonic()
-    with _AppendLock(target, timeout=1.0) as lk:
-        check(lk.fd is not None and time.monotonic() - t0 < 0.5,
-              "a lock file nobody holds is taken at once")
+    from discordinator import config as _config
+    waits = []
+    real_sleep = _config.time.sleep
+    _config.time.sleep = lambda t: (waits.append(t), real_sleep(t))[1]
+    try:
+        with _AppendLock(target, timeout=30.0) as lk:
+            # (counted, not timed: a busy machine can take a while to get here)
+            check(lk.fd is not None and not waits, "a lock file nobody holds is taken at once")
+    finally:
+        _config.time.sleep = real_sleep
     old = Path(str(target) + ".lock")  # what versions before 1.0.44 left behind
     old.write_text("999999", encoding="utf-8")
     with _AppendLock(target, timeout=1.0) as lk:

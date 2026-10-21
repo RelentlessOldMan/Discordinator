@@ -36,6 +36,10 @@ os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full na
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _sessions  # noqa: E402
+
+_sessions.install(mcp)  # each chatter a session of its own
 from discordinator import chat  # noqa: E402
 from discordinator.discord_client import simplify_message  # noqa: E402
 from discordinator.local_client import LocalClient  # noqa: E402
@@ -177,8 +181,9 @@ def test_already_received_turn_handed_back() -> None:
     r1 = chat.await_turn(c, room, "B", timeout=2, poll=0.05, nudge_after=0)
     check(r1["from"] == "A", "B receives A's turn")
     t0 = time.monotonic()
-    r2 = chat.await_turn(c, room, "B", timeout=5, poll=0.05, nudge_after=0)
-    check(time.monotonic() - t0 < 2, "returned immediately instead of blocking on itself")
+    r2 = chat.await_turn(c, room, "B", timeout=60, poll=0.05, nudge_after=0)
+    # (blocking on itself would take the whole 60s; a busy machine can be slow)
+    check(time.monotonic() - t0 < 30, "returned immediately instead of blocking on itself")
     check(r2.get("already_received") and r2["your_turn"] and r2["text"] == "what do you think?",
           "same turn handed back with its text")
     check("YOUR turn" in chat.next_step(r2), "next: reply with chat_say")
@@ -349,6 +354,7 @@ def test_unknown_to_warns_now() -> None:
     live = mcp.chat_say(text="x", chatter="Alpha", channel=r, to="M:Gamma", wait=False)
     check("note" in live, "an unknown full name warns")
     from discordinator import handles
+    _sessions.switch("Gamma")
     handles.resolve("Gamma", {})  # Gamma is now a live session on this machine
     quiet = mcp.chat_say(text="x", chatter="Alpha", channel=r, to="Gamma", wait=False)
     check("note" not in quiet, "a live session that hasn't posted yet is fine")

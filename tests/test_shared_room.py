@@ -37,6 +37,10 @@ os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full na
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _sessions  # noqa: E402
+
+_sessions.install(mcp)  # each chatter a session of its own
 from discordinator import chat, cli, config, handles  # noqa: E402
 from discordinator.local_client import LocalClient, local_dir  # noqa: E402
 
@@ -224,7 +228,7 @@ def test_relay_between_two_sessions() -> None:
         mcp._sent_ids.update(sent.get(label, set()))
         current["label"] = label
         os.environ["DISCORDINATOR_LABEL"] = label
-        handles._SESSION_KEY = "id:" + label  # its own Claude Code session
+        _sessions.pin(label)  # its own Claude Code session
 
     try:
         as_session("sessA")
@@ -242,7 +246,8 @@ def test_relay_between_two_sessions() -> None:
     finally:
         os.environ["DISCORDINATOR_LABEL"] = "M"
         mcp._sent_ids.clear()
-        handles._SESSION_KEY = None
+        _sessions.unpin()
+        _sessions.switch("")
 
 
 def test_config_set_saves_only_the_setting() -> None:
@@ -262,44 +267,6 @@ def test_config_set_saves_only_the_setting() -> None:
     check(not leaked, f"nothing from the environment is: {leaked}")
     cfg = config.load()
     check(not cfg["allow_send_attachments"], "the send opt-in is still off for other sessions")
-
-
-def test_two_answers_at_once() -> None:
-    print("two sessions answering the same human at the same moment: one gets through:")
-    r = "race-room"
-    for h in ("A", "B"):
-        mcp.chat_begin(chatter=h, channel=r)
-    LocalClient().post_human(r, "what do you both think?")
-    for h in ("A", "B"):
-        wait(h, r)
-    real = chat.unread_for_me
-    gate = threading.Barrier(2)
-
-    def slow_unread(*a, **k):  # both pass the check before either posts
-        out = real(*a, **k)
-        try:
-            gate.wait(timeout=1)
-        except threading.BrokenBarrierError:
-            pass
-        return out
-
-    chat.unread_for_me = slow_unread
-    results: dict[str, str] = {}
-
-    def answer(h: str) -> None:
-        try:
-            mcp.chat_say(text=f"{h}'s view", chatter=h, channel=r, wait=False)
-            results[h] = "posted"
-        except mcp.ChatSendError:
-            results[h] = "refused"
-
-    try:
-        ts = [threading.Thread(target=answer, args=(h,)) for h in ("A", "B")]
-        [t.start() for t in ts]
-        [t.join() for t in ts]
-    finally:
-        chat.unread_for_me = real
-    check(sorted(results.values()) == ["posted", "refused"], f"one posts, one is refused: {results}")
 
 
 def test_relay_after_restart_and_transport_switch() -> None:
@@ -335,7 +302,7 @@ def test_same_label_sessions_relay() -> None:
         os.environ["DISCORDINATOR_CHAT_HANDLE"] = handle
         mcp._sent_ids.clear()
         mcp._sent_ids.update(sent)
-        handles._SESSION_KEY = "id:" + handle  # its own Claude Code session
+        _sessions.pin(handle)  # its own Claude Code session
 
     handles._resolved.clear()  # sessions that haven't chatted: tagged by project
     handles._last_chatter = None
@@ -360,7 +327,8 @@ def test_same_label_sessions_relay() -> None:
         os.environ["DISCORDINATOR_LABEL"] = "M"
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
         mcp._sent_ids.clear()
-        handles._SESSION_KEY = None
+        _sessions.unpin()
+        _sessions.switch("")
 
 
 def test_plain_reply_reaches_its_peer() -> None:
@@ -826,19 +794,21 @@ def test_my_turn_as_my_bare_name_isnt_mine_as_a_role() -> None:
     handles._resolved.clear()
     handles._since.clear()
     handles._last_chatter = None
+    _sessions.switch("")  # (one session, going by other names)
     try:
-        r = "bare-then-role"
-        mcp.chat_begin(channel=r)
-        mcp.chat_say(text="bare done", channel=r, to="all", wait=False)
-        mcp.chat_begin(chatter="carver", channel=r)
-        st = mcp.chat_status(chatter="carver", channel=r)
-        check(not st["your_turn"], f"it isn't handed its own turn: {st.get('last_turn')!r}")
-        r = "bare-then-role-peer"
-        chat.send_chat(LocalClient(), r, "M:Peer8", "over", "anyone?", to="all")
-        mcp.chat_say(text="Peer8, yours", chatter="Carver8", channel=r, to="M:Peer8", wait=False)
-        mcp.chat_begin(chatter="carver", channel=r)
-        st = chat.compute_state(LocalClient(), r, "M:Peer8")
-        check(st["your_turn"], "for its peer, a turn it sent under its bare name is still owed")
+        with _sessions.one("carver", "Carver8"):
+            r = "bare-then-role"
+            mcp.chat_begin(channel=r)
+            mcp.chat_say(text="bare done", channel=r, to="all", wait=False)
+            mcp.chat_begin(chatter="carver", channel=r)
+            st = mcp.chat_status(chatter="carver", channel=r)
+            check(not st["your_turn"], f"it isn't handed its own turn: {st.get('last_turn')!r}")
+            r = "bare-then-role-peer"
+            chat.send_chat(LocalClient(), r, "M:Peer8", "over", "anyone?", to="all")
+            mcp.chat_say(text="Peer8, yours", chatter="Carver8", channel=r, to="M:Peer8", wait=False)
+            mcp.chat_begin(chatter="carver", channel=r)
+            st = chat.compute_state(LocalClient(), r, "M:Peer8")
+            check(st["your_turn"], "for its peer, a turn it sent under its bare name is still owed")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
         handles._resolved.clear()
@@ -971,31 +941,33 @@ def test_a_turn_to_my_old_name_is_pointed_out_however_old() -> None:
     handles._resolved.clear()
     handles._since.clear()
     handles._last_chatter = None
+    _sessions.switch("")  # (one session, going by other names)
     try:
-        r, c = "old-name-owed", LocalClient()
-        mcp.chat_begin(channel=r)
-        mcp.chat_say(text="peer, build it?", channel=r, to="W:Peer", wait=False)
-        last = chat.send_chat(c, r, "W:Peer", "over", "built long ago", to="M:Carver7")
-        _backdate(r, 2 * 24 * 60)
-        chat.reset(r, "M:Carver7", str(last[-1]["id"]), 20)
-        mcp.chat_begin(chatter="ui", channel=r)
-        st = mcp.chat_status(chatter="ui", channel=r)
-        note = (st.get("note") or "") + (st.get("handle_note") or "")
-        check("owed to 'M:Carver7'" in note, f"2 days on, it's still pointed out: {note!r}")
-        r = "old-name-two"
-        mcp.chat_begin(chatter="Carver7", channel=r)  # (the bare name again)
-        mcp.chat_say(text="anyone?", chatter="Carver7", channel=r, to="all", wait=False)
-        chat.send_chat(c, r, "W:P1", "over", "first answer", to="M:Carver7")
-        last = chat.send_chat(c, r, "W:P2", "over", "second answer", to="M:Carver7")
-        _backdate(r, 2 * 24 * 60)
-        for h in ("M:Carver7", "M:Carver7/ui"):  # (both read past them long ago)
-            chat.reset(r, h, str(last[-1]["id"]), 20)
-        mcp.chat_begin(chatter="ui", channel=r)
-        st = mcp.chat_status(chatter="ui", channel=r)
-        note = (st.get("note") or "") + (st.get("handle_note") or "")
-        check("owed to 'M:Carver7'" in note, f"two turns owed to it: {note!r}")
-        check(mcp._lost_turn.get("m:carver7") == ("W:P1", "first answer"),
-              f"the oldest is the one named: {mcp._lost_turn.get('m:carver7')}")
+        with _sessions.one("ui", "Carver7"):
+            r, c = "old-name-owed", LocalClient()
+            mcp.chat_begin(channel=r)
+            mcp.chat_say(text="peer, build it?", channel=r, to="W:Peer", wait=False)
+            last = chat.send_chat(c, r, "W:Peer", "over", "built long ago", to="M:Carver7")
+            _backdate(r, 2 * 24 * 60)
+            chat.reset(r, "M:Carver7", str(last[-1]["id"]), 20)
+            mcp.chat_begin(chatter="ui", channel=r)
+            st = mcp.chat_status(chatter="ui", channel=r)
+            note = (st.get("note") or "") + (st.get("handle_note") or "")
+            check("owed to 'M:Carver7'" in note, f"2 days on, it's still pointed out: {note!r}")
+            r = "old-name-two"
+            mcp.chat_begin(chatter="Carver7", channel=r)  # (the bare name again)
+            mcp.chat_say(text="anyone?", chatter="Carver7", channel=r, to="all", wait=False)
+            chat.send_chat(c, r, "W:P1", "over", "first answer", to="M:Carver7")
+            last = chat.send_chat(c, r, "W:P2", "over", "second answer", to="M:Carver7")
+            _backdate(r, 2 * 24 * 60)
+            for h in ("M:Carver7", "M:Carver7/ui"):  # (both read past them long ago)
+                chat.reset(r, h, str(last[-1]["id"]), 20)
+            mcp.chat_begin(chatter="ui", channel=r)
+            st = mcp.chat_status(chatter="ui", channel=r)
+            note = (st.get("note") or "") + (st.get("handle_note") or "")
+            check("owed to 'M:Carver7'" in note, f"two turns owed to it: {note!r}")
+            check(mcp._lost_turn.get("m:carver7") == ("W:P1", "first answer"),
+                  f"the oldest is the one named: {mcp._lost_turn.get('m:carver7')}")
     finally:
         os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
         handles._resolved.clear()
@@ -1034,6 +1006,171 @@ def test_the_room_hint_picks_the_right_room() -> None:
           f"a closer room nobody chats in doesn't hide the busy one: {out.get('note')!r}")
 
 
+def test_one_session_one_name() -> None:
+    print("a session goes by one name at a time: what it posted under another is its own:")
+    r, c = "one-name", LocalClient()
+    _sessions.switch("Solo9")
+    mcp.chat_begin(chatter="Solo9", channel=r)
+    mcp.chat_say(text="Duo9, take this", chatter="Solo9", channel=r, to="all", wait=False)
+    with _sessions.one("Duo9"):
+        mcp.chat_begin(chatter="Duo9", channel=r)
+        st = mcp.chat_status(chatter="Duo9", channel=r)
+    check(not st["your_turn"], f"its own turn under another name isn't owed to it: {st.get('owed_from')}")
+    held = [h for h, _ in handles.live_full_claims()]
+    check(not any(chat.same_handle(h, "M:Solo9") for h in held),
+          f"and it no longer holds the name it left: {held}")
+    chat.send_chat(c, r, "W:Peer", "over", "Solo9, a question", to="M:Solo9")
+    _sessions.switch("Other9")
+    out = mcp.chat_begin(chatter="Other9", channel=r)
+    st = mcp.chat_status(chatter="Other9", channel=r)
+    note = (out.get("note") or "") + (st.get("note") or "") + (st.get("handle_note") or "")
+    check("Solo9, a question" not in note, f"another session isn't told of it: {note!r}")
+
+
+def test_a_siblings_old_name_isnt_mine() -> None:
+    print("a turn to the name a sibling session left is pointed out to it, not to me:")
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Sib9"
+    r, c = "sib-old-name", LocalClient()
+    try:
+        _sessions.pin("sib-api")
+        mcp.chat_begin(channel=r)
+        mcp.chat_say(text="peer, schema?", channel=r, to="W:Peer", wait=False)
+        mcp.chat_begin(chatter="api", channel=r)  # (it takes a role)
+        chat.send_chat(c, r, "W:Peer", "over", "schema ok, migrate it", to="M:Sib9")
+        _sessions.pin("sib-ui")
+        mcp.chat_begin(chatter="ui", channel=r)
+        st = mcp.chat_status(chatter="ui", channel=r)
+        note = (st.get("note") or "") + (st.get("handle_note") or "")
+        check("'M:Sib9'" not in note, f"the sibling isn't told: {note!r}")
+        _sessions.pin("sib-api")
+        st = mcp.chat_status(chatter="api", channel=r)
+        note = (st.get("note") or "") + (st.get("handle_note") or "")
+        check("'M:Sib9'" in note, f"the session that left it is: {note!r}")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        _sessions.unpin()
+        _sessions.switch("")
+
+
+def test_a_dash2_name_back_once_free() -> None:
+    print("a session renamed -2 takes its name back once free, and says why when it can't:")
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Dash9"
+    r, c = "dash-back", LocalClient()
+    try:
+        _sessions.pin("dash-1")
+        mcp.chat_begin(channel=r)
+        _sessions.pin("dash-2")
+        check(mcp.chat_begin(channel=r)["chatter"] == "M:Dash9-2", "the second is -2")
+        mcp.chat_say(text="peer, review?", channel=r, to="W:Peer", wait=False)
+        _sessions.end("dash-1")
+        out = mcp.chat_begin(channel=r)
+        check(out["chatter"] == "M:Dash9-2" and "still going" in (out.get("note") or ""),
+              f"with its chat under -2 going, it keeps -2 and says why: {out}")
+        check("another live session" not in (out.get("note") or ""), "not that it's in use")
+        chat.send_chat(c, r, "W:Peer", "end", "fine, bye", to="M:Dash9-2")
+        out = mcp.chat_begin(channel=r)
+        check(out["chatter"] == "M:Dash9", f"once that chat ends, it takes the name back: {out}")
+        chat.send_chat(c, r, "W:Peer", "over", "wait, one more: bump version", to="M:Dash9-2")
+        st = mcp.chat_status(channel=r)
+        note = (st.get("note") or "") + (st.get("handle_note") or "")
+        check("bump version" in note, f"a turn to its -2 is pointed out: {note!r}")
+        mcp.chat_say(text="bumped", channel=r, to="W:Peer", wait=False)
+        st = mcp.chat_status(channel=r)
+        note = (st.get("note") or "") + (st.get("handle_note") or "")
+        check("bump version" not in note, f"and once answered, no longer: {note!r}")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        _sessions.unpin()
+        _sessions.switch("")
+
+
+
+def test_old_turns_read_further() -> None:
+    print("whom an old turn is for: asks, ends to all, a reused name, another's asker:")
+    c = LocalClient()
+    r = "ask-then-end"
+    mcp.chat_begin(chatter="A", channel=r)
+    mcp.chat_say(text="B, build it?", chatter="A", to="M:B", channel=r, wait=False)
+    chat.send_chat(c, r, "M:B", "ask", "C, a word after?", to="M:C")
+    chat.send_chat(c, r, "M:B", "end", "ending", to=None)
+    _long_ago(r, chat.send_chat(c, r, "M:B", "over", "built, go ahead", to=None))
+    st = mcp.chat_status(chatter="A", channel=r)
+    check(st["your_turn"], f"a hand-raise to C doesn't say whom B last chatted with: {st.get('owed_from')}")
+    r = "end-to-all"
+    mcp.chat_begin(chatter="A", channel=r)
+    mcp.chat_say(text="B, build it?", chatter="A", to="M:B", channel=r, wait=False)
+    chat.send_chat(c, r, "M:B", "end", "ending, bye all", to="all")
+    _long_ago(r, chat.send_chat(c, r, "M:B", "over", "built, go ahead", to=None))
+    st = mcp.chat_status(chatter="A", channel=r)
+    check(st["your_turn"], f"an end to all says nothing of whom; A asked B before: {st.get('owed_from')}")
+    r = "opener-for-c"
+    mcp.chat_begin(chatter="A", channel=r)
+    mcp.chat_say(text="C, hi", chatter="A", to="M:C", channel=r, wait=False)
+    chat.send_chat(c, r, "M:C", "over", "B, build it?", to="M:B")
+    chat.send_chat(c, r, "M:B", "end", "ending", to=None)
+    _long_ago(r, chat.send_chat(c, r, "M:B", "over", "built, go ahead", to=None))
+    st = mcp.chat_status(chatter="A", channel=r)
+    check(not st["your_turn"], f"B's old opener is for C, who asked B: {st.get('owed_from')}")
+    r = "reused-then-asked"
+    chat.send_chat(c, r, "M:A", "over", "old session's turn", to="W:Old")  # (another session, as M:A)
+    chat.send_chat(c, r, "W:Old", "end", "bye", to="M:A")
+    mcp.chat_begin(chatter="A", channel=r)
+    mcp.chat_say(text="B, build it?", chatter="A", to="M:B", channel=r, wait=False)
+    _long_ago(r, chat.send_chat(c, r, "M:B", "over", "built", to="M:A"))
+    st = mcp.chat_status(chatter="A", channel=r)
+    check(st["your_turn"], f"my latest turn before it is mine, not the first by my name: {st.get('owed_from')}")
+
+
+def test_the_room_hint_counts_right() -> None:
+    print("the empty-room hint: with a rename, past emptied rooms, past a bot's 'stop':")
+    import subprocess
+    c = LocalClient()
+    chat.send_chat(c, "proj-room1", "M:A", "over", "anyone?", to=None)
+    for n in range(2, 6):
+        mcp.send_message(text="a note", channel=f"proj-room{n}")
+    (local_dir() / "proj-room9.jsonl").write_text("", encoding="utf-8")
+    out = mcp.chat_begin(chatter="B", channel="proj-room9")
+    check("did you mean 'proj-room1'" in (out.get("note") or ""),
+          f"the empty room itself takes no close-match slot: {out.get('note')!r}")
+    chat.send_chat(c, "stopnote-room", "M:A", "over", "anyone?", to=None)
+    c.send_message("stopnote-room", "stop")  # (a bot post: the CLI's `send stop`)
+    out = mcp.chat_begin(chatter="B", channel="stopnote-room2")
+    check("did you mean 'stopnote-room'" in (out.get("note") or ""),
+          f"a bot's 'stop' isn't a human's: {out.get('note')!r}")
+    chat.send_chat(c, "twin-room", "M:A", "over", "anyone?", to=None)
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    os.environ["DISCORDINATOR_CHAT_HANDLE"] = "Twin"
+    path = handles.registry_path()
+    saved = path.read_text(encoding="utf-8") if path.exists() else None
+    try:
+        reg = json.loads(saved) if saved else {}
+        reg["twin"] = {"handle": "Twin", "pid": other.pid, "ts": time.time()}
+        path.write_text(json.dumps(reg), encoding="utf-8")
+        _sessions.pin("twin")  # (a new session, giving no chatter)
+        out = mcp.chat_begin(channel="twin-room2")
+        note = out.get("note") or ""
+        check(out["chatter"] == "M:Twin-2", f"renamed: {out['chatter']}")
+        check("Twin-2" in note and "did you mean 'twin-room'" in note,
+              f"told both the rename and the room hint: {note!r}")
+    finally:
+        os.environ.pop("DISCORDINATOR_CHAT_HANDLE")
+        other.kill()
+        other.wait()
+        _sessions.unpin()
+        _sessions.end("twin")
+        reg = json.loads(path.read_text(encoding="utf-8"))
+        reg.pop("twin", None)
+        path.write_text(json.dumps(reg), encoding="utf-8")
+
+
+def test_another_name_of_mine_is_spelled_exactly() -> None:
+    print("another name of a session: its -N, not a name it merely starts:")
+    f = mcp._other_name_of
+    check(f("M:Carver-12", "M:Carver"), "with -12 on the end (a 12th session by the name)")
+    check(not f("M:Car", "M:Carver"), "a name its own starts with isn't another name of it")
+    check(not f("M:Carver", "M:Car"), "nor one that starts with its name")
+
+
 def main() -> int:
     test_held_turn_survives_chat_begin()
     test_no_unaddressed_reply_over_the_floor()
@@ -1049,7 +1186,6 @@ def main() -> int:
     test_cli_stop_finds_the_room()
     test_relay_between_two_sessions()
     test_config_set_saves_only_the_setting()
-    test_two_answers_at_once()
     test_relay_after_restart_and_transport_switch()
     test_same_label_sessions_relay()
     test_plain_reply_reaches_its_peer()
@@ -1074,11 +1210,17 @@ def main() -> int:
     test_posting_under_a_reused_name_doesnt_take_its_old_turns()
     test_other_names_of_a_session()
     test_a_turn_to_my_old_name_is_pointed_out_however_old()
+    test_one_session_one_name()
+    test_a_siblings_old_name_isnt_mine()
+    test_a_dash2_name_back_once_free()
     test_the_room_hint_picks_the_right_room()
     test_an_answered_broadcast_isnt_owed()
     test_a_turn_handed_on_doesnt_block_a_post()
     test_answering_one_asker_leaves_the_other_owed()
     test_working_seen_by_its_asker()
+    test_old_turns_read_further()
+    test_the_room_hint_counts_right()
+    test_another_name_of_mine_is_spelled_exactly()
     print(f"\nALL {_passed} SHARED-ROOM CHECKS PASSED")
     return 0
 

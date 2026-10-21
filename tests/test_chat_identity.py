@@ -37,6 +37,10 @@ os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full na
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _sessions  # noqa: E402
+
+_sessions.install(mcp)  # each chatter a session of its own
 from discordinator import chat, cli  # noqa: E402
 from discordinator.config import ConfigError  # noqa: E402
 from discordinator.local_client import LocalClient  # noqa: E402
@@ -259,6 +263,42 @@ def test_long_work_answers_its_asker() -> None:
     check(out.get("to") == "M:Ask", f"its answer goes to the asker: {out.get('to')}")
 
 
+def test_a_resumed_session_isnt_handed_an_old_turn() -> None:
+    print("past 4 hours, a session started later under the name gets a note, not the turn:")
+    c, room = LocalClient(), "resumed-later"
+    try:
+        _sessions.pin("old-busy")
+        mcp.chat_begin(chatter="Busy2", channel=room)
+        _sessions.pin("asker2")
+        mcp.chat_begin(chatter="Asker2", channel=room)
+        mcp.chat_say(text="please deploy it", chatter="Asker2", channel=room, to="M:Busy2",
+                     wait=False)
+        _age(c, room, [300])
+        _sessions.pin("old-busy")
+        check(mcp.chat_status(chatter="Busy2", channel=room)["your_turn"],
+              "the session that was in the chat is still owed it")
+        _sessions.end("old-busy")
+        _sessions.pin("new-busy")
+        b = mcp.chat_begin(chatter="Busy2", channel=room)
+        check(not b["recovered_pending_turn"], f"a resumed session isn't handed it: {b}")
+        check("please deploy it" in (b.get("note") or "") and "M:Asker2" in b["note"],
+              f"but told of it, with whom it's from: {b.get('note')!r}")
+        st = mcp.chat_status(chatter="Busy2", channel=room)
+        check(not st["your_turn"] and "please deploy it" in (st.get("note") or ""),
+              f"chat_status: the same: {st}")
+        got = mcp.chat_await(chatter="Busy2", channel=room, timeout=0.3, poll=0.02, nudge_after=0)
+        check(got.get("timed_out") and "please deploy it" in (got.get("handle_note") or ""),
+              f"chat_await: it waits, and says so: {got}")
+        out = mcp.chat_say(text="deployed", chatter="Busy2", channel=room, to="M:Asker2",
+                           wait=False)
+        check(out.get("posted", True) and not out.get("error"), f"it can answer: {out}")
+        st = mcp.chat_status(chatter="Busy2", channel=room)
+        check("please deploy it" not in (st.get("note") or ""), f"and once answered, no note: {st}")
+    finally:
+        _sessions.unpin()
+        _sessions.switch("")
+
+
 def main() -> int:
     test_case_insensitive_handles()
     test_await_skips_own_message_any_case()
@@ -271,6 +311,7 @@ def main() -> int:
     test_configured_handle()
     test_footer_label()
     test_a_turn_still_owed_after_hours()
+    test_a_resumed_session_isnt_handed_an_old_turn()
     test_long_work_answers_its_asker()
     print(f"\nALL {_passed} CHAT-IDENTITY CHECKS PASSED")
     return 0

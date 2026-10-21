@@ -300,6 +300,20 @@ def full_names_used() -> list[str]:
     return list(_full_used)
 
 
+def names_of_others() -> set[str]:
+    """The full names (keys) the other sessions running on this machine have
+    gone by: a turn to one of them is that session's, never this one's."""
+    now, mine = time.time(), session_key()
+    out: set[str] = set()
+    for key, entry in _load(sessions_path()).items():
+        if key == mine or not _session_alive(key, now, entry):
+            continue
+        full = entry.get("full")
+        out.update(chat.handle_key(h) for h in (full if isinstance(full, list) else [])
+                   if isinstance(h, str))
+    return out - {chat.handle_key(h) for h in _full_used}
+
+
 def renamed_away(full: Optional[str]) -> Optional[list[tuple[float, float]]]:
     """For a session renamed with its machine (`config set-label`): the times
     (unix, start to end) this machine went by another name than ``full``'s.
@@ -569,6 +583,11 @@ def _rekeyed(reg: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def held_by_another(handle: str) -> bool:
+    """Does another live session hold ``handle``?"""
+    return _taken(_load(registry_path()), handle, os.getpid(), time.time())
+
+
 def _taken(reg: dict[str, Any], handle: str, me: int, now: float) -> bool:
     return any(_held_by_other(e, me, now) for e in _claims_of(reg, handle))
 
@@ -618,11 +637,20 @@ def _machine() -> str:
     return config.machine_name(config.load())
 
 
+def _mine(entry: Any, me: int) -> bool:
+    """Is this claim this session's (this server's)? One process can host two
+    sessions only by each having its own session key (as the tests do)."""
+    return (isinstance(entry, dict) and entry.get("pid") == me
+            and (not entry.get("session") or entry.get("session") == session_key()))
+
+
 def _held_by_other(entry: Any, me: int, now: float) -> bool:
-    if not isinstance(entry, dict):
+    if not isinstance(entry, dict) or _mine(entry, me):
         return False
     pid = entry.get("pid")
-    if pid == me or not pid_alive(pid):
+    if pid == me:
+        return True  # another session hosted by this process
+    if not pid_alive(pid):
         return False
     started = entry.get("started")
     if entry.get("session") and entry.get("session") == session_key():
@@ -672,26 +700,17 @@ def claim(desired: str) -> str:
         if chat.handle_key(handle) not in _since:
             # Since when this session has had the name: its own earlier claim
             # (or its previous server's, still winding down), else now.
-            same = isinstance(prev, dict) and (prev.get("pid") == me or (
+            same = isinstance(prev, dict) and (_mine(prev, me) or (
                 prev.get("session") and prev.get("session") == session_key()))
             t = prev.get("since") if same else None
             _since[chat.handle_key(handle)] = float(t) if isinstance(t, (int, float)) else now
-        # Prune dead/expired claims while we hold the lock - and, taking a role
-        # of a project, the plain project name this session went by before (or,
-        # taking any name, the placeholder it went by with none): it would block
-        # the next session that wants it and look like a session still running
-        # under it.
-        bare = _resolved.get(chat.handle_key(handle.split("/", 1)[0])) if "/" in handle else None
-        if bare is None and not config.is_default_chat_name(handle):
-            bare = _resolved.get(chat.handle_key(config.DEFAULT_CHAT_NAME))
-        dropped = _key(bare) if bare and "/" not in bare else None
-        # (Its own claims under another machine name are from before the
-        # machine was renamed: it goes by none of them now.)
-        here = chat.handle_key(_machine())
+        # Prune dead/expired claims while we hold the lock - and every other
+        # name this session held: a session goes by one name at a time, and a
+        # name it left would block the next session that wants it and look
+        # like a session still running under it.
         reg = {k: v for k, v in reg.items()
-               if isinstance(v, dict) and (
-                   k != dropped and chat.handle_key(_recorded_machine(v) or here) == here
-                   if v.get("pid") == me else _held_by_other(v, me, now))}
+               if isinstance(v, dict) and (k == key if _mine(v, me)
+                                           else _held_by_other(v, me, now))}
         reg = _rekeyed(reg)
         reg[key] = {"handle": handle, "pid": me, "ts": now,
                     "since": _since[chat.handle_key(handle)],
@@ -818,7 +837,7 @@ def _live() -> list[tuple[str, Optional[float], Optional[str]]]:
     out: dict[str, tuple[str, Optional[float], Optional[str]]] = {}
     for v in reg.values():
         if (isinstance(v, dict) and isinstance(v.get("handle"), str)
-                and (v.get("pid") == me or _held_by_other(v, me, now))):
+                and (_mine(v, me) or _held_by_other(v, me, now))):
             t = v.get("since")
             out[_key(v["handle"], _machine_in(v))] = (
                 v["handle"], float(t) if isinstance(t, (int, float)) else None, _machine_in(v))
@@ -836,8 +855,7 @@ def release_all() -> None:
     try:
         with _AppendLock(path):
             reg = _load_to_write(path)
-            kept = {k: v for k, v in reg.items()
-                    if not (isinstance(v, dict) and v.get("pid") == me)}
+            kept = {k: v for k, v in reg.items() if not _mine(v, me)}
             if kept != reg:
                 config._atomic_write(path, json.dumps(kept, indent=2, sort_keys=True))
     except OSError:

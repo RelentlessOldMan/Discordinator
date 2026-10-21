@@ -708,8 +708,16 @@ def _chatter(chatter: Optional[str], cfg: dict[str, Any],
     before = _reader(cfg)
     role = _lost_role(chatter, cfg, channel)
     if role is None:
-        fresh = fresh and chatter not in (None, "") and not _chatting_as_other(chatter, cfg, channel)
-        me, note = handles.resolve(chatter, cfg, fresh=fresh)
+        asked = chatter if chatter not in (None, "") else handles._last_chatter
+        keep = fresh and _chatting_as_other(asked, cfg, channel)
+        me, note = handles.resolve(chatter, cfg, fresh=fresh and not keep)
+        if keep and note and not handles.held_by_another(
+                handles.compose(asked, cfg.get("chat_handle"))):
+            # (free now: it keeps the name its chat here is under)
+            note = (f"You are still '{config.full_name(cfg, me)}': your chat under that "
+                    "name in this room is still going, and its turns are sent to that name. "
+                    "A chat_begin after it ends takes back '"
+                    f"{config.full_name(cfg, handles.compose(asked, cfg.get('chat_handle')))}'.")
     else:
         me, note = handles.resolve(role, cfg)
         back = (f"'{config.full_name(cfg, me)}' has a chat going in this room that no "
@@ -802,7 +810,9 @@ def _own_earlier(full: str) -> None:
     chat.set_local_earlier(others, held)
     posts = [e for e in _all_my_posts() if e.get("mode") == "chat"]
     chat.set_own_posts((e.get("id") for e in posts), (
-        e.get("id") for e in posts if e.get("handle") and _other_name_of(e["handle"], full)))
+        # (a session goes by one name at a time: any other it posted under was
+        # its own then - never one it owes a turn)
+        e.get("id") for e in posts if e.get("handle") and not chat.same_handle(e["handle"], full)))
 
 
 def _other_name_of(name: str, full: str) -> bool:
@@ -837,7 +847,8 @@ def _unnamed(note: Optional[str], me: Optional[str]) -> Optional[str]:
     return " ".join(([note] if note else []) + warn)
 
 
-def _chatting_as_other(chatter: str, cfg: dict[str, Any], channel: Optional[str]) -> bool:
+def _chatting_as_other(chatter: Optional[str], cfg: dict[str, Any],
+                       channel: Optional[str]) -> bool:
     """Is this session in a chat in the room under the name it was given
     instead of the one it asks for (``CodeCarver/ui-2``)? Then chat_begin
     keeps that name rather than taking the asked-for one back now it's free:
@@ -975,11 +986,10 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any],
         if k in looks or (base and k.startswith(chat.handle_key(base) + "/")):
             found[chat.handle_key(p["to"])] = p["to"]
     out = []
+    theirs = handles.names_of_others()
     for h in found.values():
-        # (answering is the way only for an older or renamed name - see _lost_note)
-        if chat.handle_key(h) in answered and (chat.machine_of(h) is None
-                                               or _here(cfg, h) is None):
-            continue
+        if chat.handle_key(h) in answered or chat.handle_key(h) in theirs:
+            continue  # (answered since; or another session here went by it)
         st = chat.compute_state(client, channel_id, h)
         # (a turn I sent isn't one I owe: an older name of mine that an
         # unaddressed turn of mine would reach doesn't owe me an answer -
@@ -994,6 +1004,25 @@ def _lost_turns(client: Any, channel_id: str, me: str, cfg: dict[str, Any],
                                          "after": str(msgs[-1]["id"]) if msgs else ""}
                     for h in out})
     return out
+
+
+def _dead_note(st: dict[str, Any], me: str) -> Optional[str]:
+    """Point out the old turns to ``me`` that weren't handed over (compute_state's
+    _dead): sent over OWED_EXPIRY ago, to a session under this name that wasn't
+    this one (a resumed session is a new one), and never answered."""
+    dead = [t for t in st.get("_dead") or [] if str(t.get("id")) not in chat._own_self]
+    if not dead:
+        return None
+    hours = int(chat.OWED_EXPIRY.total_seconds() // 3600)
+    told = []
+    for t in dead:
+        text = t.get("text") or ""
+        text = text if len(text) <= 300 else text[:300] + "..."
+        told.append(f"from {t['from']}: \"{text}\"")
+    return (f"Over {hours} hours ago, before this session, a turn here was sent to '{me}' "
+            f"and never answered ({'; '.join(told)}). It isn't handed to you - this "
+            "session wasn't in that chat. If it's yours to answer, answer it with "
+            f"chat_say(to=\"{dead[0]['from']}\").")
 
 
 # The turn owed to each name _lost_turns last found: (its sender, its text).
@@ -1079,6 +1108,12 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
     initiator calls `chat_say`; the other
     calls `chat_await`. Do NOT have both call `chat_await` first — that deadlocks.
 
+    The result's `note`, when there is one, matters: your name was taken (you
+    are "-2"), a turn here went to a name of yours from before, an old turn
+    to your name from before this session was never answered (it isn't
+    handed to you), or - on a local room nobody has posted in - a room with
+    a close name has a chat going on ("did you mean").
+
     Args:
         chatter: optional ROLE for this session. Your handle is the project's
             fixed handle (DISCORDINATOR_CHAT_HANDLE, e.g. "CodeCarver"); a
@@ -1104,7 +1139,7 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
         # spoke again) is re-delivered by chat_await - recovery instead of a
         # silent stall; a long turn in progress arrives whole.
         cursor = chat.seed_cursor(client, channel_id, me)
-        empty = (_empty_room_note(client, channel_id, config.resolve_chat_channel(cfg, None))
+        empty = (_empty_room_note(client, channel_id, config.resolve_chat_channel(cfg, None), cfg)
                  if config.is_local(cfg, "chat") else None)
     chat.reset(channel_id, me, cursor, turn_cap)
     chat.note_room(channel_id, config.is_local(cfg, "chat"))
@@ -1121,9 +1156,12 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
     }
     others = st.get("_others_chatting", [])
     joined = any(chat.same_handle(p, me) for p in st.get("_posters", []))
+    dead = None if owed else _dead_note(st, me)
+    if dead:
+        note = f"{note} {dead}" if note else dead
     if lost:
         note = f"{note} {_lost_note(lost, cfg)}" if note else _lost_note(lost, cfg)
-    elif others and not owed and not joined:
+    elif others and not owed and not joined and not dead:
         busy = (f"Another chat is going on in this room ({', '.join(others)}). Address "
                 "your opener (to='<your peer>') so it reaches the right session.")
         note = f"{note} {busy}" if note else busy
@@ -1142,48 +1180,73 @@ def chat_begin(chatter: Optional[str] = None, channel: Optional[str] = None, tur
 ROOM_IN_USE = 24 * 3600  # seconds: a local room posted in this recently is "in use"
 
 
-def _empty_room_note(client: Client, channel_id: str, configured: str) -> Optional[str]:
+def _empty_room_note(client: Client, channel_id: str, configured: str,
+                     cfg: Optional[dict[str, Any]] = None) -> Optional[str]:
     """On local, a room nobody has posted in is a new, empty room: any name
     makes one. If it looks like a slip - a chat is going on in a room with a
-    close name - say which room it may have meant: a peer won't find a
-    session in the wrong room, and nothing else tells it. A new room with a
-    name of its own says nothing (it may well be meant)."""
+    close name (or a configured channel name close to it) - say which room it
+    may have meant: a peer won't find a session in the wrong room, and
+    nothing else tells it. A new room with a name of its own says nothing (it
+    may well be meant)."""
+    now = datetime.now(timezone.utc)
     try:
         if client.read_messages(channel_id, limit=1):
             return None
-        rooms = [r["id"] for r in client.list_guild_channels() if r["id"] != channel_id]
+        # (only rooms written to in the last day: an idle one has no chat going)
+        rooms = [r["id"] for r in client.list_guild_channels() if r["id"] != channel_id
+                 and now.timestamp() - client._room_path(r["id"]).stat().st_mtime <= ROOM_IN_USE]
     except Exception:  # noqa: BLE001 - only a hint; never fails chat_begin
         return None
-    now = datetime.now(timezone.utc)
+    names = {r: r for r in rooms}  # a name it may have meant -> its room
+    shown = {r: r for r in rooms}
+    for name, cid in ((cfg or {}).get("channels") or {}).items():
+        room = config.room_name(str(cid))
+        if room in shown and isinstance(name, str):
+            names.setdefault(config.room_name(name), room)
+            shown[room] = name
     used: list[tuple[datetime, str]] = []
-    for room in difflib.get_close_matches(channel_id, rooms, n=5, cutoff=0.8):
+    picked = {names[n] for n in difflib.get_close_matches(channel_id, list(names), n=5, cutoff=0.8)}
+    for room in picked:
         try:
-            path = client._room_path(room)
-            if now.timestamp() - path.stat().st_mtime > ROOM_IN_USE:
-                continue  # (not written to in a day: nothing going on)
-            # A chat going on (not a relay mailbox, nor a chat that ended):
-            # its latest chat turn is recent and doesn't end it.
-            for m in (simplify_message(x) for x in client.read_messages(room, limit=100)):
-                p = chat.parse_msg(m)
-                if p is None:
-                    if not m.get("bot") and chat.is_human_stop(m.get("content") or ""):
-                        break
-                    continue
-                ts = chat._parse_ts(m.get("timestamp"))
-                if (p["status"] not in chat.TERMINAL_STATUSES and ts is not None
-                        and (now - ts).total_seconds() <= ROOM_IN_USE):
-                    used.append((ts, room))
-                break
+            ts = _chat_going_on(client, room, now)
         except Exception:  # noqa: BLE001 - a room it can't read isn't a hint
             continue
+        if ts is not None:
+            used.append((ts, room))
     if not used:
         return None
-    pick = max(used)[1]
+    room = max(used)[1]
+    pick = shown[room]
     how = (f"pass channel='{pick}'" + (", or leave channel out (it's the configured chat room)"
-                                       if pick == configured else ""))
+                                       if room == config.room_name(str(configured)) else ""))
     return (f"Nobody has chatted in local room '{channel_id}' yet - did you mean "
             f"'{pick}', where a chat is going on? A peer is only reached in the room "
             f"it's in: {how}.")
+
+
+def _chat_going_on(client: Client, room: str, now: datetime) -> Optional[datetime]:
+    """When the latest turn of a chat still going on in ``room`` was (one that
+    hasn't ended, with a turn in the last day), or None: not a relay mailbox,
+    nor a chat that ended - another may be going on beside it. (Local rooms:
+    read once, newest first.)"""
+    recs = sorted(client._read_all(room), key=lambda r: int(r["id"]), reverse=True)
+    closed: set[str] = set()  # whose chat ended after the turns still to come
+    for m in (simplify_message(x) for x in recs):
+        ts = chat._parse_ts(m.get("timestamp"))
+        if ts is not None and (now - ts).total_seconds() > ROOM_IN_USE:
+            return None  # (nothing in the last day is going on)
+        p = chat.parse_msg(m)
+        if p is None:
+            if not m.get("bot") and chat.is_human_stop(m.get("content") or ""):
+                return None  # (a human stop ends every chat in the room)
+            continue
+        who = chat.handle_key(p["participant"])
+        to = None if not p["to"] or chat._is_broadcast(p["to"]) else chat.handle_key(p["to"])
+        if p["status"] in chat.TERMINAL_STATUSES:
+            closed.update(k for k in (who, to) if k)
+        elif who not in closed and ts is not None:
+            return ts
+    return None
 
 
 @_tool()
@@ -1708,7 +1771,11 @@ def chat_await(
                                  nudge_after=nudge_after, from_whom=from_whom)
         # Waiting in vain because the turn went to this session's old name?
         lost = _lost_turns(client, channel_id, me, cfg) if result.get("timed_out") else []
+        dead = (_dead_note(chat.compute_state(client, channel_id, me), me)
+                if result.get("timed_out") and not result.get("ended") else None)
     result["next"] = chat.next_step(result)
+    if dead:
+        handle_note = f"{handle_note} {dead}" if handle_note else dead
     if lost:
         handle_note = f"{handle_note} {_lost_note(lost, cfg)}" if handle_note else _lost_note(lost, cfg)
         result["next"] = _lost_next(lost, cfg)
@@ -1782,6 +1849,9 @@ def chat_status(chatter: Optional[str] = None, channel: Optional[str] = None) ->
                           "restart. Your next chat call takes that name back.")
     elif lost:
         public["note"] = (f"{public['note']} " if public.get("note") else "") + _lost_note(lost, cfg)
+    dead = _dead_note(st, me) if me and not st.get("your_turn") else None
+    if dead:
+        public["note"] = (f"{public['note']} " if public.get("note") else "") + dead
     note = _unnamed(public.get("note"), me)
     if note:
         public["note"] = note

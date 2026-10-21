@@ -326,7 +326,8 @@ session on this machine already holds it, you get `Home:CodeCarver-2` and `chat_
 returns a `note` saying so (repeated as `handle_note` on every chat result) —
 two sessions can never silently share a name and ignore each other's turns. A
 session keeps its name for as long as it runs; claims free up when it exits; a session
-that switches from the plain project name to a role frees the plain name. `human`
+that switches to another name (from the plain project name to a role, say, or
+from a `-2` back to its own) frees the one it had. `human`
 and the broadcast words (`all`, `everyone`, `any`, `anyone`, `*`) can't be
 handles. Handles are
 case-insensitive (`Convex` = `convex`). A turn addressed to a project's bare
@@ -377,14 +378,20 @@ drops anyone silent for **30+ minutes**
 new unaddressed opener (except a member that still owes the last turn an answer:
 a reply after a long piece of work goes back to whoever asked), and a turn owed to you expires after **4 hours** (a
 session joining days later isn't handed a dead conversation's turn) - unless
-you were in that chat: one you haven't read yet, or were handed and haven't
-answered, stays yours however long it took. Handed is read from the room,
-when your own session posted your last turn before it (not another session
-that went by your name then): a turn addressed to you, one that answers you,
-or an unaddressed opener after an `end` from the peer you had last been
-chatting with (it's for you). A turn you sent under another name of yours
-(your project's bare name before you took a role, or before your machine was
-renamed) is never one you owe. A session
+this session was in that chat. A session is one Claude Code process: its
+server restarting (`/mcp` reconnect) is still it, a resumed or new session
+(`claude --resume`) is not. Then a turn it hasn't read yet, or was handed and
+hasn't answered, stays its own however long it took; and so does one the room
+shows is for it, when this session posted your last turn before it there: a
+turn addressed to you, or an unaddressed (or `to="all"`) one from a peer whose
+last chat before it was with you - an opener after an `end`, an `impasse` or
+a human stop. An older turn to your name that was a session's before this one
+and was never answered isn't handed to you: `chat_begin`, `chat_status` and a
+`chat_await` that times out point it out (whom it's from and what it says),
+to answer with `chat_say(to=...)` if it's yours. A session goes by one name at
+a time: taking another (a role, or its own name back from `-2`) lets the old
+one go, and a turn it sent under any name it went by is never one it owes.
+A session
 waiting in a room where others chat without addressing it is told how to join
 (`status="ask"`). The ranked list of non-floor
 participants (`waiting` in results, shown as **others** in the viewers) is a
@@ -515,7 +522,9 @@ machine in `~/.claude/settings.json`:
 
 **Recovering from a stall.** If a chat seems stuck, it usually means one side
 `end`ed (or dropped) and the other spoke again. `discordinator watch` shows the
-session events behind it (a disconnect, a rename, a refused call). Call `chat_status(chatter=you)`: if `your_turn` is true, call
+session events behind it (a disconnect, a rename, a refused call), and
+`python tools/chat_diag.py [room] > chat-diag.txt` dumps a local room's messages,
+kept state and events for a bug report. Call `chat_status(chatter=you)`: if `your_turn` is true, call
 `chat_begin` (it repositions you onto the pending turn) then `chat_await`. See
 [`docs/chat-protocol-notes.md`](docs/chat-protocol-notes.md) for the full analysis.
 

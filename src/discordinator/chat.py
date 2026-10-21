@@ -242,10 +242,9 @@ _own_self: set[str] = set()
 
 
 def set_own_posts(ids: Any, other_names: Any = ()) -> None:
-    _own_posts.clear()
-    _own_posts.update(str(i) for i in ids)
-    _own_self.clear()
-    _own_self.update(str(i) for i in other_names)
+    # (new sets swapped in whole: a reader never sees them half filled)
+    global _own_posts, _own_self
+    _own_posts, _own_self = {str(i) for i in ids}, {str(i) for i in other_names}
 
 
 def set_own_earlier(owner: str, ids: Any, names: Any = (), peers: Any = ()) -> None:
@@ -712,7 +711,7 @@ def reset(channel_id: str, me: str, cursor: str, cap: int) -> None:
     they need.)"""
     with config.update_state() as state:
         room = state.setdefault("chat", {}).setdefault(channel_id, {})
-        room[handle_key(me)] = {"cursor": cursor, "turns": 0, "cap": cap}
+        room[handle_key(me)] = {"cursor": cursor, "turns": 0, "cap": cap, "by": _session()}
 
 
 def get_cursor(channel_id: str, me: str) -> Optional[str]:
@@ -721,7 +720,8 @@ def get_cursor(channel_id: str, me: str) -> Optional[str]:
 
 def set_cursor(channel_id: str, me: str, message_id: str) -> None:
     with config.update_state() as state:
-        _slot(state, channel_id, me)["cursor"] = str(message_id)
+        slot = _slot(state, channel_id, me)
+        slot["cursor"], slot["by"] = str(message_id), _session()
 
 
 def get_meta(channel_id: str, me: str) -> tuple[int, int]:
@@ -840,6 +840,21 @@ def _clear_wait(channel_id: str, me: str) -> None:
         slot.pop("nudged", None)
 
 
+def _session() -> str:
+    from . import handles  # (imports this module)
+    return handles.session_key()
+
+
+def _kept_here(channel_id: str, me: str) -> tuple[Optional[str], Optional[str]]:
+    """My read position and whom I reply to in the room - if this session
+    (this server, or its restart) kept them: a session started later under
+    the name (a resumed one, days on) wasn't in that chat. (None, None) if not."""
+    slot = _slot(config.load_state(), channel_id, me)
+    if slot.get("by") != _session():
+        return None, None
+    return slot.get("cursor"), slot.get("reply_to")
+
+
 def get_reply_to(channel_id: str, me: str) -> Optional[str]:
     """Who last handed me the turn - where an unaddressed reply of mine goes."""
     return _slot(config.load_state(), channel_id, me).get("reply_to")
@@ -849,7 +864,8 @@ def set_reply_to(channel_id: str, me: str, who: str) -> None:
     if handle_key(get_reply_to(channel_id, me)) == handle_key(who):
         return
     with config.update_state() as state:
-        _slot(state, channel_id, me)["reply_to"] = who
+        slot = _slot(state, channel_id, me)
+        slot["reply_to"], slot["by"] = who, _session()
 
 
 def seed_cursor(client: DiscordClient, channel_id: str, me: str) -> str:
@@ -1383,8 +1399,7 @@ def compute_state(
     """
     msgs, parsed_list = _room(client, channel_id, me, scan, upto)
     scope, room_others = _conversation(
-        msgs, parsed_list, me, *((get_cursor(channel_id, me), get_reply_to(channel_id, me))
-                                 if me is not None else ()))
+        msgs, parsed_list, me, *(_kept_here(channel_id, me) if me is not None else ()))
 
     # Scope to the CURRENT chat. A terminal turn (end/impasse) or a human stop
     # that is followed by more chat traffic closed the previous chat, so its
@@ -1582,13 +1597,14 @@ def compute_state(
             suggest_next = cands[0] if cands else None
 
     owed: list[dict[str, Any]] = []
+    dead: list[dict[str, Any]] = []
     if me_norm is not None and not ended:
         # (a turn I sent under another name of mine isn't one I owe - but
         # isn't one I'm owed, either: for anyone else it's a turn like any)
         own = same_handle(me_norm, _own_earlier_by[0])
         owed = _owed_turns(turns, me_norm, last_turn_index_by, _named_since(me_norm),
-                           get_cursor(channel_id, me_norm), get_reply_to(channel_id, me_norm),
-                           room, _own_posts, _own_self if own else set())
+                           *_kept_here(channel_id, me_norm),
+                           room, _own_posts, _own_self if own else set(), dead)
     # Whom my latest yield went to (they owe me the answer).
     asked = next((t["to"] for t in reversed(turns) if same_handle(t["from"], me_norm)
                   and t["status"] in YIELD_STATUSES), None) if me_norm is not None else None
@@ -1640,6 +1656,7 @@ def compute_state(
         state["_owed_turn"] = (
             {k: first[k] for k in ("from", "to", "status", "id", "ts")} if first else None)
         state["_owed_text"] = first["text"] if first else None
+        state["_dead"] = [{k: t[k] for k in ("from", "to", "id", "ts", "text")} for t in dead]
         state["_owed_predecessor"] = (
             _before(msgs, min(t["first"] for t in owed)) if owed else None)
     return state
@@ -1955,7 +1972,8 @@ def _owed_turns(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
                 handed_by: Optional[str] = None,
                 room: Sequence[dict[str, Any]] = (),
                 own: Optional[set[str]] = None,
-                own_self: set[str] = frozenset()) -> list[dict[str, Any]]:  # type: ignore[assignment]
+                own_self: set[str] = frozenset(),  # type: ignore[assignment]
+                dead: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
     """The turns owed to ``me``, oldest first: from each peer, its yield that
     targets me if it's still that peer's latest turn (it hasn't handed the
     turn on since) and I haven't answered it (see _answers). Worked out per
@@ -1977,7 +1995,8 @@ def _owed_turns(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
     sender to have posted before it in this chat, or, for its opener, the
     one its sender last chatted with (``room``: every turn in the room).
     A session that only goes by the name now (another went by it then)
-    wasn't in that chat."""
+    wasn't in that chat. A long-dead turn addressed to ``me`` by name and not
+    answered goes in ``dead`` (to be pointed out, not handed over)."""
     horizon = datetime.now(timezone.utc) - OWED_EXPIRY
 
     def answers_me(n: int, t: dict[str, Any]) -> bool:
@@ -2005,10 +2024,9 @@ def _owed_turns(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
         if not _targets(t["to"], me) or last_by.get(t["from"]) != t["i"]:
             continue
         ts = _parse_ts(t.get("ts"))
-        if (ts is not None and ts < horizon and not _after(t.get("id"), read_to)
-                and not (handed_by and same_handle(t["from"], handed_by))
-                and not answers_me(n, t)):
-            continue  # long dead
+        long_dead = (ts is not None and ts < horizon and not _after(t.get("id"), read_to)
+                     and not (handed_by and same_handle(t["from"], handed_by))
+                     and not answers_me(n, t))
         if (not_mine is not None and not _is_broadcast(t["to"]) and not_mine(ts)
                 # (renamed: one to its old name is still its own)
                 and not t.get("readdressed")):
@@ -2019,7 +2037,10 @@ def _owed_turns(turns: list[dict[str, Any]], me: str, last_by: dict[str, int],
                 continue
         elif any(same_handle(u["from"], me) and _answers(u, t) for u in later):
             continue
-        out.append(t)
+        if not long_dead:
+            out.append(t)
+        elif dead is not None and not _is_broadcast(t["to"]):
+            dead.append(t)
     return out
 
 

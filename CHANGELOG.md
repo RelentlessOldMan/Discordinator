@@ -10,7 +10,7 @@ entries below are the pre-1.0 development history.)
 
 ## [1.0.58] - 2026-10-21
 Chat: a turn handed to you is read from the room; did-you-mean for an empty local room; chat_diag tool
-- A turn owed to you is read from the room: an old turn is yours only when your own session asked it, and a turn you sent under another name of yours is never one you owe.
+- A turn over 4 hours old stays yours when you hadn't read it yet, were handed it, or the room shows it's for you (your own session posted your last turn before it there); a turn you sent under another name of yours is never one you owe.
 - A reply to a name your session used before is pointed out however old.
 - chat_begin on an empty local room asks 'did you mean' a room with a close name where a chat is going on.
 - tools/chat_diag.py: a read-only dump of a local chat room's state and session events, for debugging.

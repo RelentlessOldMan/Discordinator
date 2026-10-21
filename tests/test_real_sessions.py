@@ -228,6 +228,27 @@ def test_two_sessions_of_a_project_keep_their_own_names() -> None:
     run(go())
 
 
+def test_two_answers_at_once() -> None:
+    print("two sessions answering the same human at the same moment: one gets through:")
+
+    async def go():
+        a = await Session("sess-ra", handle="RaceA").start()
+        b = await Session("sess-rb", handle="RaceB").start()
+        for s in (a, b):
+            await s.call("chat_begin", channel="race")
+        LocalClient().post_human("race", "what do you both think?")
+        for s in (a, b):
+            await s.call("chat_await", channel="race", timeout=5, poll=0.1, nudge_after=0)
+        ra, rb = await asyncio.gather(
+            a.call("chat_say", text="A's view", channel="race", wait=False),
+            b.call("chat_say", text="B's view", channel="race", wait=False))
+        await b.stop()
+        await a.stop()
+        got = sorted("refused" if "error" in r else "posted" for r in (ra, rb))
+        check(got == ["posted", "refused"], f"one posts, one is refused: {ra} {rb}")
+    run(go())
+
+
 def test_bystander_post_is_nobodys_reply() -> None:
     print("a relay post into the chat room doesn't answer for anyone:")
 
@@ -434,6 +455,7 @@ def main() -> int:
     test_old_server_left_running_doesnt_take_the_name()
     test_disconnect_ends_a_wait_promptly()
     test_two_sessions_of_a_project_keep_their_own_names()
+    test_two_answers_at_once()
     test_bystander_post_is_nobodys_reply()
     test_errors_reach_the_model_over_stdio()
     test_old_turns_expire()

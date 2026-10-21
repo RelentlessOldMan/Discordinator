@@ -278,7 +278,7 @@ now drives real server processes over stdio.
 | The client disconnects mid-`chat_await` | The server exits at once, without reading the reply meant for its successor. |
 | A brand-new session (quit and resumed) whose role-name has a chat going | It takes the name back if exactly one unheld `<project>/<role>` is owed a turn or waiting on its own; otherwise `next` (not just a note) says how. |
 | An untagged bot post (relay note, CLI send) lands in the chat room | It's nobody's turn and wakes nobody. It used to be credited as the floor holder's reply, leaving the other side "waiting for a reply" it never sent. |
-| A conversation is dropped without `end` | After 30 quiet minutes it no longer blocks its members from hearing a new opener; a turn owed to a session expires after 4 hours. |
+| A conversation is dropped without `end` | After 30 quiet minutes it no longer blocks its members from hearing a new opener; a turn owed to a session expires after 4 hours, unless that same session was in the chat (a resumed session is told of it instead). |
 | Two sessions of one project relay | Each chatting session has its own read position (by handle), and a position never moves backwards. |
 | A peer proposes `wrap` / others chat without you | `next` says to confirm with `end` / to raise a hand with `ask`. |
 | Something goes wrong out of sight | `watch` shows session events from `~/.discordinator/events.jsonl`: connects, disconnects, vanished servers, joins, renames, failed calls with the reason. |

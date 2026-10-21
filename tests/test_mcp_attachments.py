@@ -31,6 +31,10 @@ os.environ["DISCORDINATOR_LABEL"] = "M"  # this machine's name, in every full na
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _sessions  # noqa: E402
+
+_sessions.install(mcp)  # each chatter a session of its own
 from discordinator import chat  # noqa: E402
 from discordinator.config import ConfigError  # noqa: E402
 from discordinator.discord_client import simplify_message  # noqa: E402

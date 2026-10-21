@@ -33,6 +33,10 @@ for _k in ("DISCORD_BOT_TOKEN", "DISCORDINATOR_CHAT_HANDLE", "DISCORDINATOR_CHAT
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _sessions  # noqa: E402
+
+_sessions.install(mcp)  # each chatter a session of its own
 from discordinator import chat, cli, config  # noqa: E402
 from discordinator.discord_client import DiscordError  # noqa: E402
 from discordinator.local_client import LocalClient, local_dir  # noqa: E402
@@ -181,9 +185,11 @@ def test_delete_own_messages() -> None:
         check(b["text"] == "the right question", "the reposted turn does")
         # (B is another session: its answer isn't one of this one's posts)
         chat.send_chat(LocalClient("b"), rc, b["to"], "over", "an answer", to=b["from"])
+        _sessions.switch("A")
         res = mcp.delete_messages(message_ids=out["message_ids"])
         check("B posted since" in res["note"], "deleting after a reply says B may have read it")
     finally:
+        _sessions.switch("")
         handles._SESSION_KEY = None
 
 
@@ -200,6 +206,7 @@ def test_deleted_turn_never_delivered() -> None:
         check(got["timed_out"] and "handle_note" not in got,
               f"{how}: {b}, waiting for {c}, sets {a}'s turn aside")
         if how == "delete":
+            _sessions.switch(a)  # (a's to delete)
             mcp.delete_messages(message_ids=out["message_ids"])
         elif how == "purge":
             mcp.purge_messages(channel=r, dry_run=False)
@@ -560,6 +567,7 @@ def test_sessions_sharing_a_label_see_each_other() -> None:
 def _new_server(session: str) -> None:
     """As if session ``session``'s MCP server (re)started: nothing in memory."""
     from discordinator import handles
+    _sessions.pin(session)
     handles.release_all()
     handles._resolved.clear()
     handles._since.clear()
@@ -580,6 +588,7 @@ def _end_sessions() -> None:
     handles._last_chatter = None
     handles._current = None
     handles._SESSION_KEY = None
+    _sessions.unpin()
 
 
 def test_restart_keeps_the_name() -> None:
