@@ -63,6 +63,10 @@ os.environ.update({
 sys.path.insert(0, str(ROOT / "src"))
 
 import discordinator.mcp_server as mcp  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _sessions  # noqa: E402
+
+_sessions.install(mcp)  # each chatter a session of its own
 from discordinator import client_factory, config  # noqa: E402
 from discordinator.discord_client import DiscordClient, DiscordError  # noqa: E402
 
@@ -204,6 +208,7 @@ def test_chat_set_aside_and_deleted() -> None:
     out = mcp.chat_say(text="a typo", chatter="gamma", to="delta", wait=False)
     got = _await("delta", 4, from_whom="eps")
     check(got["timed_out"], "delta, waiting for eps, sets gamma's turn aside")
+    _sessions.switch("gamma")  # (gamma's session deletes its own turn)
     mcp.delete_messages(message_ids=out["message_ids"])
     got = _await("delta", 4)
     check(not got["your_turn"], "deleted, it isn't handed to delta")
@@ -213,6 +218,7 @@ def test_chat_set_aside_and_deleted() -> None:
     got = _await("delta", 4)
     check(got["your_turn"] and got["text"] == "the fixed one", "and that one is handed over")
     mcp.chat_say(text="done", chatter="delta", status="end", wait=False)
+    _sessions.switch(None)  # (back to the session that gives no chatter)
 
 
 def test_attachment() -> None:
